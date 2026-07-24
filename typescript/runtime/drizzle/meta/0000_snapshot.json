@@ -1008,6 +1008,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "ordinal": {
+          "name": "ordinal",
+          "type": "bigserial",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1017,11 +1023,17 @@
         }
       },
       "indexes": {
-        "outbox_project_id_idx": {
-          "name": "outbox_project_id_idx",
+        "outbox_project_id_ordinal_idx": {
+          "name": "outbox_project_id_ordinal_idx",
           "columns": [
             {
               "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ordinal",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

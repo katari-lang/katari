@@ -110,6 +110,7 @@ CREATE TABLE "outbox" (
 	"seq" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"project_id" uuid NOT NULL,
 	"event" jsonb NOT NULL,
+	"ordinal" bigserial NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -242,7 +243,7 @@ CREATE INDEX "escalations_project_id_idx" ON "escalations" USING btree ("project
 CREATE INDEX "escalations_raiser_instance_id_idx" ON "escalations" USING btree ("raiser_instance_id");--> statement-breakpoint
 CREATE INDEX "instances_project_id_idx" ON "instances" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "instances_delegation_id_idx" ON "instances" USING btree ("delegation_id");--> statement-breakpoint
-CREATE INDEX "outbox_project_id_idx" ON "outbox" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "outbox_project_id_ordinal_idx" ON "outbox" USING btree ("project_id","ordinal");--> statement-breakpoint
 CREATE INDEX "run_events_run_id_seq_idx" ON "run_events" USING btree ("run_id","seq");--> statement-breakpoint
 CREATE INDEX "runs_project_id_idx" ON "runs" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");

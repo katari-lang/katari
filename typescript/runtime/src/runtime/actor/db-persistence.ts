@@ -450,13 +450,15 @@ class DrizzleRowStore implements RowStore {
   }
 
   async pendingOutbox(): ReturnType<RowStore["pendingOutbox"]> {
-    // In production order (routing recovers from the engine threads, so replay order only needs to be
-    // stable, not strictly causal).
+    // Order by `ordinal` (the monotonic bigserial), NOT `created_at`: every row of one turn's commit shares
+    // the transaction's `now()`, so `created_at` ties and could replay a batch's spilled events out of
+    // production order. Routing recovers from the engine threads, so this only needs a STABLE causal order —
+    // which the insertion-ordered ordinal is.
     const rows = await this.executor
       .select()
       .from(outbox)
       .where(eq(outbox.projectId, this.projectId))
-      .orderBy(asc(outbox.createdAt));
+      .orderBy(asc(outbox.ordinal));
     return rows.map((row) => ({ seq: row.seq as OutboxSeq, event: row.event }));
   }
 }

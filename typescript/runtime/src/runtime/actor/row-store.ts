@@ -147,7 +147,9 @@ export interface RowStore {
   blobs(): Promise<PersistedBlob[]>;
   /** The `kind` envelopes joined to their external-call extension rows. */
   externalCalls(kind: InstanceKind): Promise<StoredExternalCallJoin[]>;
-  /** The undrained outbox, in insertion order. */
+  /** The undrained outbox, in `ordinal` (monotonic insertion) order — the same replay sequence for both
+   *  backends (the DB `order by ordinal`, the twin's stamped counter), never `created_at` (which ties within
+   *  a commit). */
   pendingOutbox(): Promise<OutboxMessage[]>;
 }
 

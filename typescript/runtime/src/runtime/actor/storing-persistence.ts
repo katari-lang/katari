@@ -63,7 +63,12 @@ class MapRowStore implements RowStore {
   readonly escalations = new Map<EscalationId, PersistedEscalation>();
   readonly runs = new Map<InstanceId, StoredRun>();
   readonly audits: PersistedRunEscalationAudit[] = [];
-  readonly outbox = new Map<OutboxSeq, OutboxMessage>();
+  /** Each undrained outbox row tagged with the monotonic `ordinal` the DB assigns via its `bigserial`. A
+   *  `Map` already iterates in insertion order, but tagging + sorting on read makes the replay order the SAME
+   *  explicit concept production replays by — not an incidental Map property — so the twin cannot silently
+   *  diverge from `db-persistence`'s `order by ordinal`. */
+  readonly outbox = new Map<OutboxSeq, { ordinal: number; message: OutboxMessage }>();
+  private nextOutboxOrdinal = 0;
   readonly journal: ExternalEvent[] = [];
 
   async putInstance(row: PersistedInstanceEnvelope): Promise<void> {
@@ -224,7 +229,15 @@ class MapRowStore implements RowStore {
   }
 
   async insertOutbox(rows: OutboxMessage[]): Promise<void> {
-    for (const row of rows) this.outbox.set(row.seq, row);
+    for (const row of rows) this.storeOutboxRow(row);
+  }
+
+  /** Store one outbox row stamped with the next monotonic ordinal (the twin's stand-in for the DB
+   *  `bigserial`, monotonic across the store's whole life — a drained row's ordinal is never reused, exactly
+   *  as a sequence never rewinds). Shared by `insertOutbox` and the pre-crash `seedOutbox` test helper. */
+  storeOutboxRow(message: OutboxMessage): void {
+    this.outbox.set(message.seq, { ordinal: this.nextOutboxOrdinal, message });
+    this.nextOutboxOrdinal += 1;
   }
 
   async appendJournal(events: ExternalEvent[]): Promise<void> {
@@ -299,7 +312,11 @@ class MapRowStore implements RowStore {
   }
 
   async pendingOutbox(): Promise<OutboxMessage[]> {
-    return [...this.outbox.values()];
+    // Replay in `ordinal` order — the same monotonic insertion order the DB `bigserial` gives — so the twin
+    // and production agree on a batch's replay sequence.
+    return [...this.outbox.values()]
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map((row) => row.message);
   }
 }
 
@@ -370,9 +387,10 @@ export class StoringPersistence implements Persistence {
       .map((event) => unsealFromStorage(event));
   }
 
-  /** Test helper: seed the outbox directly, simulating an event produced just before a crash. */
+  /** Test helper: seed the outbox directly, simulating an event produced just before a crash. Goes through
+   *  the same ordinal-stamping insert as production, so a seeded row replays in order like any other. */
   seedOutbox(message: OutboxMessage): void {
-    this.store.outbox.set(message.seq, message);
+    this.store.storeOutboxRow(message);
   }
 
   /** Test helper: seed a live delegation row directly, simulating one the caller persisted just before a

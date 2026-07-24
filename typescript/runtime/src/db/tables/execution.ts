@@ -284,11 +284,20 @@ export const outbox = pgTable(
       .references(() => projects.id, { onDelete: "cascade" }),
     /** The external event payload — self-routing (`from` / `to`), so no separate issuer is stored. */
     event: jsonb("event").$type<ExternalEvent>().notNull(),
+    /** The monotonic replay order. `seq` is a RANDOM UUID (a correlation handle for the consume/produce pair,
+     *  not an order) and `created_at` TIES for every row of one turn's commit (all share the transaction's
+     *  `now()`), so neither can order a replay deterministically — a batch that spilled a `terminate` after a
+     *  `delegate` could otherwise come back reversed and terminate an instance before it was summoned. This
+     *  bigserial (the same pattern as `run_events.seq`) is assigned in insertion order within the commit, so
+     *  the drain / recovery replay events exactly as the turn produced them. */
+    ordinal: bigserial("ordinal", { mode: "number" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    // Recovery and per-turn drain both read the project's pending events in insertion order.
-    index("outbox_project_id_idx").on(table.projectId),
+    // Recovery and per-turn drain both read the project's pending events by `ordinal` (insertion order); the
+    // composite index serves that `where project_id = ? order by ordinal` directly (parity with the
+    // `(run_id, seq)` index on `run_events`).
+    index("outbox_project_id_ordinal_idx").on(table.projectId, table.ordinal),
   ],
 );
 
