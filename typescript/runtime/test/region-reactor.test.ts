@@ -658,6 +658,311 @@ function withRegistryAgents(ir: IRModule): IRModule {
   return ir;
 }
 
+// The CROSS-HANDLER CONCURRENCY shape: two DESKS, each its own sequential handler, around ONE nursery + watch.
+// An OUTER handle catches `desk_a`, its body is an INNER handle that catches `desk_b`, and the inner body forks
+// two workers (A first, then B) and `watch`es. `desk_a` bubbles PAST the inner handle (not its request) to the
+// outer; `desk_b` is caught at the inner — so the two desks are independent sequential handlers. Worker A's
+// handler blocks on the unhandled `gate_a`; worker B's answers at once. This proves a blocked desk does not
+// starve another under the white-hole watch (the OLD one-relay-at-a-time watch would stall B behind A).
+//
+//   agent main()              { region.provide(continuation) }
+//   agent continuation(value) { r = value.value; <outer handle (block 20)> }
+//   outer handle              catches desk_a -> handler_a (holds gate_a); body = <inner handle (block 24)>
+//   inner handle              catches desk_b -> handler_b (answers at once); body = fork A, fork B, watch(r)
+//   agent worker_a/worker_b   escalate desk_a/desk_b, then report "a-served"/"b-served"
+function concurrentDesksIr(): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+            { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.provide") },
+              argument: 102,
+              output: 103,
+            },
+            { kind: "exit", target: 0, value: 103 },
+          ],
+        },
+        parameters: { parameter: 100 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      4: {
+        block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      5: {
+        block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
+        parameters: { parameter: 50 },
+      },
+      // continuation: bind the nursery (61), then enter the OUTER handle (block 20).
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      7: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "getField", source: 60, field: "value", output: 61 },
+            { kind: "call", target: 20, output: 62 },
+            { kind: "exit", target: 6, value: 62 },
+          ],
+        },
+        parameters: { parameter: 60 },
+      },
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("desk_a"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+      10: {
+        block: { kind: "agent", body: 11, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      11: {
+        block: { kind: "request", name: createAgentName("desk_b"), input: 110 },
+        parameters: { parameter: 110 },
+      },
+      12: {
+        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      13: {
+        block: { kind: "external", key: "prelude.region.watch", input: 130, reactor: "region" },
+        parameters: { parameter: 130 },
+      },
+      14: {
+        block: { kind: "agent", body: 15, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      15: {
+        block: { kind: "request", name: createAgentName("gate_a"), input: 150 },
+        parameters: { parameter: 150 },
+      },
+      16: {
+        block: { kind: "agent", body: 17, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      17: {
+        block: { kind: "request", name: createAgentName("fiber_report"), input: 170 },
+        parameters: { parameter: 170 },
+      },
+      // worker_a: escalate desk_a, then report "a-served".
+      18: {
+        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      19: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 190 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("desk_a") },
+              argument: 190,
+              output: 191,
+            },
+            { kind: "loadLiteral", output: 192, value: { kind: "string", value: "a-served" } },
+            { kind: "makeRecord", entries: [["value", 192]], output: 193 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("fiber_report") },
+              argument: 193,
+              output: 194,
+            },
+            { kind: "exit", target: 18, value: 191 },
+          ],
+        },
+        parameters: { parameter: 180 },
+      },
+      // The OUTER handle: catches desk_a, its body is the INNER handle.
+      20: {
+        block: {
+          kind: "handle",
+          parallel: false,
+          initialStates: [],
+          body: 21,
+          handlers: [{ request: createAgentName("desk_a"), body: 22 }],
+          thenClause: null,
+        },
+        parameters: {},
+      },
+      21: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "call", target: 24, output: 210 },
+            { kind: "exit", target: 20, value: 210 },
+          ],
+        },
+        parameters: {},
+      },
+      // handler_a: HOLD on the unhandled gate_a (human latency), then answer desk_a.
+      22: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 220 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("gate_a") },
+              argument: 220,
+              output: 221,
+            },
+            { kind: "loadLiteral", output: 222, value: { kind: "string", value: "a-answered" } },
+            { kind: "continue", target: 20, value: 222, modifiers: [] },
+          ],
+        },
+        parameters: { parameter: 225 },
+      },
+      // The INNER handle: catches desk_b, its body forks the workers and watches.
+      24: {
+        block: {
+          kind: "handle",
+          parallel: false,
+          initialStates: [],
+          body: 25,
+          handlers: [{ request: createAgentName("desk_b"), body: 26 }],
+          thenClause: null,
+        },
+        parameters: {},
+      },
+      25: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadAgent", output: 250, name: createAgentName("worker_a") },
+            { kind: "loadLiteral", output: 251, value: { kind: "string", value: "x" } },
+            {
+              kind: "makeRecord",
+              entries: [
+                ["nursery", 61],
+                ["task", 250],
+                ["argument", 251],
+              ],
+              output: 252,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.fork") },
+              argument: 252,
+              output: 253,
+            },
+            { kind: "loadAgent", output: 254, name: createAgentName("worker_b") },
+            {
+              kind: "makeRecord",
+              entries: [
+                ["nursery", 61],
+                ["task", 254],
+                ["argument", 251],
+              ],
+              output: 255,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.fork") },
+              argument: 255,
+              output: 256,
+            },
+            { kind: "makeRecord", entries: [["nursery", 61]], output: 257 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.watch") },
+              argument: 257,
+              output: 258,
+            },
+            { kind: "exit", target: 24, value: 258 },
+          ],
+        },
+        parameters: {},
+      },
+      // handler_b: answer desk_b at once.
+      26: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadLiteral", output: 260, value: { kind: "string", value: "b-answered" } },
+            { kind: "continue", target: 24, value: 260, modifiers: [] },
+          ],
+        },
+        parameters: { parameter: 265 },
+      },
+      // worker_b: escalate desk_b, then report "b-served".
+      30: {
+        block: { kind: "agent", body: 31, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      31: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 310 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("desk_b") },
+              argument: 310,
+              output: 311,
+            },
+            { kind: "loadLiteral", output: 312, value: { kind: "string", value: "b-served" } },
+            { kind: "makeRecord", entries: [["value", 312]], output: 313 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("fiber_report") },
+              argument: 313,
+              output: 314,
+            },
+            { kind: "exit", target: 30, value: 311 },
+          ],
+        },
+        parameters: { parameter: 300 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("prelude.region.fork")]: { block: 4, private: false },
+      [createAgentName("prelude.region.watch")]: { block: 12, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("desk_a")]: { block: 8, private: false },
+      [createAgentName("desk_b")]: { block: 10, private: false },
+      [createAgentName("gate_a")]: { block: 14, private: false },
+      [createAgentName("fiber_report")]: { block: 16, private: false },
+      [createAgentName("worker_a")]: { block: 18, private: false },
+      [createAgentName("worker_b")]: { block: 30, private: false },
+    },
+    names: {},
+  };
+}
+
 describe("region reactor", () => {
   test("provide hands its continuation a nursery token carrying the scope identity, and settles with the continuation's result", async () => {
     // The continuation returns the nursery handle it received, so the run resolves with it — proving both
@@ -1192,10 +1497,11 @@ describe("region reactor", () => {
     await actor.answerEscalation(report.escalation, { kind: "null" });
   });
 
-  test("multiple fibers' escalations are re-emitted one at a time (FIFO, serial) and all serviced", async () => {
-    // Two workers with distinct arguments both escalate `on_message`; the sequential handle services them one
-    // at a time, answering each with its own message ("re:" + arg) so each worker returns a distinct value. Both
-    // outcomes buffer on the provide — proving every fiber's request wells up at the one watch and is serviced.
+  test("both fibers' escalations are re-emitted concurrently and a sequential handler services them all", async () => {
+    // Two workers with distinct arguments both escalate `on_message`; the watch re-emits BOTH at once (no
+    // serialization of its own), and the sequential handle re-serializes them at its own FIFO — servicing each
+    // in turn. Both outcomes buffer on the provide — proving every fiber's request wells up at the one watch and
+    // is serviced (the arrival-ORDER guarantee is pinned separately by the FIFO test below).
     const persistence = new StoringPersistence();
     const twoForks: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
@@ -1274,8 +1580,7 @@ describe("region reactor", () => {
     );
     actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // The serial watch re-emits one escalation at a time, so the two reports arrive one after the
-    // other; collect and answer each.
+    // The two workers are both serviced (order-agnostic here); collect and answer each report.
     const values = new Set<string>();
     for (let landed = 0; landed < 2; landed += 1) {
       const report = await waitUntil(() =>
@@ -1286,6 +1591,160 @@ describe("region reactor", () => {
       await actor.answerEscalation(report.escalation, { kind: "null" });
     }
     expect(values).toEqual(new Set(["alpha", "beta"]));
+  });
+
+  test("concurrently re-emitted escalations reach a sequential (var) handler in arrival (FIFO) order", async () => {
+    // The FIFO-into-a-var-handler guarantee (audit PAIN A6). Two workers escalate `on_message` carrying their
+    // own tag; the watch re-emits BOTH concurrently (no serialization of its own). The sequential handler
+    // `note`s each tag as its FIRST act and BLOCKS there until the test answers — so exactly one `note` is open
+    // at a time, and the order the notes surface IS the order the handler processed the escalations. Because
+    // "first" is forked before "second" (a blocking `fork` delegate spawns and runs its fiber before the next
+    // fork is issued), it is mailboxed first, so a correct FIFO handler processes ["first", "second"] — a racy
+    // re-emission (or a LIFO queue) would invert them. This is the test the audit demands: it pins arrival-order
+    // processing by a var handler, the property that lets a chat loop keep ONE var handler and stay in order.
+    const twoForks: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "first" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "second" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // A worker escalates `on_message` CARRYING its own tag as `{ tag }` (an agent's argument must be a record —
+    // a bare value is coerced to `{}` — so the tag rides a field), then exits.
+    const taggedWorker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "makeRecord", entries: [["tag", 111]], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 113,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 112 },
+    ];
+    // The sequential handler `note`s the whole `{ tag }` record and blocks on that unhandled request before
+    // answering — so its invocations are observable one at a time, in the order it dispatched them.
+    const notingHandler: Operation[] = [
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("note") },
+        argument: 160,
+        output: 169,
+      },
+      { kind: "loadLiteral", output: 161, value: { kind: "null" } },
+      { kind: "continue", target: 14, value: 161, modifiers: [] },
+    ];
+    const ir = watchIr({ handleBody: twoForks, worker: taggedWorker, handler: notingHandler });
+    // The `note` request agent the handler holds on (unhandled, so it surfaces at the run root).
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("note"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("note")] = { block: 17, private: false };
+
+    const actor = makeActor(ir);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Exactly one `note` is open at a time (the handler blocks on it); reading them in order IS the handler's
+    // processing order.
+    const order: string[] = [];
+    for (let landed = 0; landed < 2; landed += 1) {
+      const note = await waitUntil(() =>
+        actor.listOpenEscalations().find((open) => open.request === createAgentName("note")),
+      );
+      const tag = note.argument?.kind === "record" ? note.argument.fields.tag : undefined;
+      if (tag?.kind === "string") order.push(tag.value);
+      await actor.answerEscalation(note.escalation, { kind: "null" });
+    }
+    expect(order).toEqual(["first", "second"]);
+  });
+
+  test("two escalations to two DIFFERENT handlers are served concurrently — one blocking does not starve the other", async () => {
+    // The whole point of the change (audit §10 — a pending approval must not freeze the bus). Two DESKS, each
+    // its OWN sequential handler around one nursery: an OUTER handle catches `desk_a`, an INNER handle catches
+    // `desk_b`, and both wrap the single `watch`. Worker A (forked first) escalates `desk_a` and its handler
+    // BLOCKS on a human-latency `gate_a`; worker B escalates `desk_b` and its handler answers at once. Under the
+    // OLD one-relay-at-a-time watch, `desk_a` (mailboxed first) would hold the watch busy and `desk_b` would
+    // never be re-emitted — worker B would stall behind the blocked desk. Under the WHITE-HOLE watch, both are
+    // re-emitted concurrently, so worker B reports WHILE `desk_a`'s handler is still blocked. That coincidence —
+    // B served, gate_a still open — is the concurrency proof; the desks interleave.
+    const actor = makeActor(concurrentDesksIr());
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Worker B is served (its report surfaces) WHILE worker A's desk_a handler is still parked on gate_a.
+    const bReport = await waitUntil(() => {
+      const report = actor
+        .listOpenEscalations()
+        .find(
+          (open) =>
+            open.request === createAgentName("fiber_report") &&
+            open.argument?.kind === "record" &&
+            open.argument.fields.value?.kind === "string" &&
+            open.argument.fields.value.value === "b-served",
+        );
+      const blocked = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("gate_a"));
+      return report !== undefined && blocked !== undefined ? report : undefined;
+    });
+    // Let worker B finish, then release desk_a's handler; worker A then reports too — nothing was lost.
+    await actor.answerEscalation(bReport.escalation, { kind: "null" });
+    const gateA = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate_a")),
+    );
+    await actor.answerEscalation(gateA.escalation, { kind: "string", value: "go" });
+    const aReport = await waitUntil(() =>
+      actor
+        .listOpenEscalations()
+        .find(
+          (open) =>
+            open.request === createAgentName("fiber_report") &&
+            open.argument?.kind === "record" &&
+            open.argument.fields.value?.kind === "string" &&
+            open.argument.fields.value.value === "a-served",
+        ),
+    );
+    await actor.answerEscalation(aReport.escalation, { kind: "null" });
   });
 
   test("a handler installed around watch can fork a NEW fiber into the same nursery", async () => {
@@ -1503,19 +1962,21 @@ describe("region reactor", () => {
     await actor.answerEscalation(report.escalation, { kind: "null" });
   });
 
-  test("watch: a blob carried on a mailboxed escalation survives a restart and stays readable after re-emission", async () => {
+  test("watch: blobs carried on a held escalation and its queued sibling both survive a restart and stay readable", async () => {
     // The white hole in the FORWARD direction, across a restart. Two worker fibers each mint a blob and escalate
-    // it under `on_message`; the sequential watch re-emits the first (the handler HOLDS it on `gate`), so the
-    // second's escalation — carrying its blob — sits in the nursery's DURABLE mailbox. A restart reloads the
-    // provide's mailbox with the blob ref intact and its bytes survive in the byte store; after recovery the
-    // watch re-emits the held escalation and the handler reads its blob (`files.read_base64`) to answer. Both
-    // workers buffer their own read-back content, so a buffered "d29ybGQ=" (the mailboxed fiber's) proves the
-    // carried blob's owner (the provide instance) and bytes were restored intact — a gone blob would panic the
-    // post-restart read.
+    // it under `on_message`; the watch re-emits BOTH concurrently (no serialization of its own). The sequential
+    // handler catches the first and HOLDS it on `gate` (its blob riding an OUTSTANDING RELAY on the watch), and
+    // the second's escalation — carrying its blob — waits in the handler's own FIFO queue (durable handle-thread
+    // state, a GC root). Both durable homes survive a restart: a fresh actor over the same rows and byte store
+    // reloads the held relay and the queued sibling, and after recovery the handler reads each blob
+    // (`files.read_base64`) to answer. Both workers buffer their own read-back content, so a buffered "d29ybGQ="
+    // (the queued fiber's) proves its blob's ref, owner, and bytes were restored intact — a reclaimed blob would
+    // panic the post-restart read. (Under the OLD one-at-a-time watch the sibling sat in the reactor mailbox;
+    // now it sits in the receiving handler's queue — the durability moved with the serialization point.)
     const persistence = new StoringPersistence();
     const blobs = new InMemoryBlobStore();
-    // Fork two workers (distinct base64 payloads), then watch — the second fork's escalation mailboxes while the
-    // first holds the serial watch busy.
+    // Fork two workers (distinct base64 payloads), then watch — both escalations are re-emitted at once; the
+    // first is held at the handler on `gate`, the second queues in the sequential handler's FIFO.
     const twoForks: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
       { kind: "loadLiteral", output: 151, value: { kind: "string", value: "aGVsbG8=" } },
@@ -1594,8 +2055,8 @@ describe("region reactor", () => {
       },
       { kind: "exit", target: 10, value: 112 },
     ];
-    // The handler HOLDS on `gate` (keeping the watch busy so the sibling escalation stays mailboxed), then reads
-    // the carried blob out of the request record and answers with its content.
+    // The handler HOLDS on `gate` (so its invocation stays outstanding and the sibling waits in the handler's
+    // FIFO), then reads the carried blob out of the request record and answers with its content.
     const handler: Operation[] = [
       { kind: "makeRecord", entries: [], output: 166 },
       {
@@ -1629,47 +2090,18 @@ describe("region reactor", () => {
     const actorOne = makeActor(ir, persistence, blobs);
     actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // Drive to the suspend point: the handler holds the first worker on `gate`, and the second worker's blob is
-    // mailboxed on the provide.
+    // Drive to the suspend point: the handler holds the first worker on `gate`, and the second worker's
+    // escalation (with its blob) waits in the handler's FIFO.
     await waitUntil(() =>
       actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
     );
-    const mailboxedBefore = await eventually(async () => {
-      const provide = (await peekRegionProvides(persistence)).find(
-        (extension) => extension.mailbox.length > 0,
-      );
-      return provide?.mailbox;
-    });
-    const mailboxedAsk = mailboxedBefore[0]?.ask;
-    const carriedFile =
-      mailboxedAsk?.kind === "request" && mailboxedAsk.argument?.kind === "record"
-        ? mailboxedAsk.argument.fields.file
-        : undefined;
-    if (carriedFile?.kind !== "ref") throw new Error("the mailboxed escalation must carry a blob ref");
 
     // Restart: a fresh actor over the same rows and the same byte store.
     const actorTwo = makeActor(ir, persistence, blobs);
     await actorTwo.activate();
 
-    // The mailbox — and the blob it carries — reloaded intact, and the bytes survive in the byte store.
-    const mailboxedAfter = await eventually(async () => {
-      const provide = (await peekRegionProvides(persistence)).find(
-        (extension) => extension.mailbox.length > 0,
-      );
-      return provide?.mailbox;
-    });
-    const reloadedAsk = mailboxedAfter[0]?.ask;
-    const reloadedFile =
-      reloadedAsk?.kind === "request" && reloadedAsk.argument?.kind === "record"
-        ? reloadedAsk.argument.fields.file
-        : undefined;
-    if (reloadedFile?.kind !== "ref") throw new Error("the reloaded mailbox lost its blob ref");
-    expect(reloadedFile.blobId).toBe(carriedFile.blobId);
-    const bytes = await blobs.get(PROJECT, reloadedFile.blobId);
-    expect(Buffer.from(bytes).toString("utf8")).toBe("world");
-
-    // Answer the first gate (the handler answers the first worker and frees the serial watch), then the second
-    // gate the re-emitted mailboxed escalation raises. The second answer reads the RESTORED mailboxed blob.
+    // Answer the first gate (the handler answers the first worker and frees itself for the queued sibling),
+    // then the second gate the queued escalation raises. The second answer reads the RESTORED sibling blob.
     const gateOne = await waitUntil(() =>
       actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
     );
@@ -1679,8 +2111,8 @@ describe("region reactor", () => {
     );
     await actorTwo.answerEscalation(gateTwo.escalation, { kind: "null" });
 
-    // Both fibers settle with their own read-back content — the mailboxed "d29ybGQ=" proving its blob survived
-    // the restart and was readable after re-emission.
+    // Both fibers settle with their own read-back content — the queued sibling's "d29ybGQ=" proving its blob
+    // survived the restart in the handler's FIFO and was readable after re-emission.
     const values = new Set<string>();
     for (let landed = 0; landed < 2; landed += 1) {
       const report = await waitUntil(() =>
@@ -2095,13 +2527,15 @@ describe("region reactor", () => {
     await expect(result).resolves.toEqual({ kind: "string", value: "done" });
   });
 
-  test("fiber names and a pending synthetic crashed entry survive a restart", async () => {
-    // Pre-restart shape: the keeper worker's on_message is held open at the handler (a `gate` hold keeps
-    // the serial watch BUSY), and the handler has forked a `panicker` fiber whose crash therefore sits in
-    // the durable mailbox as a synthetic entry — while the keeper's name tag sits in the durable `names`
-    // map (the crashed fiber's tag was cleaned with its running entry). A fresh actor over the same rows
-    // must reload both, and the re-emitted crashed event must still be answerable (and swallowed) after
-    // the restart.
+  test("fiber names and a re-emitted crashed event survive a restart", async () => {
+    // Pre-restart shape: the keeper worker's on_message is held open at the handler (a `gate` hold), and the
+    // handler has forked a `panicker` fiber whose crash is re-emitted at the watch AT ONCE (the white hole
+    // holds nothing back). The handle knows only on_message, so the crashed event bubbles PAST it to the run
+    // root as an open escalation — the durable home a re-emitted crash now takes (the mailbox holds only the
+    // pre-registration backlog, so it is empty here). The keeper's name tag sits in the durable `names` map
+    // (the crashed fiber's tag was cleaned with its running entry). A fresh actor over the same rows must
+    // reload the keeper's name AND the outstanding crashed escalation, which must still be answerable (and
+    // swallowed) after the restart.
     const persistence = new StoringPersistence();
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
@@ -2176,43 +2610,46 @@ describe("region reactor", () => {
 
     const actorOne = makeActor(ir, persistence);
     actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // The keeper's handler is holding on `gate`, and the panicker's crash has been re-emitted at once and —
+    // unhandled by the handle — bubbled to the run root as the typed `crashed` event.
     await waitUntil(() =>
       actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
     );
-    // The crash is fully absorbed pre-restart: the panicker's bridge is gone (continuation + keeper
-    // remain), its synthetic entry is mailboxed, and only the keeper's name survives in the map.
+    const crashedBefore = await waitUntil(() =>
+      actorOne
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("prelude.region.crashed")),
+    );
+    const crashedArg = crashedBefore.argument;
+    if (crashedArg?.kind !== "record") throw new Error("crashed must carry its record");
+    expect(crashedArg.fields.name).toEqual({ kind: "string", value: "boom" });
+    // The crash is fully absorbed pre-restart: the panicker's bridge is gone (continuation + keeper remain),
+    // the mailbox is EMPTY (the crash was re-emitted, not held), and only the keeper's name survives in the map.
     const before = await eventually(async () => {
       const provide = (await peekRegionProvides(persistence))[0];
       return provide !== undefined &&
-        provide.mailbox.length === 1 &&
+        provide.mailbox.length === 0 &&
         provide.innerCalls.length === 2 &&
         Object.values(provide.names).length === 1
         ? provide
         : undefined;
     });
-    expect(before.mailbox[0]?.child).toBeNull();
-    const beforeAsk = before.mailbox[0]?.ask;
-    if (beforeAsk?.kind !== "request") throw new Error("the synthetic entry must be a request ask");
-    expect(beforeAsk.request).toBe(createAgentName("prelude.region.crashed"));
     expect(Object.values(before.names)).toEqual(["keeper"]);
 
-    // Restart: the durable registry facts reload — the keeper's tag and the un-emitted synthetic entry.
+    // Restart: the durable registry facts reload — the keeper's tag and the outstanding crashed escalation
+    // (its watch relay row restored, its root escalation rehydrated).
     const actorTwo = makeActor(ir, persistence);
     await actorTwo.activate();
     const after = await eventually(async () => {
       const provide = (await peekRegionProvides(persistence))[0];
-      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+      return provide !== undefined && Object.values(provide.names).length === 1 ? provide : undefined;
     });
-    expect(after.mailbox[0]?.child).toBeNull();
+    expect(after.mailbox).toHaveLength(0);
     expect(Object.values(after.names)).toEqual(["keeper"]);
 
-    // Release the gate: the keeper's on_message answers, freeing the watch to re-emit the crashed event.
-    // Nothing catches it (the handle knows only on_message), so it bubbles to the run root, where its
-    // answer is swallowed — and the keeper's post-restart report proves the nursery still serves.
-    const gate = await waitUntil(() =>
-      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
-    );
-    await actorTwo.answerEscalation(gate.escalation, { kind: "string", value: "resumed" });
+    // The crashed event survived the restart at the run root; answering it is swallowed (the fiber is long
+    // dead). Releasing the gate lets the keeper's on_message answer, and its post-restart report proves the
+    // nursery still serves.
     const crashed = await waitUntil(() =>
       actorTwo
         .listOpenEscalations()
@@ -2222,6 +2659,10 @@ describe("region reactor", () => {
     if (argument?.kind !== "record") throw new Error("crashed must carry its record");
     expect(argument.fields.name).toEqual({ kind: "string", value: "boom" });
     await actorTwo.answerEscalation(crashed.escalation, { kind: "null" });
+    const gate = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gate.escalation, { kind: "string", value: "resumed" });
     const report = await waitUntil(() =>
       actorTwo
         .listOpenEscalations()

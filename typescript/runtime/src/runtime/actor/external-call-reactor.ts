@@ -533,13 +533,6 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     return true;
   }
 
-  /** Whether `delegation` is currently RELAYING any escalation upward (a `relays` bridge entry) — the region
-   *  `watch` reads it to serialise its re-emissions: a held-open watch call carries at most one outstanding
-   *  relay at a time, so a non-empty relay set means "busy, awaiting the handler's answer". */
-  protected hasOpenRelay(delegation: DelegationId): boolean {
-    return (this.calls.get(delegation)?.relays.size ?? 0) > 0;
-  }
-
   // ─── the shared callee lifecycle ─────────────────────────────────────────────────────────────────
 
   /** A `delegate` opened a call: record the received-delegation edge (instance + summoner) in the base, then

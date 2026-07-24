@@ -60,6 +60,7 @@ library:
     - Katari.Cli.Common
     - Katari.Cli.Options
     - Katari.Cli.Output
+    - Katari.Cli.Escalation
     - Katari.Cli.Prompt
     - Katari.Cli.Pick
     - Katari.Cli.Templates
@@ -109,6 +110,7 @@ tests:
       - text
       - aeson
       - bytestring
+      - containers
     build-tools:
       - hspec-discover
 

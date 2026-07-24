@@ -96,7 +96,7 @@ external agent fork[effect Scope, effect E, A](
   @"An opaque name tag, echoed by `roster` and `crashed`; empty means unnamed." name: string ?= "",
 ) -> fiber[Scope] with Scope from "region"
 
-@"The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`, plus the runtime's own `crashed` event. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E | crashed`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E | crashed` here covers everything any fiber can surface. This is the ONE channel out of a fiber: a normal completion is silent (the settled `null` is discarded — a task that has something to say says it as its last act), a `cancel` is silent (the canceller knows), and a PANIC — the ending a task cannot report itself — arrives as the typed `crashed` event: the runtime tears the dead fiber down and reports the ending as data, so what a crash MEANS is your handler's decision, not an unwinding accident. Scope-gated (`with Scope`): callable only inside the opening `provide`."
+@"The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`, plus the runtime's own `crashed` event. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E | crashed`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E | crashed` here covers everything any fiber can surface. This is the ONE channel out of a fiber: a normal completion is silent (the settled `null` is discarded — a task that has something to say says it as its last act), a `cancel` is silent (the canceller knows), and a PANIC — the ending a task cannot report itself — arrives as the typed `crashed` event: the runtime tears the dead fiber down and reports the ending as data, so what a crash MEANS is your handler's decision, not an unwinding accident. Scope-gated (`with Scope`): callable only inside the opening `provide`. WATCH IS TRANSPARENT — IT IMPOSES NO SERIALIZATION OF ITS OWN. It re-emits EVERY fiber escalation CONCURRENTLY, the moment it arrives, so the ONLY serialization point is the RECEIVING handler: a sequential (stateful `var`) handler serializes its OWN invocations at its FIFO, in ARRIVAL order, while a `parallel handler` runs them concurrently. So two escalations to DIFFERENT handlers are ALWAYS concurrent (a handler blocked on one — say a human-latency approval — never starves another), and two to the SAME var handler serialize at that handler in arrival order (a chat loop keeps ONE var handler and stays in order for free). ONE watch is enough: it interleaves every fiber's stream by construction — do NOT run several to gain concurrency (the concurrency is already there; the desks are told apart by their handlers, not by extra watches)."
 external agent watch[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
 ) -> never with E | crashed | Scope from "region"
@@ -106,25 +106,6 @@ external agent cancel[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
   @"A fiber spawned in THIS nursery (its scope marker must match)." handle: fiber[Scope],
 ) -> null with Scope from "region"
-
-@"`watch`, WIDENED: run @width@ watches over one nursery, so up to @width@ fiber escalations are
-re-emitted (and answered) CONCURRENTLY — one `watch` relays strictly one escalation at a time,
-answer awaited, so a single watch serializes the fibers' requests end-to-end no matter how parallel
-the fibers or the receiving handler are. The parallelism this opens is only realised by a receiving
-`parallel handler`; a sequential (stateful) handler re-serializes at its own FIFO, which is exactly
-right when order is the point (a chat loop should keep ONE watch: with several, two messages' turns
-can interleave). Plain composition — `parallel for` over `watch` — priced as such; the parallel
-scaffolding is why `io` joins the row that a bare `watch` does not carry."
-agent watch_many[effect Scope, effect E](
-  @"The nursery whose fibers' escalations to re-emit." nursery: nursery[Scope, E],
-  @"How many escalations may be in flight at once." width: integer,
-) -> never with E | crashed | Scope | io {
-  forever {
-    parallel for (let _slot in array.range(start = 0, end = width)) {
-      watch[Scope, E](nursery = nursery)
-    }
-  }
-}
 
 // ── the nursery IS the registry: names, ids, roster, cancel-by-id, and the crashed event ─────────
 //

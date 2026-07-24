@@ -40,13 +40,16 @@
 // (its escalating delegation is a running fiber of a live scope), holds it in the nursery's durable MAILBOX,
 // and re-emits it under the WATCH call's own delegation (`relayAskUnder`), so it surfaces at the watch's
 // caller — the handler — rather than above the provide. The handler's answer descends the same bridge back to
-// the fiber (`onEscalateAck` reuses the base relay descent, keyed on the WATCH call). Re-emission is FIFO and
-// SERIAL: a held-open watch call carries one outstanding relay at a time; escalations that arrive while it is
-// busy accumulate in the mailbox and drain one-by-one as each answer returns. A nursery with NO watch flushes
-// its mailboxed escalations UP through the provide to the run root (`flushUp`). The two are told apart at
-// GLOBAL QUIESCENCE
-// (`onQuiesce`): a watch drains its scope's mailbox EAGERLY (on registration and after each answer), so a
-// mailbox still full when every run is blocked belongs to a genuinely watch-less nursery — the one point where
+// the fiber (the base relay descent, keyed on the WATCH call and the escalation id). Re-emission is CONCURRENT:
+// a watch is a transparent white hole with NO serialization of its own — it carries as many outstanding relays
+// as there are mailboxed escalations, re-emitting each the moment it arrives. The ONLY serialization point is
+// the RECEIVING handler: a sequential (`var`) handler re-serializes its own stream at its FIFO (in arrival
+// order), a `parallel handler` does not — so two escalations to DIFFERENT handlers are always concurrent (no
+// cross-handler starvation), two to the SAME var handler serialize at that handler in arrival order. A nursery
+// with NO watch flushes its mailboxed escalations UP through the provide to the run root (`flushUp`). The two
+// are told apart at GLOBAL QUIESCENCE
+// (`onQuiesce`): a watch drains its scope's mailbox EAGERLY (on registration and as each escalation arrives), so
+// a mailbox still full when every run is blocked belongs to a genuinely watch-less nursery — the one point where
 // "a watch that was going to register already has" holds, so flushing up cannot race a late watch. A cancelled
 // fiber's not-yet-emitted escalations are dropped from the mailbox so they are never re-emitted.
 // `watch` returns `never`: the call is HELD OPEN (it only ever raises, never settles), closing only when the
@@ -204,9 +207,11 @@ type RegionPayload =
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
        *  distinguishes a not-yet-started provide (re-dispatch it) from an active one (resume). */
       continuation: Value | null;
-      /** The fibers' escalations waiting to be re-emitted at a `watch` (or, watch-less, flushed up). FIFO,
-       *  drained one-by-one as each answer returns. Persisted on the provide's extension, so a restart restores
-       *  the "溜まっていた" requests a watch has not yet serviced. */
+      /** The fibers' escalations waiting for a `watch` to REGISTER (or, watch-less, to be flushed up). Once a
+       *  watch is live the mailbox drains WHOLE and at once (each escalation re-emitted the moment it arrives —
+       *  a watch imposes no serialization of its own), so this holds only the pre-registration backlog. FIFO,
+       *  which is what a downstream sequential handler needs. Persisted on the provide's extension, so a restart
+       *  restores the "溜まっていた" requests no watch had yet claimed. */
       mailbox: MailboxEntry[];
       /** The RUNNING fibers' name tags, by fiber id — the `fork(name)` echo `roster` and `crashed` report.
        *  Only named, still-running fibers have an entry (absence IS "unnamed"; `retireFiber` cleans it), and
@@ -276,8 +281,9 @@ export type RegionExtension =
   | {
       kind: "watch";
       scopeId: string | null;
-      /** The fiber escalations this held-open watch is currently RE-EMITTING (at most one at a time), bridged
-       *  so a restart re-parks the outstanding relay and the handler's answer still descends to the fiber. */
+      /** The fiber escalations this held-open watch is currently RE-EMITTING (possibly MANY concurrently — a
+       *  watch carries one relay per outstanding escalation), bridged so a restart re-parks every outstanding
+       *  relay and each handler's answer still descends to its own fiber. */
       relays: EscalationRelayRow[];
     }
   | { kind: "operation"; operation: string };
@@ -421,9 +427,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  A Set so registration order is FIFO-deterministic when a nursery has more than one watch. */
   private readonly watchesByScope = new Map<string, Set<DelegationId>>();
 
-  /** The reverse of `watchesByScope`: a watch call to the scope it watches — how `onEscalateAck` knows an
-   *  answered escalation was a watch re-emission (so it can pump the next mailbox entry) and how `onDropCall`
-   *  finds the scope to re-route a dropped watch's pending escalations. */
+  /** The reverse of `watchesByScope`: a watch call to the scope it watches — how `onDropCall` finds the scope
+   *  to re-route a dropped watch's not-yet-emitted escalations to a remaining watch (or leave for flush-up). */
   private readonly watchScope = new Map<DelegationId, string>();
 
   constructor(
@@ -1077,27 +1082,18 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     if ((this.watchesByScope.get(payload.scope)?.size ?? 0) > 0) this.pumpWatch(payload.scope);
   }
 
-  /** The answer to an escalation this reactor relayed reached it. The base descent (a relayed answer flows to
-   *  the child, an own-panic answer settles the call) runs FIRST; then, if it was a WATCH re-emission that the
-   *  base just retired, the watch is idle again, so pump its scope's next mailbox entry (FIFO, serial). */
-  protected override onEscalateAck(
-    event: Extract<ExternalEvent, { kind: "escalateAck" }>,
-    context: { raiser: InstanceId | undefined },
-  ): void {
-    const scope = this.watchScope.get(event.delegation);
-    const wasWatchRelay =
-      scope !== undefined && this.hasEscalationRelay(event.delegation, event.escalation);
-    super.onEscalateAck(event, context);
-    if (wasWatchRelay && scope !== undefined) this.schedule(() => this.pumpWatch(scope));
-  }
+  // A relayed answer needs no region-specific handling: the base `onEscalateAck` descends each answer to its
+  // own fiber, keyed on the escalation id, so many outstanding relays per watch are answered independently.
+  // There is no "pump the next mailbox entry" step — a watch re-emits EVERY mailboxed escalation the moment
+  // it arrives (see `pumpWatch`), so nothing eligible is ever left waiting for an answer to free the watch.
 
   /** At GLOBAL QUIESCENCE (every run of every reactor is blocked), flush up any nursery whose mailbox still
    *  holds escalations and has NO watch — the flush-up relay a watch-less region does. This is
    *  the one safe point to decide "watch-less": if a watch were going to register, the continuation would still
    *  be dispatching it (not quiescent), so a mailbox still full at quiescence belongs to a genuinely watch-less
    *  nursery. A WATCHED scope is NOT drained here — its watch drains it eagerly (`startWatch` on registration,
-   *  `onEscalateAck` after each answer) — so this never fights the white hole, and never spins (each flush
-   *  empties its mailbox, so the next quiescence finds nothing to do). */
+   *  and `onEscalate` re-emits each fresh escalation at once) — so this never fights the white hole, and never
+   *  spins (each flush empties its mailbox, so the next quiescence finds nothing to do). */
   override onQuiesce(): void {
     for (const [scope, state] of this.scopes) {
       if ((this.watchesByScope.get(scope)?.size ?? 0) > 0) continue; // watched — drained by the watch itself
@@ -1108,37 +1104,55 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     }
   }
 
-  /** Re-emit the nursery's mailboxed escalations at its watches — one per idle watch, in watch-registration
-   *  order (FIFO across watches) and mailbox order (FIFO within), each re-raised under the watch's own
-   *  delegation so it surfaces at the watch's caller (the handler). A busy watch (already re-emitting one,
-   *  awaiting its answer) is skipped; the leftover entries wait for `onEscalateAck` to pump again. */
+  /** Re-emit ALL of the nursery's mailboxed escalations at its watches, CONCURRENTLY — a watch is a
+   *  transparent WHITE HOLE that imposes NO serialization of its own, so every mailboxed escalation is
+   *  re-raised at once (each under a watch's own delegation, so it surfaces at the watch's caller — the
+   *  handler). Serialization, when it matters, is the RECEIVING handler's: a sequential (`var`) handler
+   *  re-serializes its own stream at its FIFO, a `parallel handler` does not — so two escalations to DIFFERENT
+   *  handlers are always concurrent (no cross-handler starvation), while two to the SAME var handler serialize
+   *  at that handler in arrival order. Entries are re-emitted in mailbox (arrival) order and — across several
+   *  watches of one nursery — round-robin, each escalation to exactly ONE watch, so a downstream sequential
+   *  handler sees them in arrival order (the FIFO-into-a-var-handler guarantee). A watch winding down (a racing
+   *  cancel) cannot take an entry; it re-routes to another watch, or — if none can take it — stays mailboxed,
+   *  in order, for the dropping watch's re-pump (`onDropCall`) or the quiescence flush-up. */
   private pumpWatch(scope: string): void {
     const scopeState = this.scopes.get(scope);
     const watches = this.watchesByScope.get(scope);
-    if (scopeState === undefined || watches === undefined) return;
+    if (scopeState === undefined || watches === undefined || watches.size === 0) return;
     const providePayload = this.payloadOf(scopeState.provide);
     if (providePayload === undefined || providePayload.kind !== "provide") return;
-    for (const watch of watches) {
-      if (providePayload.mailbox.length === 0) break;
-      if (this.hasOpenRelay(watch)) continue; // busy — one outstanding re-emission at a time
-      const entry = providePayload.mailbox.shift();
-      if (entry === undefined) break;
-      this.markCallDirty(scopeState.provide);
-      if (!this.emitEntry(watch, entry)) {
-        // The watch is winding down (a racing cancel): put the entry back and stop — its drop re-pumps the
-        // scope, re-routing what it could not take to another watch or up through the provide.
-        providePayload.mailbox.unshift(entry);
-        break;
+    if (providePayload.mailbox.length === 0) return;
+    const watchList = [...watches];
+    // Drain the WHOLE mailbox this turn: everything currently held is re-emitted, not one-then-await.
+    const draining = providePayload.mailbox;
+    providePayload.mailbox = [];
+    const undelivered: MailboxEntry[] = [];
+    let cursor = 0;
+    for (const entry of draining) {
+      let delivered = false;
+      // Round-robin the watches, retrying past any winding down, so each entry lands on exactly one live watch.
+      for (let attempt = 0; attempt < watchList.length; attempt += 1) {
+        const watch = watchList[(cursor + attempt) % watchList.length];
+        if (watch !== undefined && this.emitEntry(watch, entry)) {
+          cursor = (cursor + attempt + 1) % watchList.length;
+          delivered = true;
+          break;
+        }
       }
+      if (!delivered) undelivered.push(entry);
     }
+    // Anything no live watch could take (every watch winding down) stays mailboxed, in order, ahead of
+    // whatever arrived meanwhile — the dropping watch's re-pump or the quiescence flush-up handles it.
+    providePayload.mailbox = undelivered.concat(providePayload.mailbox);
+    this.markCallDirty(scopeState.provide);
   }
 
   /** Re-raise one mailbox entry under `under` (a watch, or — flushing up — the provide). An ordinary entry
    *  relays with its fiber's own leg, so the handler's answer descends to the fiber. A SYNTHETIC entry (a
    *  runtime-authored `crashed` event — its fiber is already dead) relays under FRESH ids that name no live
-   *  delegation: the relay row still serialises the watch and re-pumps on its ack, but when the answer
-   *  descends, the base's moot-answer guard (`issuedPeerOf` finds no peer for the fake child) swallows it —
-   *  the exact behaviour a cancelled fiber's in-flight answer already gets, reused rather than re-invented. */
+   *  delegation: the relay row bridges the answer like any other, but when it descends, the base's moot-answer
+   *  guard (`issuedPeerOf` finds no peer for the fake child) swallows it — the exact behaviour a cancelled
+   *  fiber's in-flight answer already gets, reused rather than re-invented. */
   private emitEntry(under: DelegationId, entry: MailboxEntry): boolean {
     return this.relayAskUnder(
       under,
@@ -1212,7 +1226,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  re-terminates the fiber if it is still running (a re-sent terminate is a no-op on an already-cancelling
    *  delegation), else succeeds at once (the fiber's teardown committed before the crash — it is gone). A
    *  reloaded WATCH re-registers as its scope's white hole SYNCHRONOUSLY (before any scheduled pump), its
-   *  outstanding relay restored from the durable row so the handler's answer still descends to the fiber; the
+   *  outstanding relays (possibly many) restored from the durable row so each handler's answer still descends to
+   *  its own fiber; the
    *  provide re-pumps its reloaded mailbox (the "溜まっていた" requests), routing them to the watch (or, watch-less,
    *  up). There is no external process to reconcile (like `webhook` / `time`). An `operation` call is
    *  at-most-once: it never really began (it fails immediately), so a reloaded one refuses again, never re-run. */
