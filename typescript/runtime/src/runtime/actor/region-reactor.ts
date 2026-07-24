@@ -30,7 +30,7 @@
 // of a fiber that has already SETTLED (its outcome buffered) or is otherwise gone is an idempotent no-op that
 // still succeeds, dropping any buffered outcome so the post-condition ("the fiber is unknown") holds
 // regardless of whether the fiber raced the cancel to completion. A forged / dead-scope handle names no live
-// nursery, so it PANICS — the same engine-invariant backstop as `join` and `fork`, which also automatically
+// nursery, so it PANICS — the same engine-invariant backstop as `fork` and `watch`, which also automatically
 // rejects a hostile-wire handle (its random scope matches no live nursery).
 //
 // `watch` is the nursery's WHITE HOLE: it re-emits the fibers' escalations into the enclosing program as the
@@ -182,7 +182,7 @@ type RegionPayload =
   | {
       kind: "cancel";
       /** The nursery scope and fiber id the cancel tears down, read from the fiber HANDLE (its own scope names
-       *  the nursery that spawned it, exactly like `join`). Either is `null` when the handle was malformed — an
+       *  the nursery that spawned it). Either is `null` when the handle was malformed — an
        *  uncancellable fiber, refused as a panic. Persisted, so a cancel interrupted before its teardown
        *  confirmed re-runs identically after a restart (a re-sent terminate is idempotent). */
       scope: string | null;
@@ -1192,7 +1192,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   }
 
   /** Fail a watch whose handle names no live nursery scope (malformed / forged, or a dead scope) as a panic —
-   *  the same engine-invariant backstop as an unjoinable / uncancellable fiber (the checker gates `watch` on a
+   *  the same engine-invariant backstop as an uncancellable fiber (the checker gates `watch` on a
    *  live `Scope`, so reaching this state is an invariant break; `watch`'s row declares no throw). */
   private panicUnwatchableScope(delegation: DelegationId, scope: string | null): void {
     this.complete({
@@ -1284,14 +1284,14 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** A cancel's transport half: confirm on a fresh turn (a provide has no external work of its own — its
    *  children, the continuation and later its fibers, drain through the base's cancel cascade; the scope closes
-   *  at drop). A waiting `join`, a waiting `cancel`, and an `operation` call likewise just confirm — each owns
+   *  at drop). A waiting `cancel` and an `operation` call likewise just confirm — each owns
    *  no work beyond an in-memory waiter, which its drop hook forgets. */
   protected abort(delegation: DelegationId): void {
     this.schedule(() => this.complete({ delegation, outcome: { kind: "cancelled" } }));
   }
 
-  /** A call resolved: close a provide's scope, forget a join's / cancel's in-memory waiter, or unregister a
-   *  watch and re-pump its scope (the drop hook covers every resolution path at once). A join / cancel that
+  /** A call resolved: close a provide's scope, forget a cancel's in-memory waiter, or unregister a
+   *  watch and re-pump its scope (the drop hook covers every resolution path at once). A cancel that
    *  resolved by SETTLING already dropped its own waiter; this catches one torn down while still waiting (its
    *  own cancel), so a later fiber settle finds nothing stale to resume. A dropped WATCH re-pumps its scope so
    *  anything it had not yet re-emitted re-routes to another watch, or stays buffered for the next one. */
@@ -1465,9 +1465,9 @@ function scopeOfNursery(nursery: Value | null): string | null {
   return scope !== undefined && scope.kind === "string" ? scope.value : null;
 }
 
-/** The scope + fiber id a fiber HANDLE carries (each `null` when the handle is malformed) — a `join` reads
+/** The scope + fiber id a fiber HANDLE carries (each `null` when the handle is malformed) — a `cancel` reads
  *  both from the handle, since the handle's own scope names the nursery that spawned the fiber (so the fiber is
- *  awaited where it lives, not in whatever `nursery` argument the call was handed). */
+ *  cancelled where it lives, not in whatever `nursery` argument the call was handed). */
 function fiberHandleOf(handle: Value | null): { scope: string | null; fiber: string | null } {
   if (handle === null || handle.kind !== "record") return { scope: null, fiber: null };
   const scope = handle.fields[NURSERY_SCOPE_FIELD];
@@ -1496,9 +1496,9 @@ function mintFiberId(): string {
   return `${FIBER_TOKEN_PREFIX}${randomBytes(12).toString("base64url")}`;
 }
 
-/** Mint the `fiber[Scope, T]` handle `fork` returns, as the completion's wire Json: an opaque record carrying
- *  its nursery's scope identity and its own fiber id, under the namespaced marker fields — so a `join` /
- *  `cancel` routes back to THIS fiber of THIS nursery. Plain string leaves and no reserved wire discriminator,
+/** Mint the `fiber[Scope]` handle `fork` returns, as the completion's wire Json: an opaque record carrying
+ *  its nursery's scope identity and its own fiber id, under the namespaced marker fields — so a `cancel`
+ *  routes back to THIS fiber of THIS nursery. Plain string leaves and no reserved wire discriminator,
  *  so the base's `jsonToValue` reconstructs it as a bare record with no ack-decoding seam of its own. */
 function mintFiberHandle(scope: string, fiber: string): Json {
   return { [NURSERY_SCOPE_FIELD]: scope, [NURSERY_FIBER_FIELD]: fiber };

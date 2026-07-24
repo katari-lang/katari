@@ -1,5 +1,11 @@
 # `forever { … }` — the unbounded loop
 
+> **Superseded in part.** `forever` shipped as a **true sibling of `for`** — with loop-head `var`
+> state and a `break` exit, exactly as *The form* and *Break, next, and loop-carried state* below
+> describe. The original design deliberately left both out; that call was reversed before release, so
+> the first two items under *What was deliberately not built* no longer hold (they are struck through
+> there). The other two — no `parallel forever`, no spin guard — still stand.
+
 2026-07-13. Katari had no way to loop without an end. `for` iterates a materialized array; recursion is a
 real cross-instance delegation. So the first daemons (the failure-recovery providers, same release — now
 `prelude.replay`) looped by self-recursion — and since the engine has no tail-call collapse (a caller
@@ -88,13 +94,17 @@ declarable. The vscode grammar mirrors the same lookahead.
 
 ## What was deliberately not built
 
-- **No `break` / `continue` keywords for `forever`.** A built-in exit would be a second escape mechanism
-  next to catch-and-break; the composed request is the one rule. (A jump to an *enclosing* `for` / handler
-  still works from inside the body — the loop adds no barrier — but that is those constructs' semantics,
-  not `forever`'s.)
-- **No `var` state on the loop head.** Evolving state lives in a surrounding handler (`use handler (var …)`),
-  the same ambient-state pattern applications already use; a second state mechanism on the loop would
-  duplicate it.
+- **~~No `break` / `continue` keywords for `forever`.~~ Superseded — `break` and `next` shipped.** The
+  original call was that a built-in exit would be a second escape mechanism next to catch-and-break, so the
+  composed request stayed the one rule. It was reversed by reusing `for`'s own two jumps *verbatim* — the
+  *same* machinery, not a second one, so a single `break`/`next` is now shared by `for` and `forever`. (A
+  jump to an *enclosing* `for` / handler still works from inside the body — the loop adds no barrier — but
+  that is those constructs' semantics, not `forever`'s.)
+- **~~No `var` state on the loop head.~~ Superseded — loop-head `var` shipped.** The original call was that
+  evolving state should live in a surrounding handler (`use handler (var …)`), so a second state mechanism on
+  the loop would duplicate it. It was reversed by carrying `for`'s loop-head `var` verbatim — again the *same*
+  machinery, not a new one — because a loop's carried state reads far more locally at its head than hoisted
+  into an ambient handler.
 - **No `parallel forever`.** An unbounded set of concurrent iterations is unbounded resource growth by
   construction — the exact thing this form exists to rule out.
 - **No iteration budget / spin guard.** A pure body loops forever, as in every language; guarding it would
