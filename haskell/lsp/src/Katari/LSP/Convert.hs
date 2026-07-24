@@ -108,9 +108,12 @@ sliceSpan lineVector sourceSpan =
         (Just firstText, Just lastText)
           | startLine == endLine ->
               Text.take (endColumn - startColumn) (Text.drop startColumn firstText)
-          | otherwise ->
+          | startLine < endLine ->
               let middle = Vector.toList (Vector.slice (startLine + 1) (endLine - startLine - 1) lineVector)
                   firstLine = Text.drop startColumn firstText
                   lastLine = Text.take endColumn lastText
                in Text.intercalate "\n" (firstLine : middle <> [lastLine])
+          -- An inverted span selects no text; without this guard it would ask
+          -- Vector.slice for a negative length and throw inside the server.
+          | otherwise -> ""
         _ -> ""
