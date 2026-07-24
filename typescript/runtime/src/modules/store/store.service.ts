@@ -12,6 +12,7 @@
 // file so deleted reads as `gone`, `prelude.files`' contract). The admin write path therefore accepts a
 // `$katari_ref` value directly (it references a library file the api root already owns).
 
+import { CALLABLE_KEYS } from "@katari-lang/types";
 import { and, eq, like } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { storeEntries } from "../../db/tables/projects.js";
@@ -74,6 +75,35 @@ function escapeLikePattern(prefix: string): string {
   return prefix.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
+/** A non-null, non-array JSON object (a bare record or a tagged variant on the wire). */
+function isWireObject(node: unknown): node is { [key: string]: unknown } {
+  return typeof node === "object" && node !== null && !Array.isArray(node);
+}
+
+/** The admin store write is an untrusted authoring boundary: a hand-written payload must not smuggle a
+ *  first-class callable (an agent / closure / tool reference), which `jsonToValue` would otherwise
+ *  reconstruct into a real, dispatchable target. A program's own stored callable arrives through the api
+ *  reactor's store responder (`storeRows.upsert`), never this path, so refusing the callable markers here —
+ *  anywhere in the tree, since one nested inside a record decodes just the same — closes the forgery seam
+ *  without narrowing any legitimate write. A `$katari_ref` file handle and a `$katari_constructor` data
+ *  value are inert and stay allowed. The marker set is the wire SoT's (`CALLABLE_KEYS`), never re-listed. */
+function rejectCallableWireMarkers(node: unknown): void {
+  if (isWireObject(node)) {
+    for (const callableKey of CALLABLE_KEYS) {
+      if (Object.hasOwn(node, callableKey)) {
+        throw new BadRequestError(
+          `a store value may not carry the callable marker "${callableKey}" — an agent / closure / tool reference cannot be authored over the admin API`,
+        );
+      }
+    }
+    for (const child of Object.values(node)) rejectCallableWireMarkers(child);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const element of node) rejectCallableWireMarkers(element);
+  }
+}
+
 export const storeService = {
   /** Every entry's key + timestamp (values withheld — an entry may be large or secret; `get` reads one). */
   async list(projectId: string) {
@@ -93,11 +123,13 @@ export const storeService = {
 
   /** Create / replace one entry from wire JSON. A `$katari_ref` is accepted: it references a library file
    *  the api root already owns (an upload, or a program's stored file), so writing the reference takes no
-   *  blob ownership. */
+   *  blob ownership. A callable marker (`$katari_agent` / `$katari_closure` / `$katari_tool`) is refused —
+   *  see `rejectCallableWireMarkers`. */
   async set(projectId: string, key: string, wireValue: unknown) {
     if (key === "" || key.startsWith("/") || key.endsWith("/") || key.includes("//")) {
       throw new BadRequestError("a store key is a /-separated path with non-empty segments");
     }
+    rejectCallableWireMarkers(wireValue);
     const value = jsonToValue(wireValue as never);
     await storeRows.upsert(projectId as ProjectId, key, value);
     return { key };

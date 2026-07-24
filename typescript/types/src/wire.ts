@@ -71,6 +71,14 @@ export function wireKindOf(hasKey: (key: string) => boolean): WireKind | undefin
   return undefined;
 }
 
+/** The reserved discriminator keys whose presence makes `jsonToValue` decode a JSON object into a
+ *  first-class CALLABLE value — an agent, a closure, or a tool reference (the three `WireKind`s a
+ *  `T(agent)` filter accepts). An untrusted authoring boundary that must not mint a dispatchable target
+ *  out of raw wire JSON (the admin store write) refuses any payload carrying one; a `$katari_ref` file
+ *  handle and a `$katari_constructor` data value are inert and stay allowed. Kept here, beside the keys
+ *  themselves, so a new callable variant is refused by that boundary from one place. */
+export const CALLABLE_KEYS: readonly string[] = [AGENT_KEY, CLOSURE_KEY, TOOL_KEY];
+
 // ─── the FFI delegate vocabulary ──────────────────────────────────────────────────────────────────
 //
 // The two payload shapes the runtime's `sidecar-protocol` and the FFI port's `protocol` must agree on
