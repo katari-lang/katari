@@ -12,7 +12,7 @@ import Katari.Data.Id (GenericId (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
-import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), renderSemanticType)
+import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), renderSemanticEffect, renderSemanticType)
 import Katari.Data.Variance (Variance (..))
 import Katari.Error (typeErrorCode)
 import Katari.Typechecker.Normalizer
@@ -172,6 +172,27 @@ spec = do
         )
         `shouldBe` effectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton substituteTargetGeneric (Set.singleton askName)}
 
+  describe "denormalizeEffect (lacks honesty)" $ do
+    -- `{...E lacks tagged} | tagged[integer]` and `E | tagged[integer]` are DIFFERENT types: the
+    -- first's tagged is exactly `tagged[integer]`, the second's is the join `tagged[integer] ⊔
+    -- tagged[unknown] = tagged[unknown]` (the tail could carry tagged at any type). A concrete entry
+    -- that is NOT at the extreme therefore no longer masks the tail's `lacks`, so the two render
+    -- differently instead of both printing `tagged[integer] | E`.
+    let taggedInteger = Map.singleton "T" (NormalizedKindedTypeType intType)
+        withLacks = effectRow EffectRow {request = Map.singleton taggedName taggedInteger, tails = Map.singleton effectGeneric (Set.singleton taggedName)}
+        withoutLacks = effectRow EffectRow {request = Map.singleton taggedName taggedInteger, tails = Map.singleton effectGeneric Set.empty}
+    it "renders {...E lacks R} | R[B] differently from E | R[B] when B is not the extreme" $
+      renderSemanticEffect (runNormalizer (denormalizeEffect withLacks))
+        `shouldNotBe` renderSemanticEffect (runNormalizer (denormalizeEffect withoutLacks))
+    it "still masks a lacks re-admitted by an entry at the extreme (the catch-all `{...E, R[unknown]}` shape)" $
+      -- tagged[unknown] IS the top instantiation, so it re-admits whatever tagged the tail carries; the
+      -- lacks stays masked and the row prints identically to a bare `E | tagged[unknown]`.
+      let taggedTop = Map.singleton "T" (NormalizedKindedTypeType unknownType)
+          maskedLacks = effectRow EffectRow {request = Map.singleton taggedName taggedTop, tails = Map.singleton effectGeneric (Set.singleton taggedName)}
+          noLacks = effectRow EffectRow {request = Map.singleton taggedName taggedTop, tails = Map.singleton effectGeneric Set.empty}
+       in renderSemanticEffect (runNormalizer (denormalizeEffect maskedLacks))
+            `shouldBe` renderSemanticEffect (runNormalizer (denormalizeEffect noLacks))
+
   describe "effect escapes (exits / continues)" $ do
     it "unions two exits with the same boundary covariantly" $
       runNormalizer (union (exitEffect (BoundaryId 0) intType) (exitEffect (BoundaryId 0) stringType))
@@ -313,6 +334,10 @@ askName = QualifiedName {moduleName = ModuleName "test", name = "ask"}
 logName :: QualifiedName
 logName = QualifiedName {moduleName = ModuleName "test", name = "log"}
 
+-- | A request @tagged[T]@ (covariant type parameter), used to build @{...E lacks tagged} | tagged[B]@.
+taggedName :: QualifiedName
+taggedName = QualifiedName {moduleName = ModuleName "test", name = "tagged"}
+
 -- | @{...E, ask}@ with @E@'s bound being @log@: request ask, tail E lacking ask.
 shadowingRow :: NormalizedEffect
 shadowingRow =
@@ -345,7 +370,8 @@ environment =
       requestEnvironment =
         Map.fromList
           [ (askName, requestInfoOf askName),
-            (logName, requestInfoOf logName)
+            (logName, requestInfoOf logName),
+            (taggedName, taggedRequestInfo)
           ],
       -- The in-scope generics for the test: two bounded parameters whose 'upperBound' is read by the
       -- bound-resolution checks ('boundedType' / 'effectBoundFor'). 'GenericParameterInformation' is the
@@ -374,6 +400,21 @@ environment =
       RequestInformation
         { name = qualifiedName,
           genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
+          parameterType = bottomType,
+          returnType = bottomType,
+          marker = False
+        }
+    -- A request @tagged[T]@ with a covariant type parameter, so a concrete entry `tagged[integer]`
+    -- does NOT cover the extreme `tagged[unknown]` a still-generic tail forces — the fixture the
+    -- denormalize-honesty test needs.
+    taggedRequestInfo =
+      RequestInformation
+        { name = taggedName,
+          genericParameters =
+            GenericParameters
+              { parameterNames = ["T"],
+                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = Covariant, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
+              },
           parameterType = bottomType,
           returnType = bottomType,
           marker = False

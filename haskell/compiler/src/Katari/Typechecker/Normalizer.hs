@@ -37,7 +37,7 @@ import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId, inferenceModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
-import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
+import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), renderSemanticGenericArguments)
 import Katari.Data.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..), composeVariance)
 import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..))
@@ -594,12 +594,15 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
                 Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
                 Just rightLacks -> do
                   uncovered <- filterM (fmap not . coveredByConcreteEntry rightRow genericId) (Set.toList (Set.difference rightLacks leftLacks))
-                  unless (null uncovered) $
-                    -- The two rows denormalize to identical-looking text — a tail's @lacks@ set is
-                    -- invisible in the surface syntax — so the message names the requests the expected
-                    -- effect additionally removes from the shared generic, which is the difference the
-                    -- rows actually disagree on.
-                    tellEffectMismatch (overrideMismatchReason (Set.fromList uncovered)) effectiveLeft right
+                  unless (null uncovered) $ do
+                    -- The expected effect discharges these requests from the shared effect generic, but
+                    -- the actual effect's tail still admits them. This is the same check @match@ makes
+                    -- extracting a constructor from a union with a generic tail, so the message reads in
+                    -- the same extraction terms: discharging a request from a still-generic row extracts
+                    -- it at the instantiation the tail forces (the per-variance extreme), which the
+                    -- concrete entry does not cover — see 'extractionMismatchReason'.
+                    reason <- extractionMismatchReason rightRow uncovered
+                    tellEffectMismatch reason effectiveLeft right
           )
           (Map.toList effectiveLeftRow.tails)
 
@@ -652,13 +655,19 @@ coveredByConcreteEntry row genericId qualifiedName = do
       let information = requestInfo.genericParameters.parameterInformation
       if any (\parameter -> requestRowVariance parameter.variance == Invariant) (Map.elems information)
         then pure False
-        else do
-          let extremes = extremeArgumentFor <$> information
-          coversArguments qualifiedName extremes row
-  where
-    extremeArgumentFor parameter = case requestRowVariance parameter.variance of
-      Contravariant -> bottomArgumentForKind parameter.kind
-      _ -> topArgumentForKind parameter.kind
+        else coversArguments qualifiedName (extremeArgumentFor <$> information) row
+
+-- | The instantiation a still-generic tail forces for one request parameter when the request is
+-- extracted from the tail: the per-variance extreme, since the tail could carry the request at any
+-- type. A covariant (or pinned-bivariant) parameter reaches the kind's top ('topArgumentForKind',
+-- surface @all@ / @unknown@); a contravariant one reaches its bottom ('bottomArgumentForKind',
+-- surface @pure@ / @never@). Shared by the coverage check ('coveredByConcreteEntry') and the
+-- extraction-framed mismatch message ('extractionMismatchReason'), so the message names EXACTLY the
+-- instantiation the check rejected on.
+extremeArgumentFor :: GenericParameterInformation -> NormalizedKindedType
+extremeArgumentFor parameter = case requestRowVariance parameter.variance of
+  Contravariant -> bottomArgumentForKind parameter.kind
+  _ -> topArgumentForKind parameter.kind
 
 -- | Whether the row's concrete entry for @qualifiedName@ admits the given possible instantiation —
 -- the variance-aware trial comparison, run under a private world (base-type coverage, the
@@ -692,15 +701,53 @@ bottomArgumentForKind kind = case kind of
   GenericKindEffect -> NormalizedKindedTypeEffect bottomEffect
   GenericKindAttribute -> NormalizedKindedTypeAttribute bottomAttribute
 
--- | The reason for a tail-lacks (effect-generic override) mismatch, naming the requests the expected
--- effect additionally removes from the shared generic. Both the expected and actual rows render to the
--- same surface text (a tail's @lacks@ set has no surface spelling), so without these names the error
--- would show two identical rows; the difference set is exactly what the check rejected on.
-overrideMismatchReason :: Set QualifiedName -> Text
-overrideMismatchReason additionallyExcluded =
-  "Effect generic overrides are incompatible: the expected effect additionally excludes "
-    <> Text.intercalate ", " (renderQualifiedName <$> Set.toList additionallyExcluded)
-    <> " from the shared effect generic, which the actual effect still admits"
+-- | The reason a handler (or any row that discharges a request from a shared effect generic) cannot
+-- prove the discharge, framed as the constructor extraction @match@ reports. Discharging @R@ peels it
+-- off the continuation's row, but the row's effect generic could carry @R@ at ANY instantiation, so
+-- the extraction joins to the per-variance extreme (@R[all]@ for a covariant parameter, @R[pure]@ for
+-- contravariant — 'extremeArgumentFor', the same value the coverage check rejected on); the concrete
+-- entry covers only its own @R[handlerArgs]@, so the extreme escapes it — exactly the mismatch @match@
+-- reports when a constructor extracted from a union with a generic tail is used at too narrow a type.
+-- The fix constrains the tail with @lacks R@ (the discipline @time.with_deadline@ uses with
+-- @race_settled@) so the tail contributes no @R@ and the extraction narrows to precisely the covered
+-- instantiation. @handlerRow@ is the discharging (expected) row, whose concrete entry for each name is
+-- the instantiation the handler actually covers.
+extractionMismatchReason :: EffectRow -> List QualifiedName -> Normalizer Text
+extractionMismatchReason handlerRow uncovered = do
+  extractions <- mapM renderExtraction uncovered
+  pure $
+    "Discharging "
+      <> names
+      <> " from the continuation's effect row extracts "
+      <> Text.intercalate ", " extractions
+      <> " — the row's effect generic could carry the request at any instantiation, so the extraction joins to that extreme, which the handler does not cover. Add `lacks "
+      <> names
+      <> "` to the effect generic(s) in that row (the discipline `time.with_deadline` uses with `race_settled`), so the tail contributes no such request and the extraction narrows to exactly the handler's instantiation."
+  where
+    names = Text.intercalate ", " (renderQualifiedName <$> uncovered)
+    renderExtraction qualifiedName = do
+      extreme <- renderExtractedInstantiation qualifiedName
+      covered <- case Map.lookup qualifiedName handlerRow.request of
+        Just arguments -> renderRequestAt qualifiedName arguments
+        -- Defensive: a discharged name always has a concrete entry in the discharging row (it is what
+        -- the handler covers), but fall back to the bare name rather than partial-lookup if it is absent.
+        Nothing -> pure (renderQualifiedName qualifiedName)
+      pure (extreme <> " (the handler covers " <> covered <> ")")
+
+-- | Render a request at the extreme instantiation a still-generic tail forces ('extremeArgumentFor') —
+-- e.g. @R[all]@ for a covariant effect parameter, @R[unknown]@ for a covariant type parameter. This is
+-- the instantiation discharging the request from a generic row extracts.
+renderExtractedInstantiation :: QualifiedName -> Normalizer Text
+renderExtractedInstantiation qualifiedName = do
+  requestInfo <- requestInfoFor qualifiedName
+  renderRequestAt qualifiedName (extremeArgumentFor <$> requestInfo.genericParameters.parameterInformation)
+
+-- | Render a request name applied to concrete arguments in surface form (@R[all]@, @R["x"]@); a
+-- no-argument request renders as the bare qualified name.
+renderRequestAt :: QualifiedName -> Map Text NormalizedKindedType -> Normalizer Text
+renderRequestAt qualifiedName arguments = do
+  semanticArguments <- mapM denormalizeGenericArgument arguments
+  pure (renderQualifiedName qualifiedName <> renderSemanticGenericArguments semanticArguments)
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
@@ -1486,16 +1533,23 @@ denormalizeEffect effect = do
     RequestEffectAny -> pure [SemanticEffectAny]
     RequestEffectRow row -> do
       requestEffects <- mapM (uncurry denormalizeRequest) (Map.toList row.request)
-      -- A tail whose lacks set is fully re-admitted by concrete entries renders bare (the usual
-      -- handler-scheme row); an UNCOVERED lacks renders as its subtraction form `{...E lacks req}`,
-      -- so a signature that discharged a request from a generic row says so instead of lying.
-      let genericEffects =
-            [ if Set.null uncovered
-                then SemanticEffectGeneric genericId
-                else SemanticEffectOverwrite (SemanticEffectGeneric genericId) uncovered []
-              | (genericId, lacksNames) <- Map.toList row.tails,
-                let uncovered = Set.difference lacksNames (Map.keysSet row.request)
-            ]
+      -- A tail's lacks name renders VISIBLY as its subtraction form `{...E lacks req}` UNLESS a
+      -- concrete entry genuinely re-admits it at every instantiation ('coveredByConcreteEntry' — the
+      -- exact coverage split the subtype check uses, not the mere presence of a same-named entry).
+      -- Masking only the truly-covered names keeps the catch-all shape `{...E, throw[unknown]}`
+      -- noise-free (throw[unknown] IS the top instantiation, so it re-admits the tail's throw), while a
+      -- NON-top entry like `{...E lacks R} | R[B]` now shows its `lacks` — so it no longer prints
+      -- identically to `E | R[B]`, a genuinely different type (whose R is the join `R[B] ⊔ R[⊤]`).
+      genericEffects <-
+        mapM
+          ( \(genericId, lacksNames) -> do
+              uncovered <- filterM (fmap not . coveredByConcreteEntry row genericId) (Set.toList lacksNames)
+              pure $
+                if null uncovered
+                  then SemanticEffectGeneric genericId
+                  else SemanticEffectOverwrite (SemanticEffectGeneric genericId) (Set.fromList uncovered) []
+          )
+          (Map.toList row.tails)
       pure (requestEffects <> genericEffects)
   -- Escapes are internal and discharged before any public type; they only surface here in an
   -- effect-mismatch message, rendered as reserved pseudo-requests so the message stays total.

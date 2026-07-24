@@ -1355,18 +1355,41 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
-    it "a tail-lacks (override) mismatch names the subtracted marker instead of rendering two identical rows" $ do
+    it "a tail-lacks (override) mismatch reads as a constructor extraction: it names the extreme instantiation and spells the `lacks` fix" $ do
       -- An overwrite-spelled provider param `{...E, scoped["x"]}` (tail lacks scoped) against a union
-      -- continuation `E | scoped["x"]` (tail lacks nothing): both rows denormalize to `scoped["x"] | E`,
-      -- so the message must name the difference (`scoped`) or it reads as two identical rows.
+      -- continuation `E | scoped["x"]` (tail lacks nothing). Discharging `scoped` from the still-generic
+      -- tail extracts it at the extreme the tail forces (`scoped[unknown]`, since a covariant type
+      -- parameter joins to the top), which the concrete `scoped["x"]` does not cover — the SAME reason
+      -- `match` reports extracting a constructor from a union with a generic tail. The message names that
+      -- extreme and points at the actionable fix, constraining the tail generic with `lacks`.
       let message =
             compiledMessages
               ( scopedDecl
                   <> "external agent prov[R, effect E](k: agent (value: null) -> R with {...E, scoped[\"x\"]}) -> R with E\n"
                   <> "agent wrong[R, effect E](k: agent (value: null) -> R with E | scoped[\"x\"]) -> R with io | E { prov[R, E](k = k) }"
               )
-      message `shouldSatisfy` Text.isInfixOf "additionally excludes"
-      message `shouldSatisfy` Text.isInfixOf "scoped"
+      message `shouldSatisfy` Text.isInfixOf "extracts"
+      -- The extreme the generic tail forces (a covariant type parameter joins to the top, `unknown`).
+      message `shouldSatisfy` Text.isInfixOf "test.scoped[unknown"
+      -- The fix reuses the same qualified name (rendered `module.name`) so the reader can copy it.
+      message `shouldSatisfy` Text.isInfixOf "lacks test.scoped"
+
+    it "the handler-discharge error names the extracted `all` / `unknown` instantiation and the covered one (task a)" $ do
+      -- A genuine handler discharge: the handler covers `fail[string]`, but the continuation's tail `E`
+      -- could carry `fail` at ANY type, so discharging it extracts `fail[unknown]` (the covariant type
+      -- parameter's top), which `fail[string]` does not cover. The message names both the extracted
+      -- extreme and the handler's covered instantiation, then spells the `lacks fail` fix.
+      let message =
+            compiledMessages
+              ( "request fail[T](error: T) -> null\n"
+                  <> "agent bad[effect E](task: agent (value: null) -> string with E) -> string with E {\n"
+                  <> "  use handler { request fail(error: string) -> null { break \"caught\" } }\n"
+                  <> "  task(value = null)\n"
+                  <> "}"
+              )
+      message `shouldSatisfy` Text.isInfixOf "extracts test.fail[unknown"
+      message `shouldSatisfy` Text.isInfixOf "the handler covers test.fail[string]"
+      message `shouldSatisfy` Text.isInfixOf "lacks test.fail"
 
   -- The `prelude.region` stdlib module: structured concurrency as a nursery, built on the same scoped
   -- marker discipline as `mcp.provide`. `provide` opens the nursery and discharges its scope marker;
