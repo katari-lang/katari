@@ -412,7 +412,8 @@ runN action = let (result, _, _) = runRWS action emptyContext () in result
           requestEnvironment = mempty,
           genericsInScope = mempty,
           world = bottomAttribute,
-          comparingAgentParameters = False
+          comparingAgentParameters = False,
+          laterHandlerInstallSites = mempty
         }
 
 metaA :: GenericId

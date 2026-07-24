@@ -426,7 +426,12 @@ instance HasSourceSpan (Statement phase) where
     StatementError sourceSpan -> sourceSpan
 
 data LetStatement (phase :: Phase) = LetStatement
-  { pattern :: Pattern phase,
+  { -- | The @\@"..."@ doc annotation of a documented let. It stamps the bound VALUE: the runtime
+    -- carries the description (and the let variable's name, replacing the callee's metadata name)
+    -- on the value itself, so @get_metadata@ resolves it before the referenced block's own
+    -- description. The parser guarantees a documented let binds a single variable.
+    annotation :: Maybe Text,
+    pattern :: Pattern phase,
     value :: Expression phase,
     sourceSpan :: SourceSpan
   }

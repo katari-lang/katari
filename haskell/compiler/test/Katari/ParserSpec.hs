@@ -287,6 +287,43 @@ spec = do
       _ <- parseClean "agent main() -> integer { let r = { name = \"a\", age = 30 }\n r.age }"
       pure ()
 
+    it "keeps a doc annotation on a let statement (doc-on-let)" $ do
+      body <- parseClean "agent main() -> integer {\n  @\"the herald's window\"\n  let herald_view = 1\n  herald_view\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementLet letStatement] -> letStatement.annotation `shouldBe` Just "the herald's window"
+        _ -> expectationFailure "expected one let statement"
+
+    it "parses a same-line doc annotation on a let statement" $ do
+      body <- parseClean "agent main() -> integer {\n  @\"role doc\" let x = 1\n  x\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementLet letStatement] -> letStatement.annotation `shouldBe` Just "role doc"
+        _ -> expectationFailure "expected one let statement"
+
+    it "an undocumented let carries no annotation" $ do
+      body <- parseClean "agent main() -> integer {\n  let x = 1\n  x\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementLet letStatement] -> letStatement.annotation `shouldBe` Nothing
+        _ -> expectationFailure "expected one let statement"
+
+    it "keeps a doc annotation on a nested agent declaration" $ do
+      body <- parseClean "agent main() -> integer {\n  @\"a documented helper\"\n  agent helper() -> integer { 1 }\n  helper()\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementAgent helper] -> do
+          helper.name `shouldBe` "helper"
+          helper.annotation `shouldBe` Just "a documented helper"
+        _ -> expectationFailure "expected one local agent statement"
+
+    it "rejects a doc annotation before any other statement kind" $ do
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n  return 1\n}"
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n  1 + 1\n}"
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n  finally { 1 }\n  2\n}"
+
+    it "rejects a doc annotation on a destructuring let (no single name to stamp)" $ do
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n  let (a, b) = pair\n  a\n}"
+
+    it "rejects a dangling doc annotation at the end of a block" $ do
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n}"
+
     it "parses an f-string with interpolation" $ do
       body <- parseClean "agent main() -> string { f\"sum = ${total}\" }" >>= soleAgentBody
       case body.returnExpression of

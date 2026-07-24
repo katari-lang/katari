@@ -593,7 +593,11 @@ function conformedOrThrow(value: Value, schema: JSONSchema, label: string): Valu
  *  / input schema, its output schema when the provider declared one (`{}` — unknown — otherwise), and
  *  no requests (a reactor call performs io, not katari requests). Exported because `mcp.serve`
  *  advertises a served agent's tool listing from exactly this metadata — one reflection source, so the
- *  MCP listing and `reflection.get_metadata` can never drift. */
+ *  MCP listing and `reflection.get_metadata` can never drift.
+ *
+ *  A doc-let naming stamp on the VALUE resolves first: its name / description replace the block's (or
+ *  the tool's minted pair) wholesale, while the schemas stay the referenced callable's own — a
+ *  documented binding renames and re-describes, it never re-types. */
 export async function callableMetadata(
   value: Value,
   ir: IrSource,
@@ -604,10 +608,11 @@ export async function callableMetadata(
   output: JSONSchema;
   requests: Json;
 }> {
+  const naming = value.naming;
   if (value.kind === "tool") {
     return {
-      name: value.name,
-      description: value.description,
+      name: naming?.name ?? value.name,
+      description: naming?.description ?? value.description,
       input: value.inputSchema,
       output: value.outputSchema ?? {},
       requests: [],
@@ -620,8 +625,8 @@ export async function callableMetadata(
     callable.generics,
   );
   return {
-    name: callable.name,
-    description: callable.description,
+    name: naming?.name ?? callable.name,
+    description: naming?.description ?? callable.description,
     input: fillGenericSchema(typeSubstitution, callable.schema.input),
     output: fillGenericSchema(typeSubstitution, callable.schema.output),
     requests: requestsToJson(callable.schema.requests, typeSubstitution, requestSubstitution),

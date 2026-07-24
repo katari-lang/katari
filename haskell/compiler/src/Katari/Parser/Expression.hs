@@ -533,11 +533,6 @@ requestHandler = do
 -- Agent declaration (top-level and local)
 ---------------------------------------------------------------------------------------------------
 
--- | @[\@"doc"] [private] agent name[generics](params) [-> T] [with E] { body }@. Lives here (not in
--- "Katari.Parser") because a local agent is a statement, so the statement parser needs it.
-agentDeclaration :: Parser (AgentDeclaration Parsed)
-agentDeclaration = optional docAnnotation >>= agentDeclarationWith
-
 -- | The agent declaration after its (already-parsed) doc annotation, so the top-level dispatcher can
 -- consume the shared annotation once and commit to this branch on the @agent@ / @private@ keyword.
 --
@@ -646,18 +641,31 @@ data BlockElement where
   BlockElementStatement :: Statement Parsed -> BlockElement
   BlockElementExpression :: ExpressionP -> BlockElement
 
+-- | A statement-position doc annotation attaches to the @let@ binding or local agent declaration
+-- that follows; any other statement after it stays a parse error (the choice below offers only the
+-- two documented forms). The annotation itself is a line-mode lexeme, so the newline that usually
+-- ends a statement is consumed here explicitly — the documented statement may start on the next line.
 blockElement :: Parser BlockElement
-blockElement =
-  choice
-    [ BlockElementUse <$> useProvider,
-      BlockElementStatement <$> letStatement,
-      BlockElementStatement . StatementAgent <$> agentDeclaration,
-      BlockElementStatement <$> returnStatement,
-      BlockElementStatement <$> nextStatement,
-      BlockElementStatement <$> breakStatement,
-      BlockElementStatement <$> finallyStatement,
-      BlockElementExpression <$> expression
-    ]
+blockElement = do
+  annotation <- optional (docAnnotation <* multilineSpace)
+  case annotation of
+    Just _ ->
+      choice
+        [ BlockElementStatement <$> letStatementWith annotation,
+          BlockElementStatement . StatementAgent <$> agentDeclarationWith annotation
+        ]
+        <?> "a `let` binding or a local agent declaration (the statements a doc annotation documents)"
+    Nothing ->
+      choice
+        [ BlockElementUse <$> useProvider,
+          BlockElementStatement <$> letStatementWith Nothing,
+          BlockElementStatement . StatementAgent <$> agentDeclarationWith Nothing,
+          BlockElementStatement <$> returnStatement,
+          BlockElementStatement <$> nextStatement,
+          BlockElementStatement <$> breakStatement,
+          BlockElementStatement <$> finallyStatement,
+          BlockElementExpression <$> expression
+        ]
 
 -- | @use provider@ or @let pattern = use provider@; returns the builder once the body is known.
 useProvider :: Parser (Block Parsed -> UseStatement Parsed)
@@ -678,13 +686,29 @@ letBoundUse = try $ do
   provider <- expression
   pure (\body -> UseStatement {binder = Just binder, provider = provider, body = body, sourceSpan = mergeSpans letSpan (sourceSpanOf body)})
 
-letStatement :: Parser (Statement Parsed)
-letStatement = do
+-- | @[\@"doc"] let pattern = expression@. A documented let stamps the bound VALUE with the
+-- description and the variable's name, so it must bind a single variable — a destructuring
+-- pattern has no one name to stamp, and silently dropping the doc would be worse than refusing.
+letStatementWith :: Maybe (Located Text) -> Parser (Statement Parsed)
+letStatementWith annotation = do
   letSpan <- keyword "let"
   letPattern <- pattern'
+  case (annotation, letPattern) of
+    (Just _, PatternVariable _) -> pure ()
+    (Just _, _) -> fail "a documented `let` must bind a single variable (the doc annotation names the bound value)"
+    (Nothing, _) -> pure ()
   assignEquals
   value <- expression
-  pure (StatementLet LetStatement {pattern = letPattern, value = value, sourceSpan = mergeSpans letSpan (sourceSpanOf value)})
+  let startSpan = maybe letSpan (.sourceSpan) annotation
+  pure
+    ( StatementLet
+        LetStatement
+          { annotation = (.value) <$> annotation,
+            pattern = letPattern,
+            value = value,
+            sourceSpan = mergeSpans startSpan (sourceSpanOf value)
+          }
+    )
 
 returnStatement :: Parser (Statement Parsed)
 returnStatement = do

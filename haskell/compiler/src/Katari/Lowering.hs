@@ -473,7 +473,9 @@ lowerModule typeEnvironment valueEnvironment _moduleName module' =
           requestEnvironment = typeEnvironment.requestEnvironment,
           genericsInScope = mempty,
           world = bottomAttribute,
-          comparingAgentParameters = False
+          comparingAgentParameters = False,
+          -- Lowering runs after checking, so no message enrichment applies here.
+          laterHandlerInstallSites = mempty
         }
     context =
       LowerContext
@@ -636,7 +638,25 @@ lowerBlockValue block = go block.statements
     go (statement : rest) = case statement of
       AST.StatementLet letStatement -> do
         valueVariable <- lowerExpression letStatement.value
-        locals <- destructurePattern valueVariable letStatement.pattern
+        -- A documented let stamps the bound value's naming (the variable's name + the doc text)
+        -- before binding, so the runtime attribute rides the value wherever the binding flows.
+        boundVariable <- case letStatement.annotation of
+          Nothing -> pure valueVariable
+          Just description -> case letStatement.pattern of
+            AST.PatternVariable variablePattern -> do
+              stampedVariable <- freshVariableId
+              emit
+                ( OperationStampDescription
+                    StampDescriptionOperation
+                      { source = valueVariable,
+                        name = variablePattern.name,
+                        description = description,
+                        output = stampedVariable
+                      }
+                )
+              pure stampedVariable
+            _ -> panic "lowering: a documented let binds a single variable (parser invariant)"
+        locals <- destructurePattern boundVariable letStatement.pattern
         withLocals locals (go rest)
       AST.StatementAgent agentDeclaration -> do
         let localId = resolvedLocalVariableId agentDeclaration.variableReference

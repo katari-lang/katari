@@ -652,6 +652,48 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
       ]
       `shouldSatisfy` any (Text.isInfixOf "a type synonym can name the row once")
 
+  -- The doc-on-let / doc-on-nested-agent annotations have no typing effect: a documented binding
+  -- checks exactly like its undocumented twin (the stamp is a run-time value attribute).
+  it "a documented let checks exactly like an undocumented one" $
+    allErrorCodes
+      [ ( "test",
+          "agent read_digest(name: string) -> string { name }\n\
+          \agent main() -> string {\n\
+          \  @\"the herald's window on the operator\"\n\
+          \  let herald_view = read_digest\n\
+          \  herald_view(name = \"x\")\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "a documented let's value keeps flowing as its real type (return / record / re-binding)" $
+    allErrorCodes
+      [ ( "test",
+          "agent main() -> integer {\n\
+          \  @\"a documented number\"\n\
+          \  let count = 1\n\
+          \  @\"overwritten stamp\"\n\
+          \  let again = count\n\
+          \  let wrapped = { inner = again }\n\
+          \  wrapped.inner\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "a documented nested agent declaration checks like an undocumented one" $
+    allErrorCodes
+      [ ( "test",
+          "agent main() -> integer {\n\
+          \  @\"a documented helper\"\n\
+          \  agent helper(x: integer) -> integer { x }\n\
+          \  helper(x = 2)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Fixtures
 ------------------------------------------------------------------------------------------------

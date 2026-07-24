@@ -1,49 +1,90 @@
 // Structured concurrency, end to end: `region.provide` opens a NURSERY (a single-entry/single-exit
-// scope), `region.fork` spawns a fiber into it, `region.join` awaits one, and `region.watch` is the
-// WHITE HOLE that re-emits the fibers' escalations where the enclosing program can handle them. All
-// five route to the built-in `region` reactor — an in-runtime scheduler, like `time` (no FFI sidecar).
+// scope), `region.fork` spawns a fiber into it, and `region.watch` is the WHITE HOLE that re-emits
+// the fibers' escalations where the enclosing program can handle them. There is deliberately NO
+// join: A FIBER CARRIES NO RESULT — everything it produces leaves through its ESCALATIONS (a task
+// with something to deliver performs a request as its LAST act), and what it settles with is
+// discarded. `parallel` (for / [ ]) is the fork-JOIN story (structured children, awaited, results
+// as values, in order); a region is the fork-ESCALATE story (detached children, heard at `watch`,
+// in completion order). In one line: parallel waits, a region listens. Everything routes to the
+// built-in `region` reactor — an in-runtime scheduler, like `time` (no FFI sidecar).
 //
-// The scope is a PHANTOM marker (`region.scope`, or your own per-nursery `effect`): `provide` mints it
-// for the continuation's row and discharges it from its own, so no fiber outlives the block. The
+// The scope is a PHANTOM marker (`region.scope`, or your own per-nursery `effect`): `provide` mints
+// it for the continuation's row and discharges it from its own, so no fiber outlives the block. The
 // second type argument is the fiber-effect CEILING `E` — every fiber's effect must fit under it, and
 // `watch` re-emits exactly `E`, so covering `E` at the watch covers every request any fiber can raise.
 
-// ─── fan-out: fork a set of fibers, join each for its result ──────────────────────────────────────
+// ─── fan-out: fork a set of fibers, hear each result at the watch ─────────────────────────────────
 
-@"A pure worker, forked as a fiber. Its parameter is named `input` because `region.fork` applies the
-task to `{ input: <argument> }` (the fork signature types the task `agent (input: A) -> T`)."
-agent square(input: integer) -> integer {
-  input * input
+@"A result a squarer fiber DELIVERS as its last act. A fiber's escalation does not surface at its
+`fork` — it wells up at the enclosing `region.watch` — and it is the ONE channel a fiber's output
+can leave through. The input rides along so the collector never has to assume an arrival order."
+request deliver_square(@"The input the fiber was forked with." input: integer, @"Its square." value: integer) -> null
+
+@"A worker fiber: compute the square and DELIVER it as the task's last act. The parameter is named
+`input` because `region.fork` applies the task to `{ input: <argument> }`; the result type is `null`
+because a fiber carries no result — a `-> T` task does not fit `fork`, so a value that must outlive
+the fiber HAS to be delivered through an escalation before the task ends. The type makes the
+discipline total: a squarer that forgets to deliver is a task whose work is provably discarded."
+agent square(input: integer) -> null with deliver_square {
+  deliver_square(input = input, value = input * input)
 }
 
-@"Fan-out with an EMPTY ceiling (`pure` — the fibers raise nothing): open a nursery, fork three
-squarers, then join each for its value. This is a fixed parallel map written as separate fork / join
-statements, so — unlike `parallel for` — a fork's handle is a first-class value you may store, pass,
-and join later (or never)."
+@"The private signal that ends the collection once every square has landed — `watch` returns
+`never`, so termination is composed AROUND it with an escalation, exactly as `subscribe` does."
+data all_collected(@"The squares, in completion order." squares: array[integer])
+
+@"Fan-out on the region surface: fork three squarers under the ceiling `deliver_square`, collect
+their deliveries in a handler installed around the watch, and end the region by THROWING the
+collected array out once the third has landed. The throw escapes the nursery (its `provide`
+unwinds — any still-running fiber would be cancelled; here all three have already settled) and is
+caught right above it. Note what is DIFFERENT from `parallel for`: the squares arrive in
+COMPLETION order, not fork order — which is why `deliver_square` carries its input."
 agent fan_out() -> array[integer] {
-  let nursery : region.nursery[region.scope, pure] = use region.provide[region.scope, pure]
-  let first = region.fork(nursery = nursery, task = square, argument = 2)
-  let second = region.fork(nursery = nursery, task = square, argument = 3)
-  let third = region.fork(nursery = nursery, task = square, argument = 4)
-  [
-    region.join(nursery = nursery, handle = first),
-    region.join(nursery = nursery, handle = second),
-    region.join(nursery = nursery, handle = third),
-  ]
+  // The outer catch: the collector's throw carries the finished array out of the region.
+  use handler {
+    request prelude.throw(error: all_collected) -> never {
+      break error.squares
+    }
+  }
+  let nursery : region.nursery[region.scope, deliver_square] = use region.provide[region.scope, deliver_square]
+  // The collector, installed around the watch so every fiber's delivery surfaces here. Sequential
+  // (`var`), so deliveries append one at a time even though the fibers run concurrently.
+  use handler (var collected: array[integer] = []) {
+    request deliver_square(input: integer, value: integer) {
+      let grown = array.append(target = collected, value = value)
+      if (array.length(target = grown) >= 3) {
+        prelude.throw(error = all_collected(squares = grown))
+      } else {
+        next null with { collected = grown }
+      }
+    }
+  }
+  region.fork(nursery = nursery, task = square, argument = 2)
+  region.fork(nursery = nursery, task = square, argument = 3)
+  region.fork(nursery = nursery, task = square, argument = 4)
+  region.watch(nursery = nursery)
 }
 
-// CONTRAST WITH `parallel for`. `parallel for` is the fixed-shape fork-join: one child per element,
-// all joined at the closing brace, results in order — the right tool when the set is known and every
-// result is awaited. `region` decouples the two halves: `fork` returns a handle NOW and the fiber
-// runs on independently, so you may fork a dynamic number, `join` only the ones you want (or `cancel`
-// the rest), spawn more from inside a handler, and let fibers escalate through `watch`. `fan_out`
-// above is the overlap; `subscribe` below is what only `region` can express.
+// CONTRAST WITH `parallel for`. `parallel for` is the fork-JOIN story: one child per element, all
+// awaited at the closing brace, results as plain values in fork order — the right tool when the
+// set is known up front and every result is wanted. A region decouples all of it: `fork` returns
+// immediately and the fiber runs on independently, so you may fork a dynamic number, spawn more
+// from inside a handler, `cancel` one by handle or id, and hear deliveries at `watch` as they
+// complete. `fan_out` above rebuilds the parallel map out of region pieces to show the mapping —
+// three extra moves (a delivery request, a collector, a termination throw) buy the detachment;
+// `subscribe` below is what only a region can express.
 @"The same three squares as a fixed parallel map, for contrast — `parallel for` forks one child per
 element and joins them all at the brace."
 agent parallel_squares() -> array[integer] {
   parallel for (let n in [2, 3, 4]) {
-    next square(input = n)
+    next square_value(input = n)
   }
+}
+
+@"The squarer as a plain VALUE-returning agent — what `parallel for` joins. The fiber variant
+(`square`) cannot return this: a fiber's type forces delivery through the escalation instead."
+agent square_value(input: integer) -> integer {
+  input * input
 }
 
 // ─── subscription: the white hole (fiber escalations re-emitted at a handler) ──────────────────────

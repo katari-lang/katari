@@ -54,7 +54,7 @@ import Katari.Data.NormalizedType
     exitEffect,
   )
 import Katari.Data.QualifiedName (QualifiedName)
-import Katari.Data.SourceSpan (SourceSpan)
+import Katari.Data.SourceSpan (SourceSpan (..))
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
 import Katari.Typechecker.Elaborate (Elaborate, runElaborate, scopeGenerics)
@@ -94,7 +94,13 @@ data CheckerEnvironment = CheckerEnvironment
     -- | The enclosing @for@ a @for@ @next@ / @break@ unwinds to.
     forTarget :: Maybe BoundaryId,
     -- | The enclosing request handler a handler @next@ / @break@ unwinds to.
-    handlerTarget :: Maybe BoundaryId
+    handlerTarget :: Maybe BoundaryId,
+    -- | Every request served by a @use handler@ clause on the CURRENT agent body's statement spine,
+    -- mapped to its install site (collected up front by 'Katari.Typechecker.Check.walkAgentBody', and
+    -- REPLACED on entering a nested agent — geometry is per body). 'runNormalizer' narrows it to the
+    -- sites later than its anchor and hands it to the normalizer, which uses it purely to enrich an
+    -- unhandled-request message with the install-site rule; no checking decision reads it.
+    handlerInstallSites :: Map QualifiedName SourceSpan
   }
 
 -- | Per-walk mutable state: the inference accumulators and the fresh-id counters.
@@ -145,7 +151,8 @@ initialCheckerEnvironment typeEnvironment =
       genericsInScope = mempty,
       returnTarget = Nothing,
       forTarget = Nothing,
-      handlerTarget = Nothing
+      handlerTarget = Nothing,
+      handlerInstallSites = mempty
     }
 
 runChecker :: CheckerEnvironment -> Checker a -> (a, Diagnostics)
@@ -171,7 +178,11 @@ normalizerEnvironment = do
         genericsInScope = generics,
         world = world,
         -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
-        comparingAgentParameters = False
+        comparingAgentParameters = False,
+        -- "Later than the check" only means something against an anchor span, which this span-free
+        -- assembly does not have; 'runNormalizer' fills the narrowed sites in. Anchor-free entries
+        -- (probes, inference sub-runs) therefore never produce the handler-geometry note.
+        laterHandlerInstallSites = mempty
       }
 
 -- | Run a 'Normalizer' sub-action with the current checker environment, anchoring its errors at
@@ -179,9 +190,21 @@ normalizerEnvironment = do
 runNormalizer :: SourceSpan -> Normalizer a -> Checker a
 runNormalizer sourceSpan action = do
   environment <- normalizerEnvironment
-  let (result, _, errors) = runRWS action environment ()
+  installSites <- asks (.handlerInstallSites)
+  -- Only handlers installed strictly BELOW the anchor can be the "it exists, but too late" story;
+  -- one installed above the anchor genuinely serves it (or genuinely does not), so it stays out and
+  -- the mismatch reports without a note. The file guard keeps the position comparison meaningful.
+  let installedBelowAnchor site = site.filePath == sourceSpan.filePath && sourceSpan.start < site.start
+      anchoredEnvironment = environment {laterHandlerInstallSites = Map.filter installedBelowAnchor installSites}
+      (result, _, errors) = runRWS action anchoredEnvironment ()
   tell (foldMap (diagnosticAt sourceSpan . CompilerErrorType) errors)
   pure result
+
+-- | Install the agent body's handler map for the sub-walk (see 'handlerInstallSites' on
+-- 'CheckerEnvironment'). Replaces rather than extends: each agent body has its own geometry.
+withHandlerInstallSites :: Map QualifiedName SourceSpan -> Checker a -> Checker a
+withHandlerInstallSites installSites =
+  local (\environment -> environment {handlerInstallSites = installSites})
 
 -- | Run a 'Normalizer' sub-action as a /probe/: report only whether it succeeded (produced no errors)
 -- without emitting its diagnostics. Lets the checker ask "would this check pass?" — e.g. does an

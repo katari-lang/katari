@@ -38,6 +38,7 @@ import Katari.Data.Id (GenericId, inferenceModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
+import Katari.Data.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..), composeVariance)
 import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..))
 import Katari.Panic (panic)
@@ -66,7 +67,15 @@ data SubtypingContext = SubtypingContext
     -- and lowers it before descending). Parameter names are part of an agent type, so a required
     -- field present on exactly one side there is a parameter-NAME mismatch — which the plain
     -- per-field optionality reading would misreport (nothing was declared optional).
-    comparingAgentParameters :: Bool
+    comparingAgentParameters :: Bool,
+    -- | The requests served by a @use handler@ clause in the enclosing agent body that is installed
+    -- LATER in the source than the check currently running, each mapped to its install site. When an
+    -- unhandled-request mismatch names one of these, the defect is almost always handler ORDER — a
+    -- handler body's performs escalate from its install site and reach only handlers installed above
+    -- it — so the error appends that geometry (message-only enrichment, exactly like
+    -- 'comparingAgentParameters'). Empty outside an agent-body check, so every other caller stays
+    -- silent. Populated by the checker's span-anchored entry ('Katari.Typechecker.Context.runNormalizer').
+    laterHandlerInstallSites :: Map QualifiedName SourceSpan
   }
   deriving (Eq, Show)
 
@@ -565,7 +574,9 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
         mapM_
           ( \(qualifiedName, leftArguments) ->
               case Map.lookup qualifiedName rightRow.request of
-                Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
+                Nothing -> do
+                  geometryNote <- handlerGeometryNote qualifiedName
+                  tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName <> geometryNote) effectiveLeft right
                 Just rightArguments -> do
                   requestInfo <- requestInfoFor qualifiedName
                   subtypeArgumentsWith (requestRowVariance . (.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
@@ -591,6 +602,25 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
                     tellEffectMismatch (overrideMismatchReason (Set.fromList uncovered)) effectiveLeft right
           )
           (Map.toList effectiveLeftRow.tails)
+
+-- | The handler-geometry enrichment of an unhandled-request mismatch: when the very request that
+-- cannot be discharged IS served by a @use handler@ clause installed later in the same agent body
+-- than the failing check, name that handler and explain the install-site rule — the report would
+-- otherwise point at the perform while the actual defect is the ORDER of the handlers, which nothing
+-- in the source marks. Silent (empty note) whenever no such later handler exists, so an ordinary
+-- unhandled request reads exactly as before; the subtype verdict is never affected.
+handlerGeometryNote :: QualifiedName -> Normalizer Text
+handlerGeometryNote qualifiedName = do
+  installSites <- asks (.laterHandlerInstallSites)
+  pure $ case Map.lookup qualifiedName installSites of
+    Nothing -> ""
+    Just installSite ->
+      "\n  Note: `"
+        <> renderQualifiedName qualifiedName
+        <> "` is served by the handler installed at line "
+        <> Text.pack (show installSite.start.line)
+        <> ", but a handler body's performs escalate from its own install site and reach only"
+        <> " handlers installed ABOVE it — move that handler earlier, or this perform later."
 
 -- | Whether the row's concrete entry for @qualifiedName@ admits EVERY instantiation of the request —
 -- what makes subtracting the name from a still-generic tail sound even though the tail might carry

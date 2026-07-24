@@ -1490,6 +1490,141 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
+  -- Handler POSITIONS are load-bearing (a handler body's performs escalate from its install site and
+  -- reach only handlers installed above it), but nothing in the source marks why a handler sits where
+  -- it does — so rearranging two `use handler` blocks fails at a distance, with the K3001 pointing at
+  -- the perform rather than at the handler that moved. The enrichment names the lexically-later
+  -- handler that WOULD serve the request; an ordinary unhandled request stays note-free.
+  describe "handler geometry (the install-site rule on unhandled-request errors)" $ do
+    it "an unhandled request served by a LATER handler in the same body gets the install-site note (K3001)" $ do
+      -- `ping`'s handler body performs `pong`, whose handler is installed one line BELOW it: the
+      -- perform escalates from line 4 and cannot reach line 5, so `pong` leaks to the agent edge.
+      let message =
+            compiledMessages
+              ( "request ping() -> null\n"
+                  <> "request pong() -> null\n"
+                  <> "agent root() -> null with io {\n"
+                  <> "  use handler { request ping() -> null { pong() } }\n"
+                  <> "  use handler { request pong() -> null { null } }\n"
+                  <> "  let b = ping()\n"
+                  <> "  null\n"
+                  <> "}"
+              )
+      message `shouldSatisfy` Text.isInfixOf "performs a request not present"
+      message `shouldSatisfy` Text.isInfixOf "`test.pong` is served by the handler installed at line 5"
+      message `shouldSatisfy` Text.isInfixOf "move that handler earlier, or this perform later"
+
+    it "an ordinary unhandled request with no matching later handler stays note-free (K3001)" $ do
+      let message =
+            compiledMessages
+              ( "request ping() -> null\n"
+                  <> "agent root() -> null with io {\n"
+                  <> "  let a = ping()\n"
+                  <> "  null\n"
+                  <> "}"
+              )
+      message `shouldSatisfy` Text.isInfixOf "performs a request not present"
+      message `shouldSatisfy` (not . Text.isInfixOf "is served by the handler installed at line")
+
+  -- Parameter names are structural (part of the agent type), so a callback can be FORCED to name a
+  -- parameter after a module — e.g. `time.watch`'s tick must call its parameter `time`. The module
+  -- namespace therefore wins the qualifier position of `m.f` even against a same-named value binding
+  -- (a value has no module members), while the bare name keeps resolving to the value.
+  describe "module qualifiers under a same-named parameter" $ do
+    it "a parameter named `time` does not lock out the module: `time.now()` resolves, and `time` stays usable as a value" $
+      compiledCodes
+        ( "agent tick(time: number) -> number with io {\n"
+            <> "  let a = time.now()\n"
+            <> "  a + time\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+  -- The `prelude.store` serialization scope: `serialize` opens ONE write-serialization domain over
+  -- ONE subtree, serving the ambient `current` and the critical-section `exclusive` from a
+  -- deliberately sequential handler. The ceiling `Etask` is pinned explicitly at the install (it
+  -- cannot be inferred through the request payload — the same explicit-first discipline as a
+  -- nursery's fiber ceiling), and it `lacks current | exclusive`, so a task reads the subtree
+  -- through a value closed over before entering and a nested exclusive is a type error rather than
+  -- an escaped perform.
+  describe "store.serialize (one subtree's write-serialization scope)" $ do
+    it "the provider usage example type-checks: install once (ceiling explicit, rest inferred), modify under it — the residual is the bare store row" $
+      compiledCodes
+        ( "agent increment(value: unknown) -> unknown {\n"
+            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
+            <> "agent driver() -> unknown with store.get | store.set {\n"
+            <> "  use store.serialize[store.get | store.set](subtree = store.root())\n"
+            <> "  store.modify(key = \"count\", transform = increment)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "the general form type-checks: a multi-key exclusive task over a subtree closed over from `current`, narrowed back from `unknown`" $
+      compiledCodes
+        ( "agent move() -> string with store.current | store.exclusive[store.get | store.set] {\n"
+            <> "  let subtree = store.current()\n"
+            <> "  agent move_note(value: null) -> string {\n"
+            <> "    match (store.get(target = subtree, key = \"draft\")) {\n"
+            <> "      case store.found(value => value) -> {\n"
+            <> "        store.set(target = subtree, key = \"published\", value = value)\n"
+            <> "        \"(moved)\"\n"
+            <> "      }\n"
+            <> "      case store.absent(key => _) -> \"(nothing to move)\"\n"
+            <> "    }\n"
+            <> "  }\n"
+            <> "  match (store.exclusive(task = move_note)) {\n"
+            <> "    case string(text) -> text\n"
+            <> "    case _ -> \"(no confirmation)\"\n"
+            <> "  }\n"
+            <> "}\n"
+            <> "agent driver() -> string with store.get | store.set {\n"
+            <> "  use store.serialize[store.get | store.set](subtree = store.root())\n"
+            <> "  move()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "the ceiling is explicit-first: an install that leaves it to inference is rejected (K3016)" $
+      -- The tripwire for the known inference gap: `Etask` sits in `exclusive`'s payload position,
+      -- which unification does not solve through — if this test ever flips, the explicit-first
+      -- calling convention (and this section's docstrings) can be relaxed.
+      compiledCodes
+        ( "agent increment(value: unknown) -> unknown {\n"
+            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
+            <> "agent driver() -> unknown with store.get | store.set {\n"
+            <> "  use store.serialize(subtree = store.root())\n"
+            <> "  store.modify(key = \"count\", transform = increment)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3016"]
+
+    it "rejects an exclusive task whose row exceeds the installed ceiling (K3001)" $
+      compiledCodes
+        ( "agent overreach(value: null) -> null {\n"
+            <> "  store.set(target = store.root(), key = \"x\", value = 1)\n"
+            <> "  null\n"
+            <> "}\n"
+            <> "agent driver() -> unknown with store.get {\n"
+            <> "  use store.serialize[store.get](subtree = store.root())\n"
+            <> "  store.exclusive(task = overreach)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects a ceiling that carries exclusive itself: a nested exclusive would escape its scope, so the lacks bound stops it (K3001)" $
+      compiledCodes
+        ( "agent noop(value: null) -> null { null }\n"
+            <> "agent nested(value: null) -> null {\n"
+            <> "  store.exclusive(task = noop)\n"
+            <> "  null\n"
+            <> "}\n"
+            <> "agent driver() -> unknown with store.get {\n"
+            <> "  use store.serialize[store.exclusive[pure]](subtree = store.root())\n"
+            <> "  store.exclusive(task = nested)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
@@ -1673,7 +1808,8 @@ letStatement :: LocalVariableId -> Expression Identified -> Statement Identified
 letStatement localId value =
   StatementLet
     LetStatement
-      { pattern = PatternVariable variablePatternFor,
+      { annotation = Nothing,
+        pattern = PatternVariable variablePatternFor,
         value = value,
         sourceSpan = testSpan
       }
@@ -1968,7 +2104,8 @@ letStatementAnnotated :: LocalVariableId -> SyntacticTypeExpression Identified -
 letStatementAnnotated localId annotation value =
   StatementLet
     LetStatement
-      { pattern =
+      { annotation = Nothing,
+        pattern =
           PatternVariable
             VariablePattern
               { name = "x",
@@ -1985,7 +2122,7 @@ letStatementAnnotated localId annotation value =
 letStatementWithPattern :: Pattern Identified -> Expression Identified -> Statement Identified
 letStatementWithPattern letPattern value =
   StatementLet
-    LetStatement {pattern = letPattern, value = value, sourceSpan = testSpan}
+    LetStatement {annotation = Nothing, pattern = letPattern, value = value, sourceSpan = testSpan}
 
 ------------------------------------------------------------------------------------------------
 -- Jump statement fixtures

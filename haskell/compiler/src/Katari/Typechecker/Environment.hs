@@ -471,7 +471,10 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
           genericsInScope = mempty,
           world = bottomAttribute,
           -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
-          comparingAgentParameters = False
+          comparingAgentParameters = False,
+          -- The env-build normalizes declarations, not agent bodies, so there is no handler geometry
+          -- to enrich a message with here.
+          laterHandlerInstallSites = mempty
         }
 
     -- The preliminary environment (variance only) suffices to normalize the bound expressions.

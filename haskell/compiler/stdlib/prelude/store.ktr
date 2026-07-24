@@ -82,3 +82,91 @@ type entry = leaf | branch
 per segment with entries below it (sorted; a name that is both leaf and branch yields both). The
 file-system face of the tree — descend a branch with `scope`."
 request list(target: store) -> array[entry]
+
+// ── serialize: one subtree's write-serialization scope ───────────────────────────────────────────
+//
+// Writes are last-write-wins, so a read-modify-write is NOT atomic on its own: two concurrently
+// dispatched tools (a `parallel for` tool batch) that each read a record, edit it and write it
+// back lose one edit. `serialize` packages the discipline every app hand-rolled for this (a
+// mutation sum, a request carrying it, a deliberately sequential handler): ONE install = ONE
+// serialization domain = ONE subtree. The scope is AMBIENT, reader-monad style — no subtree is
+// threaded through the tools; `current` answers the one subtree where it is needed, and
+// `exclusive` runs a whole task as a CRITICAL SECTION inside the provider's own SEQUENTIAL
+// handler, whose FIFO is the atomicity.
+
+@"The ambient subtree of the enclosing `serialize` scope — the reader-monad read: no subtree is
+threaded through the tools, the scope's one subtree is asked for where it is needed. Served
+statelessly by `serialize`. Performable anywhere in its continuation EXCEPT inside an `exclusive`
+task (the ceiling's `lacks` bound excludes it there — read it BEFORE entering and close over the
+value, as `modify` does; the subtree is constant for the scope, so nothing is lost)."
+request current() -> store
+
+@"Run @task@ as a CRITICAL SECTION of the enclosing `serialize` scope: the provider's SEQUENTIAL
+handler calls it in its own body, so two exclusives can never interleave — the handler's FIFO is
+the atomicity, even against a `parallel for` tool batch. This is the general form: a task may read
+and write several keys as one atomic unit (`modify` is the one-key sugar). The task's answer
+crosses the handler as `unknown`; narrow it back with a `match` (or `json.validate[T]`). An
+`exclusive` cannot nest: an inner perform would escape the scope it is already inside, so the
+ceiling's `lacks` bound makes it a type error rather than an escaped request."
+request exclusive[effect E](
+  @"The critical section; its row must fit the ceiling the install pinned." task: agent (value: null) -> unknown with E,
+) -> unknown
+
+@"Open a write-serialization scope over @subtree@ for the extent of @continuation@ — the
+`use store.serialize[<ceiling>](subtree = ...)` form. Serves `current` (the ambient subtree,
+stateless) and `exclusive` (the critical section) — the latter with a deliberately SEQUENTIAL
+handler: its FIFO applies exclusives one at a time, in arrival order, which is the whole point (a
+`parallel handler` would forfeit the atomicity). Pin the ceiling `Etask` — the union row an
+`exclusive` task may raise, which therefore also joins this provider's own result row — as the
+first type argument; it cannot be inferred from the payload, exactly like a nursery's fiber
+ceiling. The ceiling `lacks current | exclusive`: a task reads the subtree through a value closed
+over BEFORE entering (see `modify`), and a nested `exclusive` is a compile error instead of an
+escaped perform. Install ONCE per dynamic scope: `current` / `exclusive` are one AMBIENT channel,
+so an install below another SHADOWS it — the inner captures every exclusive beneath it, typed
+against the inner ceiling and answering the inner subtree — which is why several store-mutating
+toolsets serialize by UNIONING their ceilings into one install, never by nesting installs. And
+ONCE per subtree: two scopes over one subtree (in sibling contexts) are two independent
+serialization domains, i.e. exactly the race this scope exists to prevent. Atomicity is
+WITHIN-RUN: the FIFO serializes one run's exclusives; a concurrent writer RUN on the same subtree
+is out of scope, so keep the single-writer discipline (one resident run owns a subtree's writes)."
+agent serialize[effect Etask lacks current | exclusive, R, effect E](
+  @"The one subtree this scope serializes." subtree: store,
+  @"Runs with `current` and `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, current, exclusive[Etask]},
+) -> R with E | Etask {
+  use handler {
+    request current() { next subtree }
+  }
+  // Deliberately NOT a `parallel handler`: the FIFO of a sequential handler is what makes an
+  // exclusive a critical section — tasks run one at a time, in arrival order.
+  use handler {
+    request exclusive(task: agent (value: null) -> unknown with Etask) {
+      next task(value = null)
+    }
+  }
+  continuation(value = null)
+}
+
+@"Read the scope's @key@ (a missing entry reads as `null`), apply @transform@, write the result
+back, and return it — the one-key read-modify-write, atomic because it rides `exclusive`. The
+stored value crosses as `unknown`; pin an expected shape inside @transform@ with a `match` (or
+`json.validate[T]`), and remember a stored `null` and a missing entry read the same here (use a
+bare `get` when that distinction matters)."
+agent modify[effect E](
+  @"The key under the scope's subtree." key: string,
+  @"Old value in (`null` when the entry is missing), new value out." transform: agent (value: unknown) -> unknown with E,
+) -> unknown with current | exclusive[{...E, get, set}] {
+  // The ambient read is hoisted OUT of the critical section on purpose: the subtree is constant
+  // for the scope (so reading it early loses nothing), and the ceiling's `lacks` bound excludes
+  // `current` inside a task.
+  let subtree = current()
+  agent update(value: null) -> unknown with {...E, get, set} {
+    let existing = match (get(target = subtree, key = key)) {
+      case found(value => value) -> value
+      case absent(key => _) -> null
+    }
+    let updated = transform(value = existing)
+    set(target = subtree, key = key, value = updated)
+    updated
+  }
+  exclusive(task = update)
+}

@@ -18,6 +18,17 @@ import type { BlobId, ScopeId, SnapshotId } from "../ids.js";
 /** The privacy SSoT: when true, the value is treated as private at rest, in transit, and in logs. */
 export type PrivacyMarker = { private?: boolean };
 
+/** A doc-let stamp (`@"..." let name = value`): the bound variable's name and the doc text, carried
+ *  on the VALUE. Unlike the monotonic privacy taint, the stamp is last-write-wins (a later
+ *  documented let overwrites it) and an undocumented let passes the value through untouched. It
+ *  never affects `==`. Its one consumer today is `get_metadata`, which resolves the value-attached
+ *  name / description before the referenced agent block's own. */
+export type ValueNaming = { name: string; description: string };
+
+/** The naming-stamp channel, the second value attribute next to `PrivacyMarker` (the at-rest JSON
+ *  keeps it inline like `private`, so it persists across restarts on every value kind). */
+export type NamingMarker = { naming?: ValueNaming };
+
 export type Value = (
   | { kind: "null" }
   | { kind: "boolean"; value: boolean }
@@ -38,7 +49,8 @@ export type Value = (
   | AgentValue
   | ToolValue
 ) &
-  PrivacyMarker;
+  PrivacyMarker &
+  NamingMarker;
 
 /** The semantic kind of the bytes a blob holds: a promoted large `string`, or a `file` value. */
 export type SemanticKind = "string" | "file";

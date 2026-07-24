@@ -105,6 +105,32 @@ spec = describe "lowerModule (via compile)" $ do
               "agent helper(x: integer) -> integer { x }\nagent caller(y: integer) -> integer { helper(x = y) }"
       delegateGenericsTo irModule (testName "helper") `shouldBe` Just []
 
+  describe "doc-on-let (the stampDescription operation)" $ do
+    it "a documented let stamps the bound value with the variable's name and the doc text" $ do
+      let irModule =
+            loweredTestModule
+              "agent read_digest(x: integer) -> integer { x }\n\
+              \agent main() -> agent (x: integer) -> integer {\n\
+              \  @\"the herald's window\"\n\
+              \  let herald_view = read_digest\n\
+              \  herald_view\n\
+              \}"
+      case stampOperations irModule of
+        [operation] -> do
+          operation.name `shouldBe` "herald_view"
+          operation.description `shouldBe` "the herald's window"
+        other -> expectationFailure ("expected exactly one stampDescription, got " <> show other)
+
+    it "an undocumented let emits no stamp" $ do
+      let irModule =
+            loweredTestModule
+              "agent read_digest(x: integer) -> integer { x }\n\
+              \agent main() -> agent (x: integer) -> integer {\n\
+              \  let plain_view = read_digest\n\
+              \  plain_view\n\
+              \}"
+      stampOperations irModule `shouldBe` []
+
   describe "the use call-provider (one delegate, the continuation joined with the written arguments)" $ do
     let source =
           "agent supply[R, effect E](base: integer, continuation: agent(value: integer) -> R with E) -> R with E { continuation(value = base) }\n"
@@ -584,6 +610,15 @@ loadedAgentNames irModule =
     | information <- Map.elems irModule.blocks,
       BlockSequence sequence' <- [information.block],
       OperationLoadAgent operation <- sequence'.operations
+  ]
+
+-- | Every @stampDescription@ operation in the module (a documented let emits exactly one).
+stampOperations :: IRModule -> List StampDescriptionOperation
+stampOperations irModule =
+  [ operation
+    | information <- Map.elems irModule.blocks,
+      BlockSequence sequence' <- [information.block],
+      OperationStampDescription operation <- sequence'.operations
   ]
 
 -- | The operations of the body sequence of the named entry agent.

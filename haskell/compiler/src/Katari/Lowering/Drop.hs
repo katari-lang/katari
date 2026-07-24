@@ -163,6 +163,7 @@ operationVariables = \case
   OperationGetField operation -> [operation.source, operation.output]
   OperationBindPattern operation -> operation.source : patternVariables operation.pattern
   OperationApplyGenerics operation -> [operation.source, operation.output]
+  OperationStampDescription operation -> [operation.source, operation.output]
   OperationExit operation -> [operation.value]
   OperationContinue operation ->
     maybeToList operation.value <> concatMap (\(state, value) -> [state, value]) operation.modifiers
@@ -188,6 +189,7 @@ operationWrites = \case
   OperationGetField operation -> [operation.output]
   OperationBindPattern operation -> patternVariables operation.pattern
   OperationApplyGenerics operation -> [operation.output]
+  OperationStampDescription operation -> [operation.output]
   OperationExit _ -> []
   OperationContinue _ -> []
   OperationDrop _ -> []

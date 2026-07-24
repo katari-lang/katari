@@ -117,18 +117,19 @@ resolveTemplateElement = \case
 -- Field access / module-qualified reference
 ---------------------------------------------------------------------------------------------------
 
--- | @object.field@ is a module-qualified reference when @object@ is a bare name bound to a module
--- and not to a value (a value of the same name shadows the module); otherwise an ordinary field
--- access.
+-- | @object.field@ is a module-qualified reference when @object@ is a bare name bound to a module —
+-- even when a same-named VALUE binding is also in scope. The qualifier position is unambiguous, not a
+-- preference: a value binding can never be the head of a qualified reference (a value has no module
+-- members), while parameter names are structural (part of an agent's type), so a callback forced to
+-- name its parameter after a module (e.g. @time@) must still reach @time.now()@. The bare name keeps
+-- resolving through the value namespace, so the same-named parameter stays usable as a value.
 resolveFieldAccess :: FieldAccessExpression Parsed -> Identifier (Expression Identified)
 resolveFieldAccess node = case node.object of
   ExpressionVariable variableExpression -> do
-    asValue <- lookupVariable variableExpression.name
     asModule <- lookupModule variableExpression.name
-    case (asValue, asModule) of
-      -- A value shadows a like-named module, so a bound value (or neither) is an ordinary field access.
-      (Nothing, Just moduleName) -> qualifiedReference node variableExpression moduleName
-      _ -> ordinaryFieldAccess node
+    case asModule of
+      Just moduleName -> qualifiedReference node variableExpression moduleName
+      Nothing -> ordinaryFieldAccess node
   _ -> ordinaryFieldAccess node
 
 ordinaryFieldAccess :: FieldAccessExpression Parsed -> Identifier (Expression Identified)
@@ -391,7 +392,7 @@ resolveStatement blockSpan statement continueRest = case statement of
   StatementLet node -> do
     value <- resolveExpression node.value
     (letPattern, bindings) <- resolvePattern node.pattern
-    bindInScope (restOfBlock node.sourceSpan blockSpan) bindings (prepend (StatementLet LetStatement {pattern = letPattern, value = value, sourceSpan = node.sourceSpan}) continueRest)
+    bindInScope (restOfBlock node.sourceSpan blockSpan) bindings (prepend (StatementLet LetStatement {annotation = node.annotation, pattern = letPattern, value = value, sourceSpan = node.sourceSpan}) continueRest)
   StatementUse node -> do
     provider <- resolveExpression node.provider
     (binder, bindings) <- resolveMaybePattern node.binder

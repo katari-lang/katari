@@ -569,6 +569,68 @@ describe("prelude.reflection.get_metadata", () => {
     );
   });
 
+  test("a doc-let naming stamp resolves before the block's own name / description", async () => {
+    // `@"the herald's window" let herald_view = greeter` — the stamped VALUE renames and
+    // re-describes; the schemas stay the referenced block's own (a stamp never re-types).
+    const context = contextWith(irWith());
+    const metadata = await run(
+      "prelude.reflection.get_metadata",
+      {
+        value: {
+          kind: "agent",
+          name: createAgentName("main.greeter"),
+          snapshot: SNAPSHOT,
+          naming: { name: "herald_view", description: "the herald's window" },
+        },
+      },
+      context,
+    );
+    if (metadata.kind !== "record") throw new Error("expected a record");
+    expect(metadata.fields.name).toEqual(str("herald_view"));
+    expect(metadata.fields.description).toEqual(str("the herald's window"));
+    const input = metadata.fields.input;
+    if (input === undefined) throw new Error("metadata is missing input");
+    await expect(asJson(input)).resolves.toEqual({
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+      additionalProperties: true,
+    });
+    // Without a stamp the SAME reference falls back to the block's metadata (the pre-stamp answer).
+    const plain = await run(
+      "prelude.reflection.get_metadata",
+      { value: { kind: "agent", name: createAgentName("main.greeter"), snapshot: SNAPSHOT } },
+      context,
+    );
+    if (plain.kind !== "record") throw new Error("expected a record");
+    expect(plain.fields.name).toEqual(str("main.greeter"));
+    expect(plain.fields.description).toEqual(str("Returns a greeting."));
+  });
+
+  test("a stamp on a tool overrides the minted name / description, keeping its schemas", async () => {
+    const tool: Value = {
+      kind: "tool",
+      reactor: "mcp",
+      name: "weather",
+      description: "Looks up the weather.",
+      context: { kind: "record", fields: {} },
+      snapshot: SNAPSHOT,
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      naming: { name: "forecast", description: "renamed by a doc-let" },
+    };
+    const metadata = await run("prelude.reflection.get_metadata", { value: tool }, contextWith(irWith()));
+    if (metadata.kind !== "record") throw new Error("expected a record");
+    expect(metadata.fields.name).toEqual(str("forecast"));
+    expect(metadata.fields.description).toEqual(str("renamed by a doc-let"));
+    const input = metadata.fields.input;
+    if (input === undefined) throw new Error("metadata is missing input");
+    await expect(asJson(input)).resolves.toEqual({
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    });
+  });
+
   test("a reactor-backed tool presents its minted name / description / schemas", async () => {
     const context = contextWith(irWith());
     const toolSchema = {

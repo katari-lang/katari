@@ -50,12 +50,12 @@ newtype Metadata = Metadata
   }
   deriving stock (Eq, Show)
 
--- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop'
--- and version 3 'OperationDefer': each time the wire shape gained an operation an older runtime
--- cannot execute, and this constant is exactly that contract — a runtime rejects IR whose version
--- it does not understand.
+-- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop',
+-- version 3 'OperationDefer', and version 4 'OperationStampDescription': each time the wire shape
+-- gained an operation an older runtime cannot execute, and this constant is exactly that contract —
+-- a runtime rejects IR whose version it does not understand.
 currentMetadata :: Metadata
-currentMetadata = Metadata {schemaVersion = 3}
+currentMetadata = Metadata {schemaVersion = 4}
 
 -- | One module's lowered output. The runtime loads it and resolves callables by 'QualifiedName'
 -- through 'entries'
@@ -299,6 +299,12 @@ data Operation where
   OperationBindPattern :: BindPatternOperation -> Operation
   -- | Attach a generic substitution to a callable value (for @get_metadata@ schema specialisation).
   OperationApplyGenerics :: ApplyGenericsOperation -> Operation
+  -- | Stamp a documented @let@'s naming — the bound variable's name and its @\@"..."@ description —
+  -- onto the value (copy-on-write into 'output'). The stamp is a value attribute like the @private@
+  -- marker: it travels with the value and persists, but is last-write-wins (a later documented let
+  -- overwrites it) and never affects @==@. Its one consumer today is @get_metadata@, which resolves
+  -- the value-attached name / description before the referenced agent block's own.
+  OperationStampDescription :: StampDescriptionOperation -> Operation
   -- | A non-local exit (return / break / for-break). 'target' is the enclosing block it unwinds to;
   -- the kind is implied by that block (agent = return, handle = break, for = for-break).
   OperationExit :: ExitOperation -> Operation
@@ -379,6 +385,17 @@ data GetFieldOperation = GetFieldOperation
 data BindPatternOperation = BindPatternOperation
   { source :: VariableId,
     pattern :: Pattern
+  }
+  deriving stock (Eq, Show)
+
+-- | See 'OperationStampDescription'. 'name' is the let variable's name (the value's public metadata
+-- name from now on) and 'description' the annotation text; both are always present — a documented
+-- let necessarily binds a named variable.
+data StampDescriptionOperation = StampDescriptionOperation
+  { source :: VariableId,
+    name :: Text,
+    description :: Text,
+    output :: VariableId
   }
   deriving stock (Eq, Show)
 
@@ -629,6 +646,10 @@ instance ToJSON Operation where
     OperationBindPattern op -> taggedObject "bindPattern" ["source" .= op.source, "pattern" .= op.pattern]
     OperationApplyGenerics op ->
       taggedObject "applyGenerics" ["source" .= op.source, "generics" .= op.generics, "output" .= op.output]
+    OperationStampDescription op ->
+      taggedObject
+        "stampDescription"
+        ["source" .= op.source, "name" .= op.name, "description" .= op.description, "output" .= op.output]
     OperationExit op -> taggedObject "exit" ["target" .= op.target, "value" .= op.value]
     OperationContinue op ->
       taggedObject "continue" ["target" .= op.target, "value" .= op.value, "modifiers" .= op.modifiers]

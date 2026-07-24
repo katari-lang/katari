@@ -34,8 +34,8 @@ export type GenericId = number;
 
 export type Metadata = {
   /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles.
-   *  Version 2 added the `drop` operation and version 3 the `defer` operation, each of which an
-   *  older runtime cannot execute. */
+   *  Version 2 added the `drop` operation, version 3 the `defer` operation, and version 4 the
+   *  `stampDescription` operation, each of which an older runtime cannot execute. */
   schemaVersion: number;
 };
 
@@ -261,6 +261,7 @@ export type Operation =
   | GetFieldOperation
   | BindPatternOperation
   | ApplyGenericsOperation
+  | StampDescriptionOperation
   | ExitOperation
   | ContinueOperation
   | DropOperation
@@ -323,6 +324,21 @@ export type ApplyGenericsOperation = {
   kind: "applyGenerics";
   source: VariableId;
   generics: Array<[string, GenericArgumentSchema]>;
+  output: VariableId;
+};
+
+/**
+ * Stamp a documented `let`'s naming — the bound variable's name and its `@"..."` description — onto
+ * the value (copy-on-write into `output`). The stamp is a value attribute like the `private` marker:
+ * it travels with the value and persists, but is last-write-wins (a later documented let overwrites
+ * it) and never affects `==`. Its one consumer today is `get_metadata`, which resolves the
+ * value-attached name / description before the referenced agent block's own.
+ */
+export type StampDescriptionOperation = {
+  kind: "stampDescription";
+  source: VariableId;
+  name: string;
+  description: string;
   output: VariableId;
 };
 

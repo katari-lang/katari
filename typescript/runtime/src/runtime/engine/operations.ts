@@ -143,6 +143,15 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
       );
       return true;
     }
+    case "stampDescription":
+      // A documented let: copy-on-write the value with its new naming (the let variable's name + the
+      // doc text). Last write wins — a later documented let replaces an earlier stamp wholesale —
+      // and every other attribute (the privacy marker included) rides along on the spread.
+      writeVariable(ctx.store, scope, operation.output, {
+        ...requireVariable(ctx, scope, operation.source),
+        naming: { name: operation.name, description: operation.description },
+      });
+      return true;
     case "call":
       enterCall(ctx, thread, operation.target, operation.output);
       return false;

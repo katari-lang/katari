@@ -69,6 +69,7 @@ import Katari.Typechecker.Context
     runNormalizer,
     withEffectInference,
     withGeneric,
+    withHandlerInstallSites,
     withLocal,
     withParameters,
     withWorld,
@@ -240,7 +241,8 @@ runLetStatement letStmt rest continuation = do
       (typedPattern, _, bindings) <- checkPattern otherPattern valueType
       pure (typedValue, typedPattern, bindings)
   (result, restTyped, useExit) <- withParameters bindings (walkStatements rest continuation)
-  let typedLetStmt = LetStatement {pattern = typedPattern, value = typedValue, sourceSpan = letStmt.sourceSpan}
+  -- The doc annotation has no typing effect (it stamps the value at run time); it only rides along.
+  let typedLetStmt = LetStatement {annotation = letStmt.annotation, pattern = typedPattern, value = typedValue, sourceSpan = letStmt.sourceSpan}
   pure (result, StatementLet typedLetStmt : restTyped, useExit)
 
 -- | A local agent declaration: bind its type as a local for the remainder of the block — and, when
@@ -2686,6 +2688,31 @@ assembleTypedAgentDeclaration declaration typedParameters typedBody functionType
       sourceSpan = declaration.sourceSpan
     }
 
+-- | Every request served by a @use handler@ literal on an agent body's statement spine, mapped to the
+-- handler's install site (the @use@ statement). The map feeds ONLY the handler-geometry note on an
+-- unhandled-request error ('Katari.Typechecker.Normalizer.handlerGeometryNote'): when the check fails
+-- on a request a lexically-later handler serves, the defect is handler ORDER, and the error can then
+-- say so instead of pointing at the perform alone. The walk follows the spine only — each @use@ nests
+-- the rest of its block as its continuation body, so the spine continues inside it — and deliberately
+-- does not descend into branches, loops, handler request bodies or nested agents: a handler installed
+-- there has a geometry of its own, and a wrong line number would be worse than silence. Duplicate
+-- serving clauses keep the earliest site (the left bias of 'Map.unions' over the spine order).
+handlerInstallSites :: Block Identified -> Map QualifiedName SourceSpan
+handlerInstallSites block = foldr collectStatement Map.empty block.statements
+  where
+    collectStatement statement below = case statement of
+      StatementUse useStatement ->
+        let served = case useStatement.provider of
+              ExpressionHandler handlerExpression ->
+                Map.fromList
+                  [ (requestName, useStatement.sourceSpan)
+                    | clause <- handlerExpression.handlers,
+                      Just (TypeResolutionQualifiedName requestName) <- [clause.typeReference.resolution]
+                  ]
+              _ -> Map.empty
+         in Map.unions [served, handlerInstallSites useStatement.body, below]
+      _ -> below
+
 -- | The agent-body walk shared by the acyclic ('synthAgent') and recursive ('checkAgentBody') paths:
 -- bring the agent's generics, world (declared attribute) and parameters into scope, push the agent's
 -- @return@ boundary ('enterAgentBody') and capture its own @return@s (so a local agent's @return@ does
@@ -2706,6 +2733,10 @@ walkAgentBody declaration preparation expectedReturn expectedEffect =
   withGenerics preparation.genericParameters
     . withWorld preparation.declaredAttribute
     . withParameters preparation.parameterBindings
+    -- The body's handler geometry is collected up front (not during the walk): an effect check can
+    -- fail BEFORE the walk reaches a handler installed further down, and it is exactly that
+    -- not-yet-reached handler the enriched message must be able to name.
+    . withHandlerInstallSites (handlerInstallSites declaration.body)
     $ do
       boundaryId <- freshBoundaryId
       (bodyEffect, (typedBody, tailType)) <-

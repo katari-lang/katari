@@ -356,7 +356,8 @@ environment =
             (boundedEffectGeneric, boundedEffectParameter)
           ],
       world = bottomAttribute,
-      comparingAgentParameters = False
+      comparingAgentParameters = False,
+      laterHandlerInstallSites = mempty
     }
   where
     dataInfoOf qualifiedName argumentVariance =

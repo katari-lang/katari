@@ -155,8 +155,16 @@ identifySpec = do
       diagnosticsOf result `shouldSatisfy` null
       mainCallCallee (moduleOf result) `shouldSatisfy` maybe False isQualifiedReference
 
-    it "keeps a field access on a value with no diagnostic (a value shadows a like-named module)" $ do
-      let result = identify contextWithLib "import lib\nagent main(lib: integer) -> integer { lib.field }"
+    it "resolves module.member past a same-named parameter (the qualifier position is the module namespace)" $ do
+      -- Parameter names are structural, so a callback can be FORCED to name a parameter after a
+      -- module; a value has no module members, so `lib.double` can only mean the module's member and
+      -- the parameter must not lock it out. The bare name still resolves to the parameter as a value.
+      let result = identify contextWithLib "import lib\nagent main(lib: integer) -> integer { lib.double(x = lib) }"
+      diagnosticsOf result `shouldSatisfy` null
+      mainCallCallee (moduleOf result) `shouldSatisfy` maybe False isQualifiedReference
+
+    it "keeps a field access on a value whose name matches no module" $ do
+      let result = identify contextWithLib "import lib\nagent main(p: integer) -> integer { p.field }"
       diagnosticsOf result `shouldSatisfy` null
       mainReturn (moduleOf result) `shouldSatisfy` maybe False isFieldAccess
 

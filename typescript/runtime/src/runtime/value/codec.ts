@@ -31,6 +31,7 @@ import {
   type Json,
   type Literal,
   MODULE_KEY,
+  NAMING_KEY,
   OUTPUT_SCHEMA_KEY,
   REACTOR_KEY,
   REDACTED_KEY,
@@ -51,6 +52,7 @@ import {
   type SemanticKind,
   toToolReactorName,
   type Value,
+  type ValueNaming,
 } from "./types.js";
 
 // ─── the wire conventions ─────────────────────────────────────────────────────────────────────────
@@ -68,6 +70,7 @@ export {
   GENERICS_KEY,
   INPUT_SCHEMA_KEY,
   MODULE_KEY,
+  NAMING_KEY,
   OUTPUT_SCHEMA_KEY,
   REACTOR_KEY,
   REDACTED_KEY,
@@ -241,7 +244,24 @@ function fileFromJson(json: { [key: string]: Json }): Value {
   return { kind: "ref", semanticKind, blobId: blobId as BlobId };
 }
 
-/** `{ "$katari_agent": name, "$katari_snapshot": …, "$katari_generics"? }` -> a top-level agent reference value. */
+/** Read a variant's `$katari_naming` stamp back into the value attribute (the inverse of the write in
+ *  `valueToJson`). A malformed stamp (a wire an AI replays) is dropped rather than refused: the stamp
+ *  is annotation, never structure, so a bad one must not make the value undecodable. */
+function namingFromJson(json: { [key: string]: Json }): ValueNaming | undefined {
+  const naming = json[NAMING_KEY];
+  if (typeof naming !== "object" || naming === null || Array.isArray(naming)) return undefined;
+  const name = naming.name;
+  const description = naming.description;
+  if (typeof name !== "string" || typeof description !== "string") return undefined;
+  return { name, description };
+}
+
+/** Re-attach a decoded naming stamp (shared by the three callable variants). */
+function withNaming(value: Value, naming: ValueNaming | undefined): Value {
+  return naming === undefined ? value : { ...value, naming };
+}
+
+/** `{ "$katari_agent": name, "$katari_snapshot": …, "$katari_generics"?, "$katari_naming"? }` -> a top-level agent reference value. */
 function agentFromJson(json: { [key: string]: Json }): Value {
   const name = json[AGENT_KEY];
   const snapshot = json[SNAPSHOT_KEY];
@@ -256,7 +276,10 @@ function agentFromJson(json: { [key: string]: Json }): Value {
     snapshot: toSnapshotId(snapshot),
   };
   const generics = json[GENERICS_KEY];
-  return generics !== undefined ? { ...agent, generics: genericsFromJson(generics) } : agent;
+  return withNaming(
+    generics !== undefined ? { ...agent, generics: genericsFromJson(generics) } : agent,
+    namingFromJson(json),
+  );
 }
 
 /** `{ "$katari_closure": blockId, "$katari_scope_id": …, "$katari_snapshot": …, "$katari_module": …, "$katari_generics"? }` -> a closure value. */
@@ -283,7 +306,10 @@ function closureFromJson(json: { [key: string]: Json }): Value {
     module,
   };
   const generics = json[GENERICS_KEY];
-  return generics !== undefined ? { ...closure, generics: genericsFromJson(generics) } : closure;
+  return withNaming(
+    generics !== undefined ? { ...closure, generics: genericsFromJson(generics) } : closure,
+    namingFromJson(json),
+  );
 }
 
 /** `{ "$katari_tool": name, "$katari_reactor", "$katari_context", "$katari_snapshot", "$katari_description", "$katari_input_schema", "$katari_output_schema"? }`
@@ -317,7 +343,10 @@ function toolFromJson(json: { [key: string]: Json }): Value {
     inputSchema: jsonToSchema(json[INPUT_SCHEMA_KEY] ?? {}),
   };
   const outputSchema = json[OUTPUT_SCHEMA_KEY];
-  return outputSchema === undefined ? tool : { ...tool, outputSchema: jsonToSchema(outputSchema) };
+  return withNaming(
+    outputSchema === undefined ? tool : { ...tool, outputSchema: jsonToSchema(outputSchema) },
+    namingFromJson(json),
+  );
 }
 
 // ─── Value → bare Json (façade / FFI output boundary) ────────────────────────────────────────────
@@ -370,6 +399,7 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
       out[AGENT_KEY] = value.name;
       out[SNAPSHOT_KEY] = value.snapshot;
       if (value.generics !== undefined) out[GENERICS_KEY] = genericsToJson(value.generics);
+      if (value.naming !== undefined) out[NAMING_KEY] = { ...value.naming };
       return out;
     }
     case "closure": {
@@ -381,6 +411,7 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
       out[SNAPSHOT_KEY] = value.snapshot;
       out[MODULE_KEY] = value.module;
       if (value.generics !== undefined) out[GENERICS_KEY] = genericsToJson(value.generics);
+      if (value.naming !== undefined) out[NAMING_KEY] = { ...value.naming };
       return out;
     }
     case "tool": {
@@ -393,6 +424,7 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
       out[INPUT_SCHEMA_KEY] = schemaToJson(value.inputSchema);
       if (value.outputSchema !== undefined)
         out[OUTPUT_SCHEMA_KEY] = schemaToJson(value.outputSchema);
+      if (value.naming !== undefined) out[NAMING_KEY] = { ...value.naming };
       return out;
     }
   }

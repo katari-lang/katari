@@ -51,6 +51,11 @@ export const INPUT_SCHEMA_KEY = "$katari_input_schema";
 export const OUTPUT_SCHEMA_KEY = "$katari_output_schema";
 export const REACTOR_KEY = "$katari_reactor";
 export const CONTEXT_KEY = "$katari_context";
+/** A doc-let naming stamp (`{ name, description }`) riding a callable variant (agent / closure /
+ *  tool). Never a discriminator: it only ever appears next to one of the reserved discriminator
+ *  keys, so `wireKindOf` ignores it — a bare record / scalar cannot carry the stamp across the bare
+ *  JSON boundary (it drops there, exactly as the `private` marker does under `reveal`). */
+export const NAMING_KEY = "$katari_naming";
 
 export type WireKind = "data" | "file" | "agent" | "closure" | "tool" | "redacted";
 

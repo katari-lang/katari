@@ -241,6 +241,103 @@ describe("call_agent dispatch", () => {
   });
 });
 
+describe("a doc-let stamped callable (the `stampDescription` operation)", () => {
+  /** The `fixture()` main rewritten as `@"the herald's window" let herald_view = greeter` before the
+   *  `call_agent`: the stamp op copies the loaded agent value with its naming, and the call goes
+   *  through the STAMPED value. */
+  function stampedFixture(): IRModule {
+    const ir = fixture();
+    ir.blocks[1] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "getField", source: 10, field: "args", output: 11 },
+          { kind: "loadAgent", output: 12, name: createAgentName("greeter") },
+          {
+            kind: "stampDescription",
+            source: 12,
+            name: "herald_view",
+            description: "the herald's window",
+            output: 15,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["target", 15],
+              ["args", 11],
+            ],
+            output: 13,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "exit", target: 0, value: 14 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    };
+    return ir;
+  }
+
+  test("still dispatches through call_agent — the stamp renames metadata, never the block reference", async () => {
+    await expect(
+      runMain(stampedFixture(), argsOf({ name: { kind: "string", value: "alice" } })),
+    ).resolves.toEqual({ kind: "string", value: "alice" });
+  });
+
+  test("the stamped value still validates its argument against the target's own schema", async () => {
+    await expect(
+      runMain(stampedFixture(), argsOf({ wrong: { kind: "string", value: "oops" } })),
+    ).rejects.toThrow(/throw: .*prelude\.reflection\.call_error.*greeter.*missing required field/);
+  });
+
+  test("get_metadata on the stamped value resolves the stamp through a real run", async () => {
+    // The whole doc-let loop on the engine: stamp the loaded agent value, hand it to the
+    // `get_metadata` prim, and return the metadata record's `name` — the let variable's name.
+    const ir = stampedFixture();
+    ir.blocks[1] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadAgent", output: 12, name: createAgentName("greeter") },
+          {
+            kind: "stampDescription",
+            source: 12,
+            name: "herald_view",
+            description: "the herald's window",
+            output: 15,
+          },
+          { kind: "makeRecord", entries: [["value", 15]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.reflection.get_metadata") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "getField", source: 14, field: "name", output: 16 },
+          { kind: "exit", target: 0, value: 16 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    };
+    ir.blocks[6] = {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[7] = {
+      block: { kind: "primitive", name: "prelude.reflection.get_metadata", input: 60 },
+      parameters: { parameter: 60 },
+    };
+    ir.entries[createAgentName("prelude.reflection.get_metadata")] = { block: 6, private: false };
+    await expect(runMain(ir, null)).resolves.toEqual({ kind: "string", value: "herald_view" });
+  });
+});
+
 describe("call-site generics on the delegate operation", () => {
   // agent pick[T](x: T) -> T  — input schema { x: $generic 7 }, bindings { T: 7 }.
   // main delegates to it BY NAME with the operation-stamped instantiation [T -> integer] (what the

@@ -6,7 +6,12 @@
 import { createAgentName, type DefaultValue } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
-import { defaultValueToValue, jsonToValue, valueToJson } from "../src/runtime/value/codec.js";
+import {
+  defaultValueToValue,
+  jsonToValue,
+  valueEquals,
+  valueToJson,
+} from "../src/runtime/value/codec.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const SNAPSHOT = "snap-codec" as SnapshotId;
@@ -154,6 +159,69 @@ describe("privacy policy", () => {
 
   test("a redacted document cannot be decoded back", () => {
     expect(() => jsonToValue({ $katari_redacted: true })).toThrow();
+  });
+});
+
+describe("the doc-let naming stamp (`naming`)", () => {
+  const NAMING = { name: "herald_view", description: "the herald's window on the operator" };
+
+  test("an agent reference round-trips its stamp as `$katari_naming`", () => {
+    const stamped: Value = {
+      kind: "agent",
+      name: createAgentName("main.read_digest"),
+      snapshot: SNAPSHOT,
+      naming: NAMING,
+    };
+    expect(valueToJson(stamped, "reveal")).toEqual({
+      $katari_agent: "main.read_digest",
+      $katari_snapshot: SNAPSHOT,
+      $katari_naming: NAMING,
+    });
+    expect(roundTrip(stamped)).toEqual(stamped);
+  });
+
+  test("a closure and a tool round-trip their stamps too", () => {
+    const closure: Value = {
+      kind: "closure",
+      blockId: 3,
+      scopeId: 9 as ScopeId,
+      snapshot: SNAPSHOT,
+      module: "main",
+      naming: NAMING,
+    };
+    expect(roundTrip(closure)).toEqual(closure);
+    const tool: Value = {
+      kind: "tool",
+      reactor: "mcp",
+      name: "weather",
+      description: "minted description",
+      context: { kind: "record", fields: {} },
+      snapshot: SNAPSHOT,
+      inputSchema: {},
+      naming: NAMING,
+    };
+    expect(roundTrip(tool)).toEqual(tool);
+  });
+
+  test("a malformed wire stamp is dropped, never structural", () => {
+    // The stamp is annotation: a wire an AI mangled decodes to the plain reference, not an error.
+    expect(jsonToValue({ $katari_agent: "main.a", $katari_snapshot: SNAPSHOT, $katari_naming: 7 })).toEqual({
+      kind: "agent",
+      name: createAgentName("main.a"),
+      snapshot: SNAPSHOT,
+    });
+  });
+
+  test("valueEquals ignores the stamp on every structurally-compared kind", () => {
+    expect(
+      valueEquals({ kind: "string", value: "x", naming: NAMING }, { kind: "string", value: "x" }),
+    ).toBe(true);
+    const record: Value = { kind: "record", fields: { a: { kind: "integer", value: 1 } } };
+    expect(valueEquals({ ...record, naming: NAMING }, record)).toBe(true);
+    const array: Value = { kind: "array", elements: [{ kind: "integer", value: 2 }] };
+    expect(valueEquals({ ...array, naming: NAMING }, array)).toBe(true);
+    const file: Value = { kind: "ref", semanticKind: "file", blobId: "blob-7" as BlobId };
+    expect(valueEquals({ ...file, naming: NAMING }, file)).toBe(true);
   });
 });
 
