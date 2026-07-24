@@ -173,10 +173,13 @@ handler)に surface する。handler の answer は同じ bridge を降りて fi
 **FIFO かつ serial**(held-open な watch call は同時に 1 件だけ運ぶ。busy 中に来た escalation は mailbox に溜まり
 1 件ずつ drain)。
 
-watch が**無い** nursery は後方互換の path を保つ: mailboxed な escalation は global quiescence(`onQuiesce`)で
-provide 経由で run root に flush UP される。「watch 有無」は quiescence で振り分ける — 登録するはずの watch が
-あればまだ継続が dispatch 中(非 quiescent)なので、quiescence でなお mailbox が埋まっているのは genuinely
-watch-less な nursery。この 1 点で「late watch との race」が起きない。
+watch が**無い** nursery は mailbox をそのまま**保持する**: escalation はどこにも surface せず、durable mailbox に
+到着順で溜まったまま watch の設置を待つ(2026-07-25 M2-6 で quiescence flush-up を全廃)。旧実装は quiescence で
+「watch-less」と判定して run root へ flush UP していたが、継続が fork→watch 間に非同期待ち(FFI / http / AI 呼び出し、
+sleep、escalation 応答待ち)を挟むと決定的に誤 flush する起動レースがあった。加えて flush-up は provide の宣言 row
+(`R with Eouter | io`)に無い request を run root へ漏らす型不正直でもあった(fiber の `E`・`crashed` obligation は
+`watch` の row にしか無い)。よって watch を一度も置かない nursery は escalation を永久にバッファし、watch が任意に
+遅れて(あるいは restart を跨いで)設置された瞬間に到着順で drain される — late watch との race は原理的に消える。
 
 ### 4.6 所有権(delegation graph と cascade)
 

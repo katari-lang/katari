@@ -53,10 +53,11 @@ replay を組んだ瞬間、end-to-end は at-least-once になる。Discord へ
   受け側の `parallel handler` の両方が要る(直列 handler は自分の FIFO で再直列化する — それが正しい場面も
   ある: chat loop はメッセージ順 = turn 順が仕様なので watch 1 本を保て)。実測: width=2 + parallel handler
   で 2 件の escalation 処理が重なり、width=1 では 2 件目が 1 件目の答えを待つ。
-- **fiber は watch 登録前に escalate してはいけない(起動レース)。** watch 登録前の escalation に quiesce
-  判定が重なると「watch の無い nursery」と誤認され、run root へ flush されて operator interview に化ける
-  (runtime の既知レース)。fiber の先頭は sleep / 外部入力待ちで始まるのが安全 — 実運用の source / tick は
-  自然にそうなる。
+- **fiber の escalation は watch 設置まで durable にバッファされる。** watch がまだ無い nursery の fiber
+  escalation は run root へ漏れたりせず(provide の宣言 row は `R with Eouter | io` で fiber の `E` を含まない)、
+  nursery の durable mailbox に到着順で溜まり、watch が設置された瞬間に再放出される。だから fiber は fork 直後に
+  escalate してよい(先頭を sleep で遅らせる必要はない)し、watch は任意に遅れて設置してよい — 起動レースは無い
+  (2026-07-25 M2-6 で quiescence flush-up を全廃)。
 - **region から値で抜ける公式の形は「handler の `break`」。** watch を覆う handler の clause が `break v` する
   と、v が provide の結果として返る(構造化並行の「答えを出して畳む」終わり方)。use で抜けるブロックの型は
   その application の結果型(break union 込み)として推論される — かつては never に潰れて runtime の schema
