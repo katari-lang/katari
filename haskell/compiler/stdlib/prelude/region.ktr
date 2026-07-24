@@ -39,8 +39,11 @@
 // fixed: neither `fork` (which needs `E` as the ceiling) nor `watch` (which re-emits all of it) can
 // widen or narrow it. This is what makes the handler story below sound.
 //
+// Every operation here routes to the runtime's `region` reactor (an external call), so — like
+// `http.fetch` / `time.now` — each performs `io`; every operation's row carries `| io`.
+//
 // WATCH IS THE WHITE HOLE. A fiber's escalations do not surface at its `fork` — a `fork` returns
-// immediately with a handle. They surface at `watch`, whose result row is `E | crashed | Scope`:
+// immediately with a handle. They surface at `watch`, whose result row is `E | crashed | Scope | io`:
 // `watch` is the one place the fibers' requests well up into the enclosing program, so a `handler`
 // (or any effect row) installed around `watch` catches them. Because every fiber's effect fits under
 // `E` and `watch` re-emits the FULL `E` — plus the runtime's own `crashed` event, a fiber's panic
@@ -86,7 +89,7 @@ type nursery[effect Scope, effect E] = agent (gate: agent never -> unknown with 
 @"Open a nursery for the extent of @continuation@, as a scoped provider — the `use region.provide[region.scope, E](...)` form. It hands @continuation@ a `nursery[Scope, E]` handle whose fibers may raise at most the effects `E`, and settles with the continuation's result. `Scope` rides the continuation's row (that is what a `fork` / `cancel` / `watch` raises) and is DISCHARGED from `provide`'s own row, so no fiber outlives the block: the nursery closes when @continuation@ returns (its still-running fibers are cancelled). Pin `Scope` and the ceiling `E` as the first two type arguments (`region.provide[region.scope, my_effects]`); `R` and the residual outer row are inferred from the continuation. Discharging `Scope` is `provide`'s alone (only it opens the nursery), so a live nursery context cannot be forged. NEST UNDER DISTINCT MARKERS: share one marker across two nurseries and their scopes MERGE (fibers become mutually cancellable), so declare a module-local `effect` per nursery when nesting."
 external agent provide[effect Scope, effect E, R, effect Eouter](
   @"The nursery body (bound by `use`): receives the handle, and its fibers run exactly while it does." continuation: agent (value: nursery[Scope, E]) -> R with Eouter | Scope,
-) -> R with Eouter from "region"
+) -> R with Eouter | io from "region"
 
 @"Spawn @task@ (applied to @argument@) as a fiber in the nursery @nursery@, returning immediately with a `fiber[Scope]` handle (identity only — for `cancel`; read its runtime-minted id with `fiber_id`). @name@ is an optional opaque tag the runtime echoes back wherever it talks about this fiber (`roster`, `crashed`) — give one to any fiber something might later need to name. @task@ is `-> null`: A FIBER CARRIES NO RESULT. Everything a fiber produces leaves through its ESCALATIONS (surfacing at `watch`) — a task with something to deliver performs a request carrying it as its LAST act, and what the task returns is discarded when it settles. The type makes the discipline total: a `-> T` task does not fit, so a result cannot be silently dropped — it must have been delivered (or deliberately not produced) before the task can end. (`-> never` bodies — a watcher that runs until cancelled — fit by subtyping.) @task@'s effect must fit under the ceiling `E` (a child that raises less is fine; one that raises more is a type error), so every fiber is bounded by `E` — which is exactly what makes `watch` a total obligation. The fiber's escalations do not surface here; they well up at `watch`. Scope-gated (`with Scope`): callable only inside the `provide` that opened this nursery."
 external agent fork[effect Scope, effect E, A](
@@ -94,18 +97,18 @@ external agent fork[effect Scope, effect E, A](
   @"The child agent to run; `-> null` (results ride escalations), effect under the ceiling `E`." task: agent (input: A) -> null with E,
   @"The argument applied to @task@." argument: A,
   @"An opaque name tag, echoed by `roster` and `crashed`; empty means unnamed." name: string ?= "",
-) -> fiber[Scope] with Scope from "region"
+) -> fiber[Scope] with Scope | io from "region"
 
 @"The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`, plus the runtime's own `crashed` event. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E | crashed`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E | crashed` here covers everything any fiber can surface. This is the ONE channel out of a fiber: a normal completion is silent (the settled `null` is discarded — a task that has something to say says it as its last act), a `cancel` is silent (the canceller knows), and a PANIC — the ending a task cannot report itself — arrives as the typed `crashed` event: the runtime tears the dead fiber down and reports the ending as data, so what a crash MEANS is your handler's decision, not an unwinding accident. Scope-gated (`with Scope`): callable only inside the opening `provide`. WATCH IS TRANSPARENT — IT IMPOSES NO SERIALIZATION OF ITS OWN. It re-emits EVERY fiber escalation CONCURRENTLY, the moment it arrives, so the ONLY serialization point is the RECEIVING handler: a sequential (stateful `var`) handler serializes its OWN invocations at its FIFO, in ARRIVAL order, while a `parallel handler` runs them concurrently. So two escalations to DIFFERENT handlers are ALWAYS concurrent (a handler blocked on one — say a human-latency approval — never starves another), and two to the SAME var handler serialize at that handler in arrival order (a chat loop keeps ONE var handler and stays in order for free). ONE watch is enough: it interleaves every fiber's stream by construction — do NOT run several to gain concurrency (the concurrency is already there; the desks are told apart by their handlers, not by extra watches)."
 external agent watch[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
-) -> never with E | crashed | Scope from "region"
+) -> never with E | crashed | Scope | io from "region"
 
 @"Tear @handle@ down: cancel the fiber and settle. `Scope` is pinned by @nursery@, and @handle@'s own scope must match it, so a fiber from a different nursery is a type error. Idempotent on an already-settled fiber. Scope-gated (`with Scope`): callable only inside the opening `provide`."
 external agent cancel[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
   @"A fiber spawned in THIS nursery (its scope marker must match)." handle: fiber[Scope],
-) -> null with Scope from "region"
+) -> null with Scope | io from "region"
 
 // ── the nursery IS the registry: names, ids, roster, cancel-by-id, and the crashed event ─────────
 //
