@@ -1,0 +1,29 @@
+@"A point in the plane."
+data point(x: integer, y: integer)
+
+@"A question the run can answer: choose one of the options."
+request pick(options: array[integer]) -> integer
+
+@"Fold the values, tag the result, and render it — exercises a spread of surface constructs so the
+lowered IR touches a handler, a for-fold, a match, an if, operators, an f-string, and a delegation."
+agent summarize(values: array[integer]) -> string {
+  use handler {
+    request pick(options: array[integer]) { next 0 }
+  }
+  let chosen = pick(options = values)
+  let total = for (let value in values, var running: integer = 0) {
+    next value * value with { running = running + value }
+  } then (_squares) { running + chosen }
+  let corner = point(x = chosen, y = total)
+  let label = match (corner) {
+    case point(x => xv, y => yv) -> {
+      if (xv < yv) { "small" } else { "large" }
+    }
+  }
+  f"result: ${label}"
+}
+
+@"Entry point: summarize a fixed list of numbers."
+agent main(input: null) -> string {
+  summarize(values = [1, 2, 3])
+}

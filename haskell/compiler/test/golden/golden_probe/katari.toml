@@ -1,0 +1,9 @@
+[package]
+name = "golden_probe"
+description = "Test fixture: a small program whose lowered IR is a committed golden (see test/Katari/Data/IRGoldenSpec.hs)."
+
+[dependencies]
+packages = []
+
+[runtime]
+url = "http://localhost:3000"

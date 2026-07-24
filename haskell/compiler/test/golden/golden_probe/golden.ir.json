@@ -1,0 +1,1122 @@
+{
+  "blocks": {
+    "0": {
+      "block": {
+        "body": 1,
+        "defaults": {},
+        "description": "A point in the plane.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "additionalProperties": false,
+            "properties": {
+              "$katari_constructor": {
+                "const": "golden_probe.point"
+              },
+              "$katari_value": {
+                "additionalProperties": true,
+                "properties": {
+                  "x": {
+                    "type": "integer"
+                  },
+                  "y": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "$katari_constructor",
+              "$katari_value"
+            ],
+            "type": "object"
+          },
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "1": {
+      "block": {
+        "input": 0,
+        "kind": "construct",
+        "name": "golden_probe.point"
+      },
+      "parameters": {
+        "parameter": 0
+      }
+    },
+    "10": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "loadLiteral",
+            "output": 30,
+            "value": {
+              "kind": "string",
+              "value": "large"
+            }
+          }
+        ],
+        "result": 30
+      },
+      "parameters": {}
+    },
+    "11": {
+      "block": {
+        "arms": [
+          {
+            "body": 9,
+            "pattern": {
+              "kind": "literal",
+              "value": {
+                "kind": "boolean",
+                "value": true
+              }
+            }
+          }
+        ],
+        "fallback": 10,
+        "kind": "match",
+        "subject": 28
+      },
+      "parameters": {}
+    },
+    "12": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "entries": [
+              [
+                "left",
+                25
+              ],
+              [
+                "right",
+                26
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 27
+          },
+          {
+            "argument": 27,
+            "generics": [
+              [
+                "T",
+                {
+                  "kind": "type",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            ],
+            "kind": "delegate",
+            "output": 28,
+            "target": {
+              "kind": "name",
+              "name": "prelude.less_than"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              27
+            ]
+          },
+          {
+            "kind": "call",
+            "output": 31,
+            "target": 11
+          }
+        ],
+        "result": 31
+      },
+      "parameters": {}
+    },
+    "13": {
+      "block": {
+        "arms": [
+          {
+            "body": 12,
+            "pattern": {
+              "fields": [
+                [
+                  "x",
+                  {
+                    "kind": "variable",
+                    "variable": 25
+                  }
+                ],
+                [
+                  "y",
+                  {
+                    "kind": "variable",
+                    "variable": 26
+                  }
+                ]
+              ],
+              "kind": "constructor",
+              "name": "golden_probe.point"
+            }
+          }
+        ],
+        "fallback": null,
+        "kind": "match",
+        "subject": 24
+      },
+      "parameters": {}
+    },
+    "14": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "entries": [
+              [
+                "options",
+                3
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 5
+          },
+          {
+            "argument": 5,
+            "kind": "delegate",
+            "output": 6,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.pick"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              5
+            ]
+          },
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 7
+            },
+            "source": 6
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              6
+            ]
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 8,
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          },
+          {
+            "kind": "call",
+            "output": 20,
+            "target": 6
+          },
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 21
+            },
+            "source": 20
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              20
+            ]
+          },
+          {
+            "entries": [
+              [
+                "x",
+                7
+              ],
+              [
+                "y",
+                21
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 22
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              21
+            ]
+          },
+          {
+            "argument": 22,
+            "kind": "delegate",
+            "output": 23,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.point"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              22
+            ]
+          },
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 24
+            },
+            "source": 23
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              23
+            ]
+          },
+          {
+            "kind": "call",
+            "output": 32,
+            "target": 13
+          },
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 33
+            },
+            "source": 32
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              32
+            ]
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 34,
+            "value": {
+              "kind": "string",
+              "value": "result: "
+            }
+          },
+          {
+            "entries": [
+              [
+                "value",
+                33
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 35
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              33
+            ]
+          },
+          {
+            "argument": 35,
+            "kind": "delegate",
+            "output": 36,
+            "target": {
+              "kind": "name",
+              "name": "prelude.string.to_string"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              35
+            ]
+          },
+          {
+            "entries": [
+              [
+                "left",
+                34
+              ],
+              [
+                "right",
+                36
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 37
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              34,
+              36
+            ]
+          },
+          {
+            "argument": 37,
+            "kind": "delegate",
+            "output": 38,
+            "target": {
+              "kind": "name",
+              "name": "prelude.concat"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              37
+            ]
+          }
+        ],
+        "result": 38
+      },
+      "parameters": {
+        "parameter": 4
+      }
+    },
+    "15": {
+      "block": {
+        "body": 19,
+        "defaults": {},
+        "description": "",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "continuation": {
+                "additionalProperties": true,
+                "properties": {
+                  "$katari_agent": {}
+                },
+                "required": [
+                  "$katari_agent"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "continuation"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "$generic": 0
+          },
+          "requests": [
+            {
+              "generic": 1,
+              "kind": "generic"
+            }
+          ]
+        }
+      },
+      "parameters": {}
+    },
+    "16": {
+      "block": {
+        "body": 17,
+        "handlers": [
+          {
+            "body": 18,
+            "request": "golden_probe.pick"
+          }
+        ],
+        "initialStates": [],
+        "kind": "handle",
+        "parallel": false,
+        "thenClause": null
+      },
+      "parameters": {}
+    },
+    "17": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "entries": [],
+            "kind": "makeRecord",
+            "output": 42
+          },
+          {
+            "argument": 42,
+            "kind": "delegate",
+            "output": 43,
+            "target": {
+              "kind": "value",
+              "variable": 41
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              42
+            ]
+          }
+        ],
+        "result": 43
+      },
+      "parameters": {}
+    },
+    "18": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "options",
+            "kind": "getField",
+            "output": 45,
+            "source": 44
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              45
+            ]
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 46,
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          },
+          {
+            "kind": "continue",
+            "modifiers": [],
+            "target": 16,
+            "value": 46
+          }
+        ],
+        "result": null
+      },
+      "parameters": {
+        "parameter": 44
+      }
+    },
+    "19": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "continuation",
+            "kind": "getField",
+            "output": 41,
+            "source": 40
+          },
+          {
+            "kind": "call",
+            "output": 47,
+            "target": 16
+          }
+        ],
+        "result": 47
+      },
+      "parameters": {
+        "parameter": 40
+      }
+    },
+    "2": {
+      "block": {
+        "body": 3,
+        "defaults": {},
+        "description": "A question the run can answer: choose one of the options.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "options": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "options"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "type": "integer"
+          },
+          "requests": [
+            {
+              "descriptor": {
+                "input": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "options": {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "options"
+                  ],
+                  "type": "object"
+                },
+                "name": "golden_probe.pick",
+                "output": {
+                  "type": "integer"
+                }
+              },
+              "kind": "concrete"
+            }
+          ]
+        }
+      },
+      "parameters": {}
+    },
+    "20": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "values",
+            "kind": "getField",
+            "output": 3,
+            "source": 2
+          },
+          {
+            "agent": 5,
+            "kind": "makeClosure",
+            "output": 39
+          },
+          {
+            "agent": 15,
+            "kind": "makeClosure",
+            "output": 48
+          },
+          {
+            "entries": [
+              [
+                "continuation",
+                39
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 49
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              39
+            ]
+          },
+          {
+            "argument": 49,
+            "generics": [
+              [
+                "E",
+                {
+                  "kind": "requests",
+                  "requests": []
+                }
+              ],
+              [
+                "R",
+                {
+                  "kind": "type",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ]
+            ],
+            "kind": "delegate",
+            "output": 50,
+            "target": {
+              "kind": "value",
+              "variable": 48
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              48,
+              49
+            ]
+          }
+        ],
+        "result": 50
+      },
+      "parameters": {
+        "parameter": 2
+      }
+    },
+    "21": {
+      "block": {
+        "body": 22,
+        "defaults": {},
+        "description": "Entry point: summarize a fixed list of numbers.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "input": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "input"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "type": "string"
+          },
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "22": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "input",
+            "kind": "getField",
+            "output": 52,
+            "source": 51
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              52
+            ]
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 53,
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 54,
+            "value": {
+              "kind": "integer",
+              "value": 2
+            }
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 55,
+            "value": {
+              "kind": "integer",
+              "value": 3
+            }
+          },
+          {
+            "elements": [
+              53,
+              54,
+              55
+            ],
+            "kind": "makeTuple",
+            "output": 56
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              53,
+              54,
+              55
+            ]
+          },
+          {
+            "entries": [
+              [
+                "values",
+                56
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 57
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              56
+            ]
+          },
+          {
+            "argument": 57,
+            "kind": "delegate",
+            "output": 58,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.summarize"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              57
+            ]
+          }
+        ],
+        "result": 58
+      },
+      "parameters": {
+        "parameter": 51
+      }
+    },
+    "3": {
+      "block": {
+        "input": 1,
+        "kind": "request",
+        "name": "golden_probe.pick"
+      },
+      "parameters": {
+        "parameter": 1
+      }
+    },
+    "4": {
+      "block": {
+        "body": 20,
+        "defaults": {},
+        "description": "Fold the values, tag the result, and render it \u2014 exercises a spread of surface constructs so the\nlowered IR touches a handler, a for-fold, a match, an if, operators, an f-string, and a delegation.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "values": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "values"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "type": "string"
+          },
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "5": {
+      "block": {
+        "body": 14,
+        "defaults": {},
+        "description": "",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {},
+          "output": {},
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "6": {
+      "block": {
+        "body": 7,
+        "initialStates": [
+          8
+        ],
+        "kind": "for",
+        "parallel": false,
+        "source": 3,
+        "thenClause": {
+          "body": 8
+        }
+      },
+      "parameters": {}
+    },
+    "7": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 11
+            },
+            "source": 10
+          },
+          {
+            "entries": [
+              [
+                "left",
+                11
+              ],
+              [
+                "right",
+                11
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 12
+          },
+          {
+            "argument": 12,
+            "generics": [
+              [
+                "T",
+                {
+                  "kind": "type",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            ],
+            "kind": "delegate",
+            "output": 13,
+            "target": {
+              "kind": "name",
+              "name": "prelude.multiply"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              12
+            ]
+          },
+          {
+            "entries": [
+              [
+                "left",
+                9
+              ],
+              [
+                "right",
+                11
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 14
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              11
+            ]
+          },
+          {
+            "argument": 14,
+            "generics": [
+              [
+                "T",
+                {
+                  "kind": "type",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            ],
+            "kind": "delegate",
+            "output": 15,
+            "target": {
+              "kind": "name",
+              "name": "prelude.add"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              14
+            ]
+          },
+          {
+            "kind": "continue",
+            "modifiers": [
+              [
+                9,
+                15
+              ]
+            ],
+            "target": 6,
+            "value": 13
+          }
+        ],
+        "result": null
+      },
+      "parameters": {
+        "iterator": 10,
+        "state_0": 9
+      }
+    },
+    "8": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 17
+            },
+            "source": 16
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              17
+            ]
+          },
+          {
+            "entries": [
+              [
+                "left",
+                9
+              ],
+              [
+                "right",
+                7
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 18
+          },
+          {
+            "argument": 18,
+            "generics": [
+              [
+                "T",
+                {
+                  "kind": "type",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            ],
+            "kind": "delegate",
+            "output": 19,
+            "target": {
+              "kind": "name",
+              "name": "prelude.add"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              18
+            ]
+          }
+        ],
+        "result": 19
+      },
+      "parameters": {
+        "result": 16,
+        "state_0": 9
+      }
+    },
+    "9": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "loadLiteral",
+            "output": 29,
+            "value": {
+              "kind": "string",
+              "value": "small"
+            }
+          }
+        ],
+        "result": 29
+      },
+      "parameters": {}
+    }
+  },
+  "entries": {
+    "golden_probe.main": {
+      "block": 21,
+      "private": false
+    },
+    "golden_probe.pick": {
+      "block": 2,
+      "private": false
+    },
+    "golden_probe.point": {
+      "block": 0,
+      "private": false
+    },
+    "golden_probe.summarize": {
+      "block": 4,
+      "private": false
+    }
+  },
+  "metadata": {
+    "schemaVersion": 4
+  },
+  "names": {
+    "0": "point",
+    "1": "point.leaf",
+    "14": "use.continuation.body",
+    "15": "handler",
+    "19": "handler.body",
+    "2": "pick",
+    "20": "summarize.body",
+    "21": "main",
+    "22": "main.body",
+    "3": "pick.leaf",
+    "4": "summarize",
+    "5": "use.continuation"
+  }
+}
