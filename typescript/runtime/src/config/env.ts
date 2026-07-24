@@ -8,7 +8,8 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
   /** The interface to bind. Defaults to all interfaces (required inside a container); set to
-   *  `127.0.0.1` to restrict the unauthenticated v0.1 API to loopback. */
+   *  `127.0.0.1` to additionally restrict the API to loopback as defense in depth — every route
+   *  already requires the KATARI_API_KEY bearer token. */
   HOST: z.string().min(1).default("0.0.0.0"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   /** Must be a postgres connection string — the only consumer is postgres.js. Validating the scheme
@@ -16,9 +17,9 @@ const envSchema = z.object({
   DATABASE_URL: z
     .url({ protocol: /^postgres(ql)?$/ })
     .default("postgres://katari:katari@localhost:5432/katari"),
-  /** Allowed CORS origin(s): `*` (default), or a comma-separated allowlist. The API is currently
-   *  unauthenticated, so a wildcard lets any site read responses cross-origin — lock this down in
-   *  any shared/production deployment. */
+  /** Allowed CORS origin(s): `*` (default), or a comma-separated allowlist. Every route requires
+   *  the KATARI_API_KEY bearer token, so a wildcard alone exposes nothing — still, pin this to the
+   *  admin origin in any shared/production deployment to shrink the cross-origin surface. */
   CORS_ORIGIN: z.string().min(1).default("*"),
   /** The AES-256-GCM key that encrypts secret (private) values at rest. Required (no default) — the runtime
    *  refuses to boot without it, since a missing key would silently persist secrets in plaintext. Must be a

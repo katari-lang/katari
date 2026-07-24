@@ -328,7 +328,8 @@ test("playground.replay_demo: mechanism/policy split — exponential recovers, e
   // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
   // `exhausting` spends a 2-attempt budget and the exhaustion re-raises the TYPED `warming_up`; `rejected`
   // shows selective retry — the fatal `unauthorized` is rethrown, not replayed, so it leaves at once; and
-  // `reauth_intercepted` composes `immediate` + an intercepted `replay.attention` to re-run in place.
+  // `reauth_intercepted` composes `replay.immediate` + a user handler answering the demo's own
+  // `needs_reauth` request, so the session re-auths and re-runs in place.
   const success = await katari(["run", "playground.replay_demo.main", "--project", "playground"]);
   expect(success.stdout).toContain("result: connected on attempt 3");
   const exhausted = await katari(["run", "playground.replay_demo.exhausting", "--project", "playground"]);
