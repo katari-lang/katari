@@ -819,6 +819,42 @@ spec = do
         )
         `shouldBe` ["K2007"]
 
+  describe "with modifier partial update (an omitted state variable carries over, not an error)" $ do
+    -- The `with` clause lists only the state variables a `next` changes: one it omits keeps its current
+    -- value across the jump. These lock in that the checker accepts a partial clause (no completeness
+    -- requirement), so the `with (x = x)` respell the partial form exists to remove is never forced.
+    it "accepts a `for` `next ... with` that updates one of two loop states, omitting the other" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  for (let value in [1, 2, 3], var total: integer = 0, var count: integer = 0) {\n"
+            <> "    next with { total = total + value }\n"
+            <> "  } then (_elements) { total + count }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a handler `next ... with` that updates one of two states, omitting the other" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler (var counter: integer = 0, var log: string = \"\") {\n"
+            <> "    request tick() { next counter with { counter = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a bare `next` (no `with` clause) while loop states are declared (full carry-over)" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  for (let value in [1, 2, 3], var total: integer = 0, var count: integer = 0) {\n"
+            <> "    next\n"
+            <> "  } then (_elements) { total + count }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))

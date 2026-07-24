@@ -200,6 +200,30 @@ spec = describe "lowerModule (via compile)" $ do
         "request tick() -> integer\nagent run() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } }\n0 }"
         "handle"
 
+  describe "partial `next … with` (an omitted state variable carries over, not respelled)" $
+    it "lowers a `next` that updates one of two loop states to a continue listing only that one delta" $ do
+      -- The `for` declares two `var` states (total, count) and the `next` writes only `total`. Lowering
+      -- must emit a continue whose modifiers list ONLY that written delta — the omitted `count` is NOT
+      -- filled with a self-update, because the runtime carries an unmentioned state's current value
+      -- across the continue. A fill-desugar would show up here as a two-entry modifier list.
+      let irModule =
+            loweredTestModule
+              ( "agent main() -> integer {\n"
+                  <> "  for (let value in [1, 2, 3], var total: integer = 0, var count: integer = 0) {\n"
+                  <> "    next with { total = total + value }\n"
+                  <> "  } then (_elements) { total + count }\n"
+                  <> "}"
+              )
+      -- Reach the for node through the entry agent alone (never touching the spliced-in stdlib loops):
+      -- main's body sequence enters the for structural node with a single `call`.
+      case entryForNode irModule "main" of
+        Just for -> do
+          length for.initialStates `shouldBe` 2 -- two `var` states were declared
+          case [operation | OperationContinue operation <- blockOperations irModule for.body] of
+            [continue] -> length continue.modifiers `shouldBe` 1 -- only the written `total`, not `count`
+            other -> expectationFailure ("expected exactly one continue in the for body, got " <> show (length other))
+        Nothing -> expectationFailure "expected a for node reachable from `main`"
+
   describe "structural soundness" $
     it "every referenced block id exists and every entry resolves to an agent" $ do
       let source =
@@ -632,6 +656,18 @@ entryBodyOperations irModule name = fromMaybe [] $ do
   case information.block of
     BlockSequence sequenceBlock -> Just sequenceBlock.operations
     _ -> Nothing
+
+-- | The 'For' structural node an entry agent's body enters — reached through that agent alone (its body
+-- sequence's single @call@ targets the for node), so the assertion stays clear of the stdlib's own loops.
+entryForNode :: IRModule -> Text -> Maybe For
+entryForNode irModule name =
+  case [ for
+         | OperationCall callOperation <- entryBodyOperations irModule name,
+           Just information <- [Map.lookup callOperation.target irModule.blocks],
+           BlockFor for <- [information.block]
+       ] of
+    (for : _) -> Just for
+    [] -> Nothing
 
 -- | The operations of a 'BlockSequence' by id (empty for a missing or non-sequence block).
 blockOperations :: IRModule -> BlockId -> List Operation

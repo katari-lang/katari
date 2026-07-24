@@ -1439,13 +1439,19 @@ checkForBreakStatement forBreakStmt = do
       pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
 
--- | Check @with x = e@ modifiers against the state variable's type. The identifier resolves a modifier
--- target to an enclosing @for@ / handler state variable, reporting K2007 when the name is not one; an
--- unresolved target then arrives here with a @Nothing@ resolution, and this walk recovers (typing the
--- value for its own well-formedness and carrying the unresolved reference through) rather than aborting
--- — the K2007 already stands and covers the mistake. A state variable is always a fresh local binding
--- in scope over the body, so a target that resolved to a local absent from scope, or to a qualified
--- name, is a compiler bug.
+-- | Check @with x = e@ modifiers against the state variable's type. The @with@ clause is a PARTIAL
+-- update: it lists only the state variables a @next@ changes, and one it omits keeps its current value
+-- across the jump — the same carry-over an implicit fall-through (a body tail with no @next@) already
+-- relies on. So this checks each written modifier in isolation and never requires the clause to cover
+-- every state variable; an omitted variable is not an error, and must not become one (a completeness
+-- check here would force the very @with (x = x)@ boilerplate the partial form exists to remove).
+--
+-- The identifier resolves a modifier target to an enclosing @for@ / handler state variable, reporting
+-- K2007 when the name is not one; an unresolved target then arrives here with a @Nothing@ resolution,
+-- and this walk recovers (typing the value for its own well-formedness and carrying the unresolved
+-- reference through) rather than aborting — the K2007 already stands and covers the mistake. A state
+-- variable is always a fresh local binding in scope over the body, so a target that resolved to a local
+-- absent from scope, or to a qualified name, is a compiler bug.
 checkModifiers :: List (Modifier Identified) -> Checker (List (Modifier Typed))
 checkModifiers = traverse checkOneModifier
   where

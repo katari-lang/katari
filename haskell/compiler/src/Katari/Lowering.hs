@@ -729,7 +729,11 @@ lowerStatement = \case
   AST.StatementUse _ -> panic "lowering: StatementUse must be handled by lowerBlockValue"
 
 -- | A @with (name = e, ...)@ state update: the state variable in the target's scope paired with the
--- new value here.
+-- new value here. Only the modifiers the @next@ actually wrote are lowered — a state variable it omits
+-- is deliberately NOT respelled into a self-update, because the runtime carries an unmentioned state's
+-- current value across the continue (see 'ContinueOperation.modifiers'), the same partial-update rule
+-- an implicit fall-through relies on. Filling omitted variables with @(state, state)@ would keep them
+-- live at the jump and so enlarge the persisted scope for no behavioural gain.
 lowerModifier :: AST.Modifier AST.Typed -> Lower (VariableId, VariableId)
 lowerModifier modifier = do
   newValue <- lowerExpression modifier.value
