@@ -131,7 +131,7 @@ external agent provide[effect Scope, R, effect E](
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[Scope]) -> R with E | Scope,
   @"A model-facing name prefix for this server's tools: with `prefix = \"notion\"` a server tool `search` is published as `notion_search` (the toolbox key and the tool's metadata name — the wire still carries the server-declared name). Set it when two connected servers expose the same tool name; `null` keeps the server's own names." prefix: string | null ?= null,
-) -> R with E from "mcp"
+) -> R with E | io from "mcp"
 
 @"Open an MCP server connection for the extent of @continuation@ WITHOUT listing the server — the
 listing-free form of `provide`, same scoped contract, no toolbox. The runtime registers the
@@ -150,7 +150,7 @@ external agent open[effect Scope, R, effect E](
   @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: string,
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The scope body (bound by `use`): receives `null` (no toolbox is minted), and `mcp.call[Scope, ...]` is callable exactly while it runs." continuation: agent (value: null) -> R with E | Scope,
-) -> R with E from "mcp"
+) -> R with E | io from "mcp"
 
 @"One connection of a `provide_all` set: the server, its auth, and an optional model-facing name
 prefix (see `provide`'s @prefix@ — set it on the colliding connections when two servers expose the
@@ -176,7 +176,7 @@ marker)."
 external agent provide_all[effect Scope, R, effect E](
   @"The connections to open, in order; empty is fine." connections: array[connection],
   @"The scope body (bound by `use`): receives one toolbox per connection, in input order." continuation: agent (value: array[toolbox[Scope]]) -> R with E | Scope,
-) -> R with E from "mcp"
+) -> R with E | io from "mcp"
 
 @"Flatten a `provide_all` result to one tool array — the `array.map` + `record.values` +
 `array.flatten` composition every AI loop's tool list respelled, packaged so the common case is one
@@ -208,7 +208,7 @@ external agent call[effect Scope, T](
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The server-declared tool name." tool: string,
   @"The tool's arguments object, as a plain value tree; only the server validates it." arguments: unknown,
-) -> T with Scope | prelude.throw[server_error | auth_error | json.validation_error] from "mcp"
+) -> T with Scope | io | prelude.throw[server_error | auth_error | json.validation_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is
@@ -225,4 +225,4 @@ tool's body in a handler for per-request resilience."
 external agent serve[R, effect E](
   @"The agents to publish, keyed by the tool name each is published under." tools: toolbox[scope],
   @"The endpoint's owner: receives the capability URL, and the server serves exactly while it runs." subscriber: agent (url: string) -> R with E,
-) -> R with E from "mcp"
+) -> R with E | io from "mcp"

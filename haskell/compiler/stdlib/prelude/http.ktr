@@ -87,7 +87,7 @@ external agent fetch(
   @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
   @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
   @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
-) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
+) -> { status: integer, headers: record[string], body: string } with io | prelude.throw[fetch_error] from "http"
 
 @"Perform an HTTP request to @url@ with @method@, the given @headers@ and @body@ — EXACTLY `fetch`'s
 request — but capture the RESPONSE body as a downloaded `file` rather than as text. The bytes land in the
@@ -110,7 +110,7 @@ external agent fetch_file(
   @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
   @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
   @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
-) -> { status: integer, headers: record[string], file: file } with prelude.throw[fetch_error] from "http"
+) -> { status: integer, headers: record[string], file: file } with io | prelude.throw[fetch_error] from "http"
 
 @"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."

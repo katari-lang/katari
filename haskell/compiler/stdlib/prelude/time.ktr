@@ -21,17 +21,17 @@
 The instant becomes durable together with the work that first observes it, so once any downstream step has
 seen the value it never changes under replay or recovery. (A restart in the narrow window before that
 commit re-reads the clock and resolves a fresh instant — sound, because nothing durable saw the first.)"
-external agent now() -> number from "time"
+external agent now() -> number with io from "time"
 
 @"Sleep for @milliseconds@ before resolving with `null`. The wake deadline (now + @milliseconds@) is
 persisted: a runtime restart re-arms the timer, and a deadline that already passed while the runtime was
 down resolves immediately on recovery. A @milliseconds@ that is zero or negative resolves at once."
-external agent sleep(@"The delay, in milliseconds; zero or negative resolves at once." milliseconds: number) -> null from "time"
+external agent sleep(@"The delay, in milliseconds; zero or negative resolves at once." milliseconds: number) -> null with io from "time"
 
 @"Sleep until the absolute epoch-millisecond instant @time@, then resolve with `null`. The same durable
 deadline as `sleep`, but pinned to an absolute wall-clock instant rather than a relative delay — an
 instant already in the past resolves immediately."
-external agent sleep_until(@"The absolute wake instant, in epoch milliseconds; a past instant resolves at once." time: number) -> null from "time"
+external agent sleep_until(@"The absolute wake instant, in epoch milliseconds; a past instant resolves at once." time: number) -> null with io from "time"
 
 @"A fixed interval: an occurrence every @milliseconds@ after the watch starts (the first occurrence is
 one interval in, not at the start). @milliseconds@ must be positive."
