@@ -17,7 +17,13 @@
 
 import type { Logger } from "../../lib/logger.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
-import { type BlobId, newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
+import {
+  type BlobId,
+  type InstanceId,
+  newOutboxSeq,
+  type OutboxSeq,
+  type ProjectId,
+} from "../ids.js";
 import type { BlobStore } from "../value/blob-store.js";
 import { isTransientError, messageOf } from "./failure.js";
 import type { OutboxMessage, Persistence } from "./persistence.js";
@@ -62,6 +68,12 @@ export interface SubstrateHost {
   /** Tear down the non-durable in-process notification hooks after a poisoned commit (reject the run-result
    *  promises). The durable-derived warm state is rebuilt by the following `reactivate`. */
   onPoison(error: unknown): void;
+  /** Synthesize an error outcome for the run a just-dropped poison event belonged to, so the run does not
+   *  hang unobserved (the only other trace of the drop is a log line). `run` is the dropped event's trace
+   *  context — the id of its owning run instance, carried on every external event. Fire-and-forget: the host
+   *  enqueues it as its own serial turn, which runs after the reload this drop triggers rehydrates the run's
+   *  delegation; a run already terminal (its delegation retired) is left untouched. */
+  failRun(run: InstanceId, error: unknown): void;
 }
 
 /** One unit of serial work: run `reactor` (its `react` for an inbound event, or a command / FFI closure).
@@ -314,15 +326,29 @@ export class Substrate {
 
   /** A `react` throw: a deterministic failure should have surfaced as a panic, so this is a bug. Do not
    *  poison-loop it — log loudly, reject the awaiter, consume the dead inbound event so it cannot replay into
-   *  the same throw, and drop + reload the (possibly partially mutated) warm state. */
+   *  the same throw, drop + reload the (possibly partially mutated) warm state, and — the crux — synthesize an
+   *  error outcome for the dropped event's run so containing the poison does not silently hang the run.
+   *
+   *  Attribution follows the event's own trace context (`event.run`), the same id every external event
+   *  carries; the substrate never walks the graph to find it. An event that belongs to no run — an originated
+   *  command / FFI completion, whose `event` is null — has nothing to attribute the failure to, so it is
+   *  dropped as before (a command's out-of-loop caller was already rejected via `settle`; a completion leaves
+   *  only the log), and the reason is logged. */
   private async onReactFailure(turn: Turn, error: unknown): Promise<BatchOutcome> {
+    const run = turn.event?.run;
     this.logger.error(
-      "reactor threw while computing a turn (a bug: a deterministic failure should panic, not throw) — dropping the event",
-      { to: turn.event?.to, kind: turn.event?.kind, error: messageOf(error) },
+      run === undefined
+        ? "reactor threw computing an originated turn (a bug: a deterministic failure should panic, not throw) — dropping it; no run to attribute the failure to"
+        : "reactor threw while computing a turn (a bug: a deterministic failure should panic, not throw) — dropping the event and failing its run",
+      { to: turn.event?.to, kind: turn.event?.kind, run, error: messageOf(error) },
     );
     turn.settle?.reject(error);
     if (turn.consumed !== null) await this.consumeDeadEvent(turn.consumed);
     this.dropWarm(error);
+    // After `dropWarm` cleared the mailbox: enqueue the run's failure onto the now-empty mailbox. It runs as
+    // its own serial turn once the `reload` below reactivates and rehydrates the run's delegation (the pump is
+    // reentrancy-guarded, so this enqueue does not race the current one). Skipped for an unattributable event.
+    if (run !== undefined) this.host.failRun(run, error);
     return { kind: "reload" };
   }
 

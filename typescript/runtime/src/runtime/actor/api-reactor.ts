@@ -281,6 +281,29 @@ export class ApiReactor extends Reactor {
     });
   }
 
+  /** Fail a run whose event a reactor threw on and the substrate dropped (poison containment) — so the run is
+   *  observable as `error` instead of hanging forever, its only other trace a log line. Retire the run
+   *  delegation, record the `error` outcome, and terminate the still-live root — the same terminal a machine-
+   *  answered store failure (`failRunForStore`) takes, minus the audit (a dropped poison is a runtime defect,
+   *  not a resolved escalation). Runs as a serial command turn; the substrate enqueues it after the drop's
+   *  reload has rehydrated the run's delegation. Guarded by the retirement: a run already terminal (its
+   *  delegation gone — the dropped event was a late duplicate, e.g. the terminate this very path emitted
+   *  reaching the same poisoned reactor) is untouched, so its durable outcome stands. Returns when the failure
+   *  commit is durable. */
+  failRun(run: InstanceId, message: string): Promise<void> {
+    return this.commands.enqueue(() => {
+      const delegation = this.liveRunDelegation(run);
+      if (delegation === undefined || !this.retireDelegation(delegation)) return;
+      this.pendingRunOutcomes.push({
+        run,
+        state: "error",
+        result: null,
+        errorMessage: message,
+      });
+      this.send({ kind: "terminate", delegation, from: this.name, to: "core", run });
+    });
+  }
+
   /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes, and
    *  record the answered escalation in the run's history — atomically with the `escalateAck`. The command
    *  turn runs after the project is loaded, so a freshly-recovered actor has rehydrated its open escalations

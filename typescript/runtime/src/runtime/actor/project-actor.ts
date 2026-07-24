@@ -347,6 +347,13 @@ export class ProjectActor {
                   "run tracking reset after a commit failure; query the run's durable state",
                 ),
           ),
+        // The substrate dropped a run's event because a reactor threw computing it (a deterministic bug); fail
+        // that run so it is observable instead of hanging. Fire-and-forget onto the api command loop — a
+        // transient commit failure of the fail-run turn retries like any other, and a persistent one is already
+        // logged by the substrate; `.catch` only keeps the rejection from going unhandled.
+        failRun: (run, error) => {
+          void this.api.failRun(run, `internal error: ${messageOf(error)}`).catch(() => {});
+        },
       },
       createLogger({ level: "info", bindings: { module: "substrate", projectId: this.projectId } }),
     );
