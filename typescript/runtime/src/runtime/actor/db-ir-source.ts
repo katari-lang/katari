@@ -8,9 +8,9 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { modules, snapshots } from "../../db/tables/projects.js";
 import type { IrAccess } from "../engine/context.js";
+import { asTransient } from "../engine/transient-error.js";
 import type { SnapshotId } from "../ids.js";
 import { type IrSource, SnapshotRegistry } from "../ir.js";
-import { TransientError } from "./failure.js";
 
 export class DbIrSource implements IrSource {
   private readonly registry = new SnapshotRegistry();
@@ -23,14 +23,12 @@ export class DbIrSource implements IrSource {
     // `preload` runs inside a react turn, so a DB failure here must be raised as a TransientError (retryable),
     // NOT let through as a plain throw (which the substrate would treat as a deterministic bug and drop the
     // event). A missing snapshot / module, by contrast, is a deterministic program error and stays a panic.
-    const [row] = await this.selectTransient(
-      () =>
-        this.db
-          .select({ projectId: snapshots.projectId, modules: snapshots.modules })
-          .from(snapshots)
-          .where(eq(snapshots.id, snapshot))
-          .limit(1),
-      `loading snapshot ${snapshot}`,
+    const [row] = await asTransient(`loading snapshot ${snapshot}`, () =>
+      this.db
+        .select({ projectId: snapshots.projectId, modules: snapshots.modules })
+        .from(snapshots)
+        .where(eq(snapshots.id, snapshot))
+        .limit(1),
     );
     if (row === undefined) {
       throw new Error(`snapshot ${snapshot} not found`);
@@ -40,13 +38,11 @@ export class DbIrSource implements IrSource {
     const moduleRows =
       hashes.length === 0
         ? []
-        : await this.selectTransient(
-            () =>
-              this.db
-                .select({ hash: modules.hash, ir: modules.ir })
-                .from(modules)
-                .where(and(eq(modules.projectId, row.projectId), inArray(modules.hash, hashes))),
-            `loading modules for snapshot ${snapshot}`,
+        : await asTransient(`loading modules for snapshot ${snapshot}`, () =>
+            this.db
+              .select({ hash: modules.hash, ir: modules.ir })
+              .from(modules)
+              .where(and(eq(modules.projectId, row.projectId), inArray(modules.hash, hashes))),
           );
     const irByHash = new Map(moduleRows.map((moduleRow) => [moduleRow.hash, moduleRow.ir]));
     for (const [name, hash] of Object.entries(manifest)) {
@@ -57,16 +53,6 @@ export class DbIrSource implements IrSource {
       this.registry.set(snapshot, name, ir);
     }
     this.loaded.add(snapshot);
-  }
-
-  /** Run a reactivation-time read, re-raising any infra failure as a TransientError so a react turn's commit
-   *  retry policy (not its drop-the-event bug policy) handles it. */
-  private async selectTransient<T>(query: () => Promise<T>, what: string): Promise<T> {
-    try {
-      return await query();
-    } catch (error) {
-      throw new TransientError(`${what} failed`, { cause: error });
-    }
   }
 
   access(snapshot: SnapshotId, module: string): IrAccess {

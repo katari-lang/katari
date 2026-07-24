@@ -19,7 +19,11 @@ import { KatariThrow } from "./throw-signal.js";
 const MISSING_SECRET = "prelude.env.missing_secret" as QualifiedName;
 
 /** The project-scoped env store the env primitives read. A consumer-defined port: the wiring (facade)
- *  supplies the real DB-backed reader, while tests stub it. */
+ *  supplies the real DB-backed reader, while tests stub it. A read runs inside a react turn, so an INFRA
+ *  failure (a DB blip) must be raised as a `TransientError` (the real reader wraps its DB access) — the prim
+ *  seam rethrows it so the substrate retries from durable state, rather than failing the run as a deterministic
+ *  panic. A missing entry is NOT a failure: it returns `null` (which `get_secret` maps to the typed
+ *  `env.missing_secret` throw). */
 export interface EnvReader {
   /** The decrypted value of the *secret* entry under `key`, or `null` when no secret entry is set there
    *  (a non-secret entry under the same key does not count — `get_secret` reads the secret bucket only). */

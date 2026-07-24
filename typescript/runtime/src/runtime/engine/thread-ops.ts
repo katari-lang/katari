@@ -33,6 +33,7 @@ import { readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
 import { allocateAskId, allocateCallId } from "./store.js";
 import { KatariThrow } from "./throw-signal.js";
+import { isTransientError } from "./transient-error.js";
 import type {
   AgentThread,
   CancelExit,
@@ -556,9 +557,13 @@ async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promi
       break;
     }
   }
-  // A prim failure is never a crash: an anticipated, typed failure (`KatariThrow` — malformed JSON, a
-  // schema mismatch) raises `prelude.throw` with its payload; any other JS error is a `panic` (a zero
-  // divisor, an engine backstop). Both bubble toward a handler / the run — only the throw is catchable.
+  // A prim failure is a THREE-way sum, not a two-way one. An anticipated, typed failure (`KatariThrow` —
+  // malformed JSON, a schema mismatch) raises `prelude.throw` with its payload (catchable). A TRANSIENT infra
+  // failure (a host I/O blip — `env.get_secret`'s DB read, raised as a `TransientError`) is neither catchable
+  // nor a bug: it must escape the engine unchanged so the substrate's react-turn retry policy replays the turn
+  // from durable state (misclassifying it as a panic would fail the run forever on a passing hiccup). Any
+  // other JS error is a deterministic `panic` (a zero divisor, an engine backstop). Throw and panic bubble
+  // toward a handler / the run; the transient escapes past the engine entirely.
   let value: Value;
   try {
     value = await ctx.prims.run(name, argument, {
@@ -573,6 +578,9 @@ async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promi
       ...(generics !== undefined ? { generics } : {}),
     });
   } catch (error) {
+    // A transient infra failure is retried, not classified as a program outcome: rethrow it so it leaves the
+    // engine and the substrate replays the turn from durable state.
+    if (isTransientError(error)) throw error;
     if (error instanceof KatariThrow) {
       // Taint is monotonic through the failure path too: a private argument makes the payload private.
       raiseThrow(ctx, thread, isTainted(argument) ? markPrivate(error.payload) : error.payload);

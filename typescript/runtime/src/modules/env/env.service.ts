@@ -13,6 +13,7 @@ import { envEntries } from "../../db/tables/projects.js";
 import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
 import { NotFoundError } from "../../lib/errors.js";
 import type { EnvReader } from "../../runtime/engine/host-prims.js";
+import { asTransient } from "../../runtime/engine/transient-error.js";
 import type { ProjectId } from "../../runtime/ids.js";
 import type { SetEnvBody } from "./env.schema.js";
 
@@ -70,14 +71,20 @@ export const envService = {
   },
 };
 
-/** The engine-facing reader the host wires into the `PrimRegistry` (`env.get_secret` / `env.get_all`). */
+/** The engine-facing reader the host wires into the `PrimRegistry` (`env.get_secret` / `env.get_all`). It runs
+ *  inside a react turn, so — like the IR DB read — a DB failure is raised as a `TransientError` (retryable)
+ *  rather than let through as a plain throw the engine would misclassify as a deterministic panic. Only the DB
+ *  access is wrapped: a missing entry is not a throw (it returns `null`), and a `decryptSecret` failure of a
+ *  corrupt ciphertext stays a deterministic error (a retry cannot clear it). */
 export const envReader: EnvReader = {
   async readSecret(projectId: ProjectId, key: string) {
-    const [row] = await db
-      .select({ value: envEntries.value, isSecret: envEntries.isSecret })
-      .from(envEntries)
-      .where(and(eq(envEntries.projectId, projectId), eq(envEntries.key, key)))
-      .limit(1);
+    const [row] = await asTransient(`reading secret env entry "${key}"`, () =>
+      db
+        .select({ value: envEntries.value, isSecret: envEntries.isSecret })
+        .from(envEntries)
+        .where(and(eq(envEntries.projectId, projectId), eq(envEntries.key, key)))
+        .limit(1),
+    );
     if (row === undefined || !row.isSecret) {
       return null;
     }
@@ -85,10 +92,12 @@ export const envReader: EnvReader = {
   },
 
   async readPublic(projectId: ProjectId) {
-    const rows = await db
-      .select({ key: envEntries.key, value: envEntries.value })
-      .from(envEntries)
-      .where(and(eq(envEntries.projectId, projectId), eq(envEntries.isSecret, false)));
+    const rows = await asTransient("reading public env entries", () =>
+      db
+        .select({ key: envEntries.key, value: envEntries.value })
+        .from(envEntries)
+        .where(and(eq(envEntries.projectId, projectId), eq(envEntries.isSecret, false))),
+    );
     // A null-prototype map so an env key literally named `__proto__` / `constructor` is a real own entry,
     // not a prototype write that silently drops it (env key names are admin-chosen, so not trusted).
     const result: Record<string, string> = Object.create(null);

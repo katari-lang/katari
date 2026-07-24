@@ -7,20 +7,13 @@
 //    not a throw — which must NOT replay-loop (the event is consumed and dropped).
 //
 // Without this, a transient DB read during a (post-recovery) resume turn would be misread as a bug and the
-// event silently dropped, hanging the run. Code that does I/O inside a react turn (the IR DB read) wraps its
-// infra failures as `TransientError`; everything else that throws is treated as a deterministic bug.
+// event silently dropped, hanging the run. Code that does I/O inside a react turn — the IR DB read
+// (`db-ir-source`) AND the env store read behind a prim (`env.get_secret`) — wraps its infra failures as
+// `TransientError`; everything else that throws is treated as a deterministic bug. The marker itself lives in
+// the engine leaf (`engine/transient-error.ts`) so the prim path that PRODUCES it and this actor layer that
+// CLASSIFIES it can share it without an engine→actor cycle; it is re-exported here for the actor's callers.
 
-/** A transient infrastructure failure raised from within a react turn — retryable like a commit failure. */
-export class TransientError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = "TransientError";
-  }
-}
-
-export function isTransientError(error: unknown): error is TransientError {
-  return error instanceof TransientError;
-}
+export { asTransient, isTransientError, TransientError } from "../engine/transient-error.js";
 
 /** The human message of an unknown thrown value (an `Error`'s message, else its string form). */
 export function messageOf(error: unknown): string {
