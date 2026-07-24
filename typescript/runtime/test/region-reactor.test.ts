@@ -377,6 +377,13 @@ const returningTask: Operation[] = [
   { kind: "exit", target: 12, value: 121 },
 ];
 
+/** A task body that SETTLES AT ONCE, escalating nothing — so it retires the instant it is forked, with no
+ *  buffered escalation to service (a fiber that escalates would block forever with no watch to answer it). */
+const settlingTask: Operation[] = [
+  { kind: "loadLiteral", output: 121, value: { kind: "null" } },
+  { kind: "exit", target: 12, value: 121 },
+];
+
 
 /** The persisted `provide` extension rows, decoded — how a test reads a nursery's durable fiber buffer the
  *  way a restart would reload it (unsealed through the loader). */
@@ -656,6 +663,66 @@ function withRegistryAgents(ir: IRModule): IRModule {
   ir.entries[createAgentName("prelude.array.range")] = { block: 54, private: false };
   ir.entries[createAgentName("panicker")] = { block: 56, private: false };
   return ir;
+}
+
+/** Augment a `watchIr` module with the `gate` request agent — an unhandled hold the DELAYED-watch bodies below
+ *  park on so a test can pause the continuation with NO watch registered yet (it surfaces at the run root). */
+function withGate(ir: IRModule): IRModule {
+  ir.blocks[17] = {
+    block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[18] = {
+    block: { kind: "request", name: createAgentName("gate"), input: 180 },
+    parameters: { parameter: 180 },
+  };
+  ir.entries[createAgentName("gate")] = { block: 17, private: false };
+  return ir;
+}
+
+/** A `watchIr` handle body that forks @task@ (applied to @argument@, with optional @name@), HOLDS on the
+ *  unhandled `gate` request — so a test can pause here while NO watch is registered and the forked fiber's
+ *  escalation sits BUFFERED — and only THEN watches. The delayed-watch shape exercising the pre-registration
+ *  buffer and the M2-6 startup race. Pair with `withGate`. */
+function forkHoldThenWatch(options: { task: string; argument: string; name?: string }): Operation[] {
+  const forkEntries: Array<[string, number]> = [
+    ["nursery", 61],
+    ["task", 150],
+    ["argument", 151],
+  ];
+  const ops: Operation[] = [
+    { kind: "loadAgent", output: 150, name: createAgentName(options.task) },
+    { kind: "loadLiteral", output: 151, value: { kind: "string", value: options.argument } },
+  ];
+  if (options.name !== undefined) {
+    ops.push({ kind: "loadLiteral", output: 149, value: { kind: "string", value: options.name } });
+    forkEntries.push(["name", 149]);
+  }
+  ops.push(
+    { kind: "makeRecord", entries: forkEntries, output: 152 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 152,
+      output: 153,
+    },
+    { kind: "makeRecord", entries: [], output: 156 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("gate") },
+      argument: 156,
+      output: 157,
+    },
+    { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.watch") },
+      argument: 154,
+      output: 155,
+    },
+    { kind: "exit", target: 14, value: 155 },
+  );
+  return ops;
 }
 
 // The CROSS-HANDLER CONCURRENCY shape: two DESKS, each its own sequential handler, around ONE nursery + watch.
@@ -1046,24 +1113,38 @@ describe("region reactor", () => {
   });
 
   test("fork spawns the task as a separate fiber and delivers its argument", async () => {
-    // The continuation forks `task` (which re-escalates its `.input` as `fiber_ask`) then holds. The fiber
-    // runs as its OWN instance under the provide, so its escalation wells up at the run root carrying the
-    // exact argument the fork passed — proving both that a separate fiber ran and that the argument reached it.
-    const actor = makeActor(forkIr({ continuation: forkThenHold("delivered"), task: askingTask }));
+    // The continuation forks `task` (which re-escalates its `.input` as `fiber_ask`) then holds. The fiber runs
+    // as its OWN instance under the provide and escalates — but with no watch installed the escalation surfaces
+    // NOWHERE at the run root; it lands in the nursery's durable mailbox, carrying the exact argument the fork
+    // passed. Reading it back proves both that a separate fiber ran and that the argument reached it.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({ continuation: forkThenHold("delivered"), task: askingTask }),
+      persistence,
+    );
     actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const fiberAsk = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
-    );
-    expect(fiberAsk.argument).toEqual({
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    const ask = buffered.mailbox[0]?.ask;
+    if (ask?.kind !== "request") throw new Error("the buffered entry must be a request");
+    expect(ask.request).toEqual(createAgentName("fiber_ask"));
+    expect(ask.argument).toEqual({
       kind: "record",
       fields: { input: { kind: "string", value: "delivered" } },
     });
+    // With no watch, the fiber's escalation never reaches the run root — it stays buffered.
+    expect(
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    ).toBeUndefined();
   });
 
   test("independent forks each spawn their own fiber", async () => {
     // The continuation forks `task` twice with distinct arguments, then holds. Both fibers run independently,
-    // so two distinct `fiber_ask` escalations surface at the root — one per forked argument.
+    // so two distinct `fiber_ask` escalations land in the nursery's durable mailbox (no watch, so neither
+    // reaches the run root) — one per forked argument.
     const twoForks: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
@@ -1108,27 +1189,33 @@ describe("region reactor", () => {
       },
       { kind: "exit", target: 6, value: 70 },
     ];
-    const actor = makeActor(forkIr({ continuation: twoForks, task: askingTask }));
+    const persistence = new StoringPersistence();
+    const actor = makeActor(forkIr({ continuation: twoForks, task: askingTask }), persistence);
     actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const asks = await waitUntil(() => {
-      const found = actor
-        .listOpenEscalations()
-        .filter((open) => open.request === createAgentName("fiber_ask"));
-      return found.length >= 2 ? found : undefined;
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length >= 2 ? provide : undefined;
     });
-    const arguments_ = asks.map((ask) => {
-      const input = ask.argument?.kind === "record" ? ask.argument.fields.input : undefined;
+    const arguments_ = buffered.mailbox.map((entry) => {
+      const argument = entry.ask.kind === "request" ? entry.ask.argument : null;
+      const input = argument?.kind === "record" ? argument.fields.input : undefined;
       return input?.kind === "string" ? input.value : null;
     });
     expect(new Set(arguments_)).toEqual(new Set(["alpha", "beta"]));
+    // Neither fiber's escalation reached the run root.
+    expect(
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    ).toBeUndefined();
   });
 
-  test("a fiber's escalation relays through the provide to the run root, and its answer returns to the fiber", async () => {
-    // The fiber escalates `fiber_ask` and returns the answer. The escalation relays up through the provide
-    // (the base's relay bridge) to the run root; answering it descends the same path back DOWN to the fiber,
-    // which then settles — and its outcome is buffered on the provide (nothing has joined it), carrying the
-    // answer that made the full round trip.
+  test("a watch-less fiber's escalation is buffered on the provide, never surfacing at the run root", async () => {
+    // The semantic inversion of the old flush-up: the fiber escalates `fiber_ask`, but with NO watch registered
+    // the escalation has nowhere to surface. The provide's declared row is `R with Eouter | io` — the fibers'
+    // `E` is NOT in it — so relaying the ask up to the run root would leak a request the nursery never promised.
+    // Instead it is HELD in the nursery's durable mailbox (length 1), while the continuation's OWN hold
+    // (`ask_value`) surfaces at the run root as usual. No watch ever registers here, so the ask stays buffered
+    // for good — it never appears among the run's open escalations.
     const persistence = new StoringPersistence();
     const actor = makeActor(
       forkIr({ continuation: forkThenHold("q"), task: askingTask }),
@@ -1136,19 +1223,22 @@ describe("region reactor", () => {
     );
     actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const fiberAsk = await waitUntil(() =>
+    // The continuation's own hold surfaces at the run root (proof the run is live and progressing).
+    await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    // The fiber's escalation lands in the provide's durable mailbox instead of at the run root.
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(buffered.mailbox).toHaveLength(1);
+    const ask = buffered.mailbox[0]?.ask;
+    expect(ask?.kind === "request" ? ask.request : null).toEqual(createAgentName("fiber_ask"));
+    // It never surfaces at the run root — a watch-less nursery no longer flushes up.
+    expect(
       actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
-    );
-    await actor.answerEscalation(fiberAsk.escalation, { kind: "string", value: "the-answer" });
-
-    // The answer made the round trip when the fiber REPORTS it back up (a settled value is
-    // discarded, so the report escalation is the observable).
-    const report = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
-    );
-    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
-    expect(reported).toEqual({ kind: "string", value: "the-answer" });
-    await actor.answerEscalation(report.escalation, { kind: "null" });
+    ).toBeUndefined();
   });
 
   test("forking into a scope whose provide has already returned is refused", async () => {
@@ -1298,15 +1388,14 @@ describe("region reactor", () => {
     );
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // The worker fiber is running (its `fiber_ask` is up) and the continuation holds on gate1 (`ask_value`).
-    const gate1 = await waitUntil(() => {
-      const fiber = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("fiber_ask"));
-      const hold = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("ask_value"));
-      return fiber !== undefined && hold !== undefined ? hold : undefined;
+    // The worker fiber is running (its `fiber_ask` sits buffered in the mailbox, since no watch is installed)
+    // and the continuation holds on gate1 (`ask_value`, at the run root).
+    const gate1 = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? true : undefined;
     });
     const withFiber = persistence.instanceCount();
 
@@ -1339,9 +1428,10 @@ describe("region reactor", () => {
   });
 
   test("cancelling an already-settled fiber is an idempotent no-op that still succeeds", async () => {
-    // The continuation forks a fiber that settles AT ONCE (its outcome buffered), holds until the buffer lands,
-    // then cancels the now-settled fiber. The cancel finds nothing running — an idempotent no-op — yet still
-    // succeeds with `null`, and the continuation returns a constant the run resolves with.
+    // The continuation forks a fiber that settles AT ONCE (escalating nothing, so it retires with no watch to
+    // service it), holds until the fiber has retired, then cancels the now-settled fiber. The cancel finds
+    // nothing running — an idempotent no-op — yet still succeeds with `null`, and the continuation returns a
+    // constant the run resolves with.
     const persistence = new StoringPersistence();
     const forkHoldCancelReturn: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
@@ -1387,20 +1477,16 @@ describe("region reactor", () => {
       { kind: "exit", target: 6, value: 70 },
     ];
     const actor = makeActor(
-      forkIr({ continuation: forkHoldCancelReturn, task: returningTask }),
+      forkIr({ continuation: forkHoldCancelReturn, task: settlingTask }),
       persistence,
     );
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // Let the fiber settle first: answer its report, then wait for its retirement (the provide's
-    // inner-call bridges shrink back to just the continuation's) before releasing the hold.
+    // Let the fiber settle first: wait for its retirement (the provide's inner-call bridges shrink back to
+    // just the continuation's) before releasing the hold that drives the cancel of the now-gone fiber.
     const hold = await waitUntil(() =>
       actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
     );
-    const report = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
-    );
-    await actor.answerEscalation(report.escalation, { kind: "null" });
     await eventually(async () => {
       const provide = (await peekRegionProvides(persistence))[0];
       return provide !== undefined && provide.innerCalls.length === 1 ? true : undefined;
@@ -1495,6 +1581,525 @@ describe("region reactor", () => {
       return provide !== undefined && provide.mailbox.length === 0 ? true : undefined;
     });
     await actor.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("a fiber's escalation waits, buffered, for a watch registered arbitrarily late — no run-root leak (M2-6)", async () => {
+    // The startup race M2-6 closes. A worker escalates `on_message` the instant it is forked, but the nursery's
+    // watch is installed only LATER — here after a human-latency `gate` hold answers. With the quiescence
+    // flush-up gone, the escalation is NOT misrouted to the run root during the gap: `listOpenEscalations` never
+    // shows it, and the durable mailbox holds it (length 1). Once the gate answers and the watch registers, the
+    // buffered `on_message` re-emits at the handler, whose answer descends to the worker; its report proves the
+    // round trip — the exact sequence that used to deterministically mis-flush to an operator interview.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      withGate(watchIr({ handleBody: forkHoldThenWatch({ task: "worker", argument: "q" }) })),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The continuation is parked on `gate` (no watch yet); the worker's escalation sits buffered.
+    await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(buffered.mailbox).toHaveLength(1);
+    expect(
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("on_message")),
+    ).toBeUndefined();
+
+    // Answer the gate: the watch registers and drains the buffered escalation to the handler.
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "answered" });
+    await actor.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("a buffered escalation with no watch survives a restart, and a late watch drains it", async () => {
+    // The pre-watch twin of the watch+restart durability test: a worker escalates into a nursery with NO watch
+    // yet (the continuation parked on `gate`), so it sits in the durable mailbox. A fresh actor over the same
+    // rows reloads that buffered escalation with STILL no watch; answering the gate then installs the watch,
+    // which drains the reloaded backlog to the handler — the answer descends to the worker AFTER the restart,
+    // proving the buffer is durable across a crash even before any watch exists.
+    const persistence = new StoringPersistence();
+    const ir = withGate(watchIr({ handleBody: forkHoldThenWatch({ task: "worker", argument: "q" }) }));
+
+    const actorOne = makeActor(ir, persistence);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const before = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(before.mailbox).toHaveLength(1);
+
+    // Restart: the buffered escalation reloads; with no watch reloaded, nothing drains it yet.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const after = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(after.mailbox).toHaveLength(1);
+
+    // Answer the gate on the fresh actor → the watch registers → the reloaded backlog drains → the worker
+    // round-trips after the restart.
+    const gate = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gate.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "answered" });
+    await actorTwo.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("cancelling a fiber whose escalation is still buffered drops the entry — a late watch gets nothing", async () => {
+    // A worker escalates `on_message` into a watch-less nursery, so it sits buffered. The continuation then
+    // CANCELS that worker before any watch registers: `dropFiberMailbox` removes its queued escalation, so the
+    // mailbox empties. A watch installed afterward finds nothing to re-emit — the cancelled fiber's request
+    // never reaches a handler.
+    const persistence = new StoringPersistence();
+    const handleBody: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "victim" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "makeRecord", entries: [], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 154,
+        output: 155,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 153],
+        ],
+        output: 156,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 156,
+        output: 157,
+      },
+      { kind: "makeRecord", entries: [], output: 158 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate2") },
+        argument: 158,
+        output: 159,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 160 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 160,
+        output: 161,
+      },
+      { kind: "exit", target: 14, value: 161 },
+    ];
+    const ir = withGate(watchIr({ handleBody }));
+    // The cancel wrapper and a second gate (`gate2`) the body pauses on after the cancel.
+    ir.blocks[30] = {
+      block: { kind: "agent", body: 31, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[31] = {
+      block: { kind: "external", key: "prelude.region.cancel", input: 300, reactor: "region" },
+      parameters: { parameter: 300 },
+    };
+    ir.blocks[32] = {
+      block: { kind: "agent", body: 33, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[33] = {
+      block: { kind: "request", name: createAgentName("gate2"), input: 320 },
+      parameters: { parameter: 320 },
+    };
+    ir.entries[createAgentName("prelude.region.cancel")] = { block: 30, private: false };
+    ir.entries[createAgentName("gate2")] = { block: 32, private: false };
+
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Pause 1: the worker's escalation is buffered (mailbox length 1) while the body holds on `gate`.
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? true : undefined;
+    });
+
+    // Answer `gate`: the body cancels the worker (dropping its buffered entry), then holds on `gate2`.
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+    const gate2 = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate2")),
+    );
+    const dropped = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 0 ? provide : undefined;
+    });
+    expect(dropped.mailbox).toHaveLength(0);
+
+    // Answer `gate2`: the watch registers with an empty mailbox, so it re-emits nothing — the cancelled
+    // fiber's request never reaches a handler and no report ever surfaces.
+    await actor.answerEscalation(gate2.escalation, { kind: "null" });
+    for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    ).toBeUndefined();
+    const settled = (await peekRegionProvides(persistence))[0];
+    expect(settled?.mailbox).toHaveLength(0);
+  });
+
+  test("an escalation arriving after a watch drops re-buffers, and a re-registered watch drains it", async () => {
+    // The watch-DROP path (`onDropCall`) leaves the mailbox buffered, not flushed. Worker A escalates
+    // `on_message`; the FIRST watch re-emits it and that handler BREAKS out of its handle — dropping watch1
+    // while the nursery lives on. Worker B, forked into the now watch-less nursery, escalates `on_message` and
+    // it BUFFERS (length 1). A SECOND handle+watch then registers and drains that backlog to its handler, whose
+    // answer descends to worker B — proving a dropped watch neither flushes the mailbox nor loses a later one.
+    const persistence = new StoringPersistence();
+    const continuation: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 70, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "first" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 70],
+          ["argument", 71],
+        ],
+        output: 72,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 72,
+        output: 73,
+      },
+      { kind: "call", target: 14, output: 74 },
+      { kind: "loadLiteral", output: 75, value: { kind: "string", value: "second" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 70],
+          ["argument", 75],
+        ],
+        output: 76,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 76,
+        output: 77,
+      },
+      { kind: "makeRecord", entries: [], output: 78 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 78,
+        output: 79,
+      },
+      { kind: "call", target: 34, output: 80 },
+      { kind: "exit", target: 6, value: 80 },
+    ];
+    const ir = withGate(watchIr());
+    // Override the continuation (block 7) with the two-watch program.
+    ir.blocks[7] = {
+      block: { kind: "sequence", result: null, operations: continuation },
+      parameters: { parameter: 60 },
+    };
+    // handle1's body (block 15) just watches; its handler (block 16) BREAKS on the first on_message (dropping
+    // watch1 without answering worker A — worker A then stays a blocked fiber, cancelled at region close).
+    ir.blocks[15] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "makeRecord", entries: [["nursery", 61]], output: 151 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.region.watch") },
+            argument: 151,
+            output: 152,
+          },
+          { kind: "exit", target: 14, value: 152 },
+        ],
+      },
+      parameters: {},
+    };
+    ir.blocks[16] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 161, value: { kind: "null" } },
+          { kind: "exit", target: 14, value: 161 },
+        ],
+      },
+      parameters: { parameter: 160 },
+    };
+    // handle2 (block 34): body watches (block 35); handler answers on_message with "answered" (block 36).
+    ir.blocks[34] = {
+      block: {
+        kind: "handle",
+        parallel: false,
+        initialStates: [],
+        body: 35,
+        handlers: [{ request: createAgentName("on_message"), body: 36 }],
+        thenClause: null,
+      },
+      parameters: {},
+    };
+    ir.blocks[35] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "makeRecord", entries: [["nursery", 61]], output: 351 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.region.watch") },
+            argument: 351,
+            output: 352,
+          },
+          { kind: "exit", target: 34, value: 352 },
+        ],
+      },
+      parameters: {},
+    };
+    ir.blocks[36] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 361, value: { kind: "string", value: "answered" } },
+          { kind: "continue", target: 34, value: 361, modifiers: [] },
+        ],
+      },
+      parameters: { parameter: 360 },
+    };
+
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // watch1 dropped; the body is parked on `gate` and worker B's escalation sits buffered (length 1).
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(buffered.mailbox).toHaveLength(1);
+
+    // Answer `gate`: handle2 registers watch2, which drains the buffered escalation → worker B round-trips.
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "answered" });
+    await actor.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("pre-watch buffered escalations and a post-watch one reach a sequential handler in arrival order", async () => {
+    // The FIFO guarantee ACROSS the buffer boundary (the `:1596` transition version). Two workers escalate
+    // `on_message` BEFORE the watch registers (buffered, arrival order first→second); a THIRD escalates AFTER the
+    // watch is live (worker3 first parks on `w3gate`, released only once first/second are handled). One
+    // sequential handler `note`s each tag and blocks, so the order the notes surface IS its processing order —
+    // the buffered pair ahead of the live one: [first, second, third].
+    const handleBody: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "first" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "second" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "loadAgent", output: 162, name: createAgentName("worker3") },
+      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 162],
+          ["argument", 163],
+        ],
+        output: 164,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 164,
+        output: 165,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    const taggedWorker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "makeRecord", entries: [["tag", 111]], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 113,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 112 },
+    ];
+    const notingHandler: Operation[] = [
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("note") },
+        argument: 160,
+        output: 169,
+      },
+      { kind: "loadLiteral", output: 161, value: { kind: "null" } },
+      { kind: "continue", target: 14, value: 161, modifiers: [] },
+    ];
+    const ir = watchIr({ handleBody, worker: taggedWorker, handler: notingHandler });
+    // The `note` request the handler blocks on, and `w3gate` + a `worker3` that parks on it before escalating
+    // its own `on_message` — the post-watch third fiber.
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("note"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.blocks[34] = {
+      block: { kind: "agent", body: 35, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[35] = {
+      block: { kind: "request", name: createAgentName("w3gate"), input: 340 },
+      parameters: { parameter: 340 },
+    };
+    ir.blocks[36] = {
+      block: { kind: "agent", body: 37, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[37] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "makeRecord", entries: [], output: 371 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("w3gate") },
+            argument: 371,
+            output: 372,
+          },
+          { kind: "loadLiteral", output: 373, value: { kind: "string", value: "third" } },
+          { kind: "makeRecord", entries: [["tag", 373]], output: 374 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("on_message") },
+            argument: 374,
+            output: 375,
+          },
+          { kind: "exit", target: 36, value: 375 },
+        ],
+      },
+      parameters: { parameter: 370 },
+    };
+    ir.entries[createAgentName("note")] = { block: 17, private: false };
+    ir.entries[createAgentName("w3gate")] = { block: 34, private: false };
+    ir.entries[createAgentName("worker3")] = { block: 36, private: false };
+
+    const actor = makeActor(ir);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const order: string[] = [];
+    // The two PRE-watch buffered escalations, processed in arrival order by the sequential handler.
+    for (let landed = 0; landed < 2; landed += 1) {
+      const note = await waitUntil(() =>
+        actor.listOpenEscalations().find((open) => open.request === createAgentName("note")),
+      );
+      const tag = note.argument?.kind === "record" ? note.argument.fields.tag : undefined;
+      if (tag?.kind === "string") order.push(tag.value);
+      await actor.answerEscalation(note.escalation, { kind: "null" });
+    }
+    // Release worker3's POST-watch escalation, then process its note — it lands AFTER the buffered pair.
+    const w3gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("w3gate")),
+    );
+    await actor.answerEscalation(w3gate.escalation, { kind: "null" });
+    const third = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("note")),
+    );
+    const tag = third.argument?.kind === "record" ? third.argument.fields.tag : undefined;
+    if (tag?.kind === "string") order.push(tag.value);
+    await actor.answerEscalation(third.escalation, { kind: "null" });
+
+    expect(order).toEqual(["first", "second", "third"]);
   });
 
   test("both fibers' escalations are re-emitted concurrently and a sequential handler services them all", async () => {
@@ -2196,16 +2801,11 @@ describe("region reactor", () => {
     );
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // Alpha is provably running (its fiber_ask is up) and the continuation holds on ask_value.
-    const hold = await waitUntil(() => {
-      const fiber = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("fiber_ask"));
-      const gate = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("ask_value"));
-      return fiber !== undefined && gate !== undefined ? gate : undefined;
-    });
+    // The continuation holds on ask_value (alpha's own `fiber_ask` sits buffered in the mailbox — no watch — so
+    // it never reaches the run root; alpha's liveness is confirmed below via the provide's inner-call bridges).
+    const hold = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
     // Beta retired: the provide's bridges shrink to continuation + alpha, and the durable name map holds
     // exactly alpha's tag (beta's was cleaned with its running entry).
     const before = await eventually(async () => {
@@ -2290,14 +2890,13 @@ describe("region reactor", () => {
     );
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const gate = await waitUntil(() => {
-      const fiber = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("fiber_ask"));
-      const hold = actor
-        .listOpenEscalations()
-        .find((open) => open.request === createAgentName("ask_value"));
-      return fiber !== undefined && hold !== undefined ? hold : undefined;
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    // The worker is provably running: its own `fiber_ask` sits buffered in the mailbox (no watch to surface it).
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? true : undefined;
     });
     await actor.answerEscalation(gate.escalation, { kind: "null" });
 
@@ -2465,48 +3064,47 @@ describe("region reactor", () => {
     await actor.answerEscalation(report.escalation, { kind: "null" });
   });
 
-  test("a watch-less nursery's crashed event flushes up at quiescence and the run survives its answer", async () => {
-    // No watch anywhere: the synthetic crashed entry flushes UP through the provide like any mailbox
-    // entry, surfacing at the run root as the usual unhandled request. Answering it is swallowed (the
-    // fiber is long dead), and the run then completes normally — the crash cost the region nothing but
-    // the fiber itself.
+  test("a fiber's crash is buffered with no watch, and a later watch re-emits it", async () => {
+    // The semantic inversion of the old crashed-flush: the panicker crashes while NO watch is registered, so the
+    // runtime tears the dead fiber down and writes the synthetic `crashed` entry into the durable MAILBOX — it
+    // does NOT flush up to the run root (the provide's row carries no `crashed` obligation without a watch). The
+    // continuation is parked on `gate`; only when it answers and the watch registers does the buffered crash
+    // re-emit, bubbling PAST the on_message handle to the run root as the typed event. Answering it is swallowed
+    // (the fiber is long dead).
     const persistence = new StoringPersistence();
-    const continuation: Operation[] = [
-      { kind: "getField", source: 60, field: "value", output: 61 },
-      { kind: "loadAgent", output: 62, name: createAgentName("panicker") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
-      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "boom" } },
-      {
-        kind: "makeRecord",
-        entries: [
-          ["nursery", 61],
-          ["task", 62],
-          ["argument", 63],
-          ["name", 71],
-        ],
-        output: 64,
-      },
-      {
-        kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.region.fork") },
-        argument: 64,
-        output: 65,
-      },
-      { kind: "makeRecord", entries: [], output: 66 },
-      {
-        kind: "delegate",
-        target: { kind: "name", name: createAgentName("ask_value") },
-        argument: 66,
-        output: 67,
-      },
-      { kind: "exit", target: 6, value: 67 },
-    ];
-    const actor = makeActor(
-      withRegistryAgents(forkIr({ continuation, task: returningTask })),
-      persistence,
+    const ir = withGate(
+      withRegistryAgents(
+        watchIr({ handleBody: forkHoldThenWatch({ task: "panicker", argument: "x", name: "boom" }) }),
+      ),
     );
-    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
+    // The continuation is parked on `gate` (no watch yet) and the crash sits buffered as a SYNTHETIC entry
+    // (no child leg), NOT at the run root.
+    await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    const entry = buffered.mailbox[0];
+    expect(entry?.child).toBeNull();
+    expect(entry?.ask.kind === "request" ? entry.ask.request : null).toEqual(
+      createAgentName("prelude.region.crashed"),
+    );
+    expect(
+      actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("prelude.region.crashed")),
+    ).toBeUndefined();
+
+    // Answer the gate: the watch registers and re-emits the buffered crash, which bubbles to the run root.
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
     const crashed = await waitUntil(() =>
       actor
         .listOpenEscalations()
@@ -2518,13 +3116,7 @@ describe("region reactor", () => {
     const message = argument.fields.message;
     if (message?.kind !== "string") throw new Error("crashed must carry a string message");
     expect(message.value).toContain("range(0, 20000000)");
-
     await actor.answerEscalation(crashed.escalation, { kind: "null" });
-    const gate = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
-    );
-    await actor.answerEscalation(gate.escalation, { kind: "string", value: "done" });
-    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
   });
 
   test("fiber names and a re-emitted crashed event survive a restart", async () => {

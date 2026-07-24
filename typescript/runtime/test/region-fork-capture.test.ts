@@ -7,11 +7,13 @@
 //
 // Topology mirrored here:
 //   main()            -> region.provide(continuation)
-//   continuation(v)   -> nursery = v.value; handle = route({ nursery }); hold (keep the nursery open)
+//   continuation(v)   -> nursery = v.value; route({ nursery }); handle { watch(nursery) } with fiber_ask/fiber_report
 //   route({nursery})  -> secret = "SECRET"; fork(nursery, task = <closure reading secret>, arg); return handle
-//   task(input)       -> escalate fiber_ask (suspend); then read the captured `secret` and return it
+//   task(input)       -> escalate fiber_ask (suspend); then read the captured `secret` and report it
 //
-// `route` returns (tears down) before the fiber reads `secret`, so a broken runtime loses the captured scope.
+// `route` returns (tears down) before the fiber reads `secret`, so a broken runtime loses the captured scope. The
+// fiber's escalations now surface only at the WATCH the continuation installs (there is no flush-up): its
+// fiber_ask handler resumes the fiber, and its fiber_report handler breaks out with the reported secret.
 
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -70,9 +72,11 @@ function captureIr(): IRModule {
         block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
         parameters: { parameter: 50 },
       },
-      // continuation: bind the nursery, delegate to `route` (which forks + returns a handle), then HOLD on
-      // an unhandled request so the nursery stays alive while the fiber runs (there is no join — the fiber
-      // reports its read through `fiber_report`); the hold's answer becomes the continuation's result.
+      // continuation: bind the nursery, delegate to `route` (which forks + returns a handle), then enter a
+      // handle+WATCH (block 22) so the fiber's escalations are serviced. A fiber's escalation surfaces ONLY at a
+      // watch now (there is no flush-up), so the watch is how the fiber gets driven past its `fiber_ask` suspend
+      // and how its `fiber_report` (carrying the captured secret) is caught. The handler for `fiber_report`
+      // breaks out of the handle with the reported value, which becomes the continuation's — and the run's — result.
       6: {
         block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
@@ -91,13 +95,7 @@ function captureIr(): IRModule {
               argument: 63,
               output: 64,
             },
-            { kind: "makeRecord", entries: [], output: 65 },
-            {
-              kind: "delegate",
-              target: { kind: "name", name: createAgentName("hold") },
-              argument: 65,
-              output: 66,
-            },
+            { kind: "call", target: 22, output: 66 },
             { kind: "exit", target: 6, value: 66 },
           ],
         },
@@ -156,14 +154,76 @@ function captureIr(): IRModule {
         block: { kind: "request", name: createAgentName("fiber_report"), input: 150 },
         parameters: { parameter: 150 },
       },
-      // hold: the continuation's keep-the-nursery-alive request.
-      18: {
-        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      // region.watch wrapper: the white hole the continuation installs so the fiber's escalations surface.
+      20: {
+        block: { kind: "agent", body: 21, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
       },
-      19: {
-        block: { kind: "request", name: createAgentName("hold"), input: 190 },
-        parameters: { parameter: 190 },
+      21: {
+        block: { kind: "external", key: "prelude.region.watch", input: 210, reactor: "region" },
+        parameters: { parameter: 210 },
+      },
+      // The handle around the watch: its body watches the nursery; it catches the fiber's `fiber_ask` (answering
+      // it to resume the suspended fiber) and its `fiber_report` (breaking out of the handle with the reported
+      // value). `route` has already torn down by the time the watch answers `fiber_ask`, so the fiber's later
+      // read of the captured `secret` exercises exactly the reclaim-across-teardown regression.
+      22: {
+        block: {
+          kind: "handle",
+          parallel: false,
+          initialStates: [],
+          body: 23,
+          handlers: [
+            { request: createAgentName("fiber_ask"), body: 24 },
+            { request: createAgentName("fiber_report"), body: 25 },
+          ],
+          thenClause: null,
+        },
+        parameters: {},
+      },
+      // The handle body: watch the nursery (variable 61, visible through the lexical scope chain). `watch`
+      // returns `never`; the handle only completes when a handler breaks.
+      23: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [["nursery", 61]], output: 231 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.watch") },
+              argument: 231,
+              output: 232,
+            },
+            { kind: "exit", target: 22, value: 232 },
+          ],
+        },
+        parameters: {},
+      },
+      // fiber_ask handler: answer with null, resuming the suspended fiber (a `next`/continue on the handle).
+      24: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadLiteral", output: 241, value: { kind: "null" } },
+            { kind: "continue", target: 22, value: 241, modifiers: [] },
+          ],
+        },
+        parameters: { parameter: 240 },
+      },
+      // fiber_report handler: pull the reported `value` and BREAK out of the handle with it (an `exit` targeting
+      // the handle block raises a `break`), so the region settles with the captured secret.
+      25: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "getField", source: 250, field: "value", output: 251 },
+            { kind: "exit", target: 22, value: 251 },
+          ],
+        },
+        parameters: { parameter: 250 },
       },
       // The forked closure (block 16). It first escalates fiber_ask to suspend, THEN reads the captured
       // variable 92 (bound in `route`'s scope, its lexical parent) and returns it. The second read is the one
@@ -202,7 +262,7 @@ function captureIr(): IRModule {
       [createAgentName("prelude.region.provide")]: { block: 2, private: false },
       [createAgentName("prelude.region.fork")]: { block: 4, private: false },
       [createAgentName("fiber_report")]: { block: 14, private: false },
-      [createAgentName("hold")]: { block: 18, private: false },
+      [createAgentName("prelude.region.watch")]: { block: 20, private: false },
       [createAgentName("continuation")]: { block: 6, private: false },
       [createAgentName("route")]: { block: 8, private: false },
       [createAgentName("fiber_ask")]: { block: 10, private: false },
@@ -252,26 +312,12 @@ describe("region fork of a scope-capturing closure", () => {
     const actor = makeActor(persistence);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // The fiber has escalated fiber_ask (so it is suspended); `route` has resumed with the handle and torn
-    // down by now. Answering the escalation drives the fiber's SECOND turn, where it reads the captured secret.
-    const fiberAsk = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
-    );
-    await actor.answerEscalation(fiberAsk.escalation, { kind: "null" });
-
-    // Fixed: the fiber reads its captured "SECRET" and REPORTS it (a settled value is discarded, so the
-    // report escalation is the observable); releasing the hold then lets the run finish.
-    const report = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
-    );
-    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
-    expect(reported).toEqual({ kind: "string", value: "SECRET" });
-    await actor.answerEscalation(report.escalation, { kind: "null" });
-    const hold = await waitUntil(() =>
-      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold")),
-    );
-    await actor.answerEscalation(hold.escalation, { kind: "string", value: "done" });
-    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
+    // The fiber suspends on fiber_ask; `route` resumes with the handle and tears down. The continuation's WATCH
+    // then re-emits fiber_ask to its handler, which answers it — driving the fiber's SECOND turn, where it reads
+    // the captured "SECRET". `route` has long torn down by then, so a broken runtime would lose the captured
+    // scope. The fiber REPORTS the secret via fiber_report, whose handler breaks out of the handle with it, so
+    // the whole run resolves with the value the fiber read.
+    await expect(result).resolves.toEqual({ kind: "string", value: "SECRET" });
     // And no deterministic throw was swallowed on the way (the silent-failure signature of the bug).
     expect(errors.filter((line) => line.includes("is unbound in scope"))).toEqual([]);
     // The captured environment was transferred onto the provide, so the nursery's drop reclaims it — nothing

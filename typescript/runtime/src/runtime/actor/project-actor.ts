@@ -303,7 +303,11 @@ export class ProjectActor {
     // The region reactor serves `prelude.region.*` calls: an in-runtime nursery scheduler with no external
     // process, re-entering the serial loop for a provide's post-commit work (the continuation dispatch, a
     // synthesised completion) through the scheduler closure the same way.
-    this.region = new RegionReactor((work) => this.substrate.submit(this.region, work), pool);
+    this.region = new RegionReactor(
+      (work) => this.substrate.submit(this.region, work),
+      pool,
+      createLogger({ level: "info", bindings: { module: "region", projectId: this.projectId } }),
+    );
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs. It also
     // AUTO-ANSWERS an unhandled `prelude.store.*` request that escalated to it — the store is the run's

@@ -45,13 +45,14 @@
 // as there are mailboxed escalations, re-emitting each the moment it arrives. The ONLY serialization point is
 // the RECEIVING handler: a sequential (`var`) handler re-serializes its own stream at its FIFO (in arrival
 // order), a `parallel handler` does not — so two escalations to DIFFERENT handlers are always concurrent (no
-// cross-handler starvation), two to the SAME var handler serialize at that handler in arrival order. A nursery
-// with NO watch flushes its mailboxed escalations UP through the provide to the run root (`flushUp`). The two
-// are told apart at GLOBAL QUIESCENCE
-// (`onQuiesce`): a watch drains its scope's mailbox EAGERLY (on registration and as each escalation arrives), so
-// a mailbox still full when every run is blocked belongs to a genuinely watch-less nursery — the one point where
-// "a watch that was going to register already has" holds, so flushing up cannot race a late watch. A cancelled
-// fiber's not-yet-emitted escalations are dropped from the mailbox so they are never re-emitted.
+// cross-handler starvation), two to the SAME var handler serialize at that handler in arrival order. A fiber's
+// escalation surfaces at a watch and NOWHERE ELSE: until a watch registers, it stays BUFFERED in the nursery's
+// durable mailbox, however long that takes — a fiber may fork, then wait on an FFI / http / AI call before it
+// escalates, and its watch may be installed only after some human-latency hold answers. A nursery that never
+// registers a watch simply holds its mailbox: it is NEVER flushed up to the enclosing program, because the
+// provide's declared row is `R with Eouter | io` (the fibers' `E` is NOT in it), so surfacing a fiber's request
+// above the provide would leak a request the nursery never promised. A cancelled fiber's not-yet-emitted
+// escalations are dropped from the mailbox so they are never re-emitted.
 // `watch` returns `never`: the call is HELD OPEN (it only ever raises, never settles), closing only when the
 // nursery drops or the watch is cancelled.
 //
@@ -63,8 +64,8 @@
 // anticipated, often model-supplied miss — answers `unknown_fiber(id)`, never a panic); and a fiber's PANIC is
 // intercepted at `onEscalate` and re-emitted as the typed `crashed(id, name, message)` event — a SYNTHETIC
 // mailbox entry with no child leg (the fiber is dead; the runtime tears it down like a cancel, and the
-// handler's eventual answer is swallowed via the base's moot-answer guard). A watch-less nursery's `crashed`
-// entry flushes UP like any mailbox entry, surfacing at the run root as the usual unhandled request.
+// handler's eventual answer is swallowed via the base's moot-answer guard). A `crashed` entry buffers in the
+// mailbox like any other, waiting for a watch to re-emit it — a watch-less nursery simply holds it.
 //
 // Durably a `provide` persists its endpoint payload (its scope id + the still-stored continuation + the
 // settled-fiber buffer + the inner-delegation bridges) and survives a restart COMPLETELY, re-registering the
@@ -77,6 +78,7 @@
 
 import { randomBytes } from "node:crypto";
 import { createAgentName, type Json, type QualifiedName } from "@katari-lang/types";
+import type { Logger } from "../../lib/logger.js";
 import { NURSERY_FIBER_FIELD, NURSERY_SCOPE_FIELD, PANIC_REQUEST } from "../engine/common.js";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import type { AskKind, ExternalEvent, ReactorName } from "../event/types.js";
@@ -148,8 +150,8 @@ const CONTINUATION_CALL = "continuation";
  *  filters on reload to rebuild the running-fiber set a `cancel` routes against. */
 const FIBER_TOKEN_PREFIX = "fiber:";
 
-/** One fiber escalation waiting in a nursery's mailbox — held until a `watch` re-emits it (or, watch-less, it
- *  flushes UP through the provide). Persisted on the provide's extension (a `watch` restored across a restart
+/** One fiber escalation waiting in a nursery's mailbox — held until a `watch` re-emits it (a watch-less nursery
+ *  simply holds it forever). Persisted on the provide's extension (a `watch` restored across a restart
  *  must not lose the "溜まっていた" requests), which is why the raised `ask`'s carried value is reowned onto the
  *  provide instance when it is enqueued: parked resources survive the commit and the provide's eventual drop
  *  rather than dangling in-transit. */
@@ -163,7 +165,7 @@ interface MailboxEntry {
   /** The fiber's escalation id — echoed on the answering `escalateAck` down to the fiber (`null` on a
    *  synthetic entry, which has no answer to route). */
   childEscalation: EscalationId | null;
-  /** The ask the fiber raised — re-emitted verbatim at the watch (or, watch-less, up through the provide). */
+  /** The ask the fiber raised — re-emitted verbatim at the watch once one registers. */
   ask: AskKind;
 }
 
@@ -207,11 +209,12 @@ type RegionPayload =
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
        *  distinguishes a not-yet-started provide (re-dispatch it) from an active one (resume). */
       continuation: Value | null;
-      /** The fibers' escalations waiting for a `watch` to REGISTER (or, watch-less, to be flushed up). Once a
-       *  watch is live the mailbox drains WHOLE and at once (each escalation re-emitted the moment it arrives —
-       *  a watch imposes no serialization of its own), so this holds only the pre-registration backlog. FIFO,
-       *  which is what a downstream sequential handler needs. Persisted on the provide's extension, so a restart
-       *  restores the "溜まっていた" requests no watch had yet claimed. */
+      /** The fibers' escalations waiting for a `watch` to REGISTER. Once a watch is live the mailbox drains
+       *  WHOLE and at once (each escalation re-emitted the moment it arrives — a watch imposes no serialization
+       *  of its own), so this holds only the pre-registration backlog; a nursery that never registers a watch
+       *  holds it indefinitely (there is no flush-up). FIFO, which is what a downstream sequential handler
+       *  needs. Persisted on the provide's extension, so a restart restores the "溜まっていた" requests no watch
+       *  had yet claimed. */
       mailbox: MailboxEntry[];
       /** The RUNNING fibers' name tags, by fiber id — the `fork(name)` echo `roster` and `crashed` report.
        *  Only named, still-running fibers have an entry (absence IS "unnamed"; `retireFiber` cleans it), and
@@ -428,7 +431,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   private readonly watchesByScope = new Map<string, Set<DelegationId>>();
 
   /** The reverse of `watchesByScope`: a watch call to the scope it watches — how `onDropCall` finds the scope
-   *  to re-route a dropped watch's not-yet-emitted escalations to a remaining watch (or leave for flush-up). */
+   *  to re-route a dropped watch's not-yet-emitted escalations to a remaining watch (or leave them buffered). */
   private readonly watchScope = new Map<DelegationId, string>();
 
   constructor(
@@ -437,6 +440,10 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
      *  delegation opens inside a turn and commits with it. */
     private readonly schedule: (work: () => void) => void,
     pool: ResourcePool,
+    /** Warns when a fiber crashes into a nursery with no watch installed: with the quiescence flush-up gone,
+     *  such a `crashed` event no longer auto-surfaces at the run root, so the one visible trace of the crash is
+     *  this line (the semantics are unchanged — the event waits, buffered, for a watch). */
+    private readonly logger: Logger,
   ) {
     super(pool);
   }
@@ -470,7 +477,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   }
 
   /** Forget a watch at its drop (cancelled, or torn down with its nursery). Its scope's mailbox is re-pumped
-   *  by `onDropCall`, so any escalation it had not yet drained re-routes to another watch or flushes up. */
+   *  by `onDropCall`, so any escalation it had not yet drained re-routes to another watch, or stays buffered
+   *  until a fresh watch registers. */
   private unregisterWatch(watch: DelegationId): void {
     const scope = this.watchScope.get(watch);
     if (scope === undefined) return;
@@ -982,7 +990,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** The one-time watch validation (a reactor turn): confirm the nursery is still live, register this watch as
    *  a white hole of its scope, then drain any escalations the mailbox is already holding (the ones that beat
-   *  the watch's registration — this is what catches them without racing a premature flush-up). The call is
+   *  the watch's registration — the durable backlog buffered until this moment). The call is
    *  HELD OPEN — never completed here, since `watch` returns `never` (it only ever re-emits). A dead / forged
    *  scope is refused as a panic, the same requires-a-live-provide backstop as `fork` / `cancel`. */
   private startWatch(delegation: DelegationId): void {
@@ -1000,9 +1008,10 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   /** A fiber's escalation reached this reactor. If it is a fiber of a live nursery, HOLD it in the nursery's
    *  mailbox (reowning its carried value onto the provide so the parked ask survives a commit / the provide's
    *  drop) and, when a watch is already registered, re-emit it there at once. An escalation that beats its
-   *  watch's registration stays mailboxed until `startWatch` drains it; one on a genuinely watch-less nursery
-   *  flushes up only at `onQuiesce`. A fiber's PANIC is intercepted here instead of mailboxed: it becomes the
-   *  typed `crashed` event (`crashFiber`). Any non-fiber escalation (the continuation's own request) relays up
+   *  watch's registration stays mailboxed until `startWatch` drains it; a nursery that never registers a watch
+   *  keeps it buffered indefinitely (it is never surfaced above the provide — the fibers' `E` is not in the
+   *  provide's declared row). A fiber's PANIC is intercepted here instead of mailboxed: it becomes the typed
+   *  `crashed` event (`crashFiber`). Any non-fiber escalation (the continuation's own request) relays up
    *  through the provide unchanged (the base path). */
   protected override onEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
@@ -1037,9 +1046,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     this.markCallDirty(provide);
     // Re-emit at the watch NOW if one is already registered (the common case once the region is running); an
     // escalation that arrives BEFORE the watch registers stays in the mailbox and `startWatch` drains it when
-    // the watch lands. It is flushed UP only at global quiescence (`onQuiesce`) — the point where the
-    // continuation is blocked, so a watch that was going to register already has, and a mailbox still holding
-    // an escalation belongs to a genuinely watch-less nursery (the flush-up relay to the run root).
+    // the watch lands. A nursery with no watch keeps it buffered — there is no flush-up, so a watch installed
+    // arbitrarily late still finds every pre-registration escalation waiting for it.
     if ((this.watchesByScope.get(scope)?.size ?? 0) > 0) this.pumpWatch(scope);
   }
 
@@ -1048,8 +1056,9 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  `cancel` (drop its queued escalations, terminate its inner delegation — but with NO waiter, since
    *  nobody asked), and report the ending as DATA — a SYNTHETIC `crashed` mailbox entry carrying the
    *  fiber's id, its recorded name tag, and the panic's message. The entry rides the same FIFO as
-   *  ordinary entries, so it surfaces at the watch (or, watch-less, flushes up at quiescence) in arrival
-   *  order; having no child leg, its eventual answer is discarded (see `emitEntry`). The panic escalation
+   *  ordinary entries, so it surfaces at the watch once one registers — a watch-less nursery simply holds it
+   *  buffered, so a crash with no watch installed is WARNED here (it no longer auto-surfaces at the run root).
+   *  Having no child leg, its eventual answer is discarded (see `emitEntry`). The panic escalation
    *  itself is never answered — its durable row dies with the fiber's teardown, like a cancelled fiber's
    *  moot escalation. */
   private crashFiber(
@@ -1080,29 +1089,23 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     });
     this.markCallDirty(provide);
     if ((this.watchesByScope.get(payload.scope)?.size ?? 0) > 0) this.pumpWatch(payload.scope);
+    // No watch is installed, so this crash will not surface anywhere until one registers (and none may). Warn
+    // so an operator has a trace of the crash even while the typed `crashed` event waits, buffered, unread.
+    else
+      this.logger.warn(
+        "region: a fiber crashed into a nursery with no watch; the crashed event is buffered",
+        {
+          fiber,
+          name,
+          message,
+        },
+      );
   }
 
   // A relayed answer needs no region-specific handling: the base `onEscalateAck` descends each answer to its
   // own fiber, keyed on the escalation id, so many outstanding relays per watch are answered independently.
   // There is no "pump the next mailbox entry" step — a watch re-emits EVERY mailboxed escalation the moment
   // it arrives (see `pumpWatch`), so nothing eligible is ever left waiting for an answer to free the watch.
-
-  /** At GLOBAL QUIESCENCE (every run of every reactor is blocked), flush up any nursery whose mailbox still
-   *  holds escalations and has NO watch — the flush-up relay a watch-less region does. This is
-   *  the one safe point to decide "watch-less": if a watch were going to register, the continuation would still
-   *  be dispatching it (not quiescent), so a mailbox still full at quiescence belongs to a genuinely watch-less
-   *  nursery. A WATCHED scope is NOT drained here — its watch drains it eagerly (`startWatch` on registration,
-   *  and `onEscalate` re-emits each fresh escalation at once) — so this never fights the white hole, and never
-   *  spins (each flush empties its mailbox, so the next quiescence finds nothing to do). */
-  override onQuiesce(): void {
-    for (const [scope, state] of this.scopes) {
-      if ((this.watchesByScope.get(scope)?.size ?? 0) > 0) continue; // watched — drained by the watch itself
-      const payload = this.payloadOf(state.provide);
-      if (payload !== undefined && payload.kind === "provide" && payload.mailbox.length > 0) {
-        this.schedule(() => this.flushUp(scope));
-      }
-    }
-  }
 
   /** Re-emit ALL of the nursery's mailboxed escalations at its watches, CONCURRENTLY — a watch is a
    *  transparent WHITE HOLE that imposes NO serialization of its own, so every mailboxed escalation is
@@ -1114,7 +1117,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  watches of one nursery — round-robin, each escalation to exactly ONE watch, so a downstream sequential
    *  handler sees them in arrival order (the FIFO-into-a-var-handler guarantee). A watch winding down (a racing
    *  cancel) cannot take an entry; it re-routes to another watch, or — if none can take it — stays mailboxed,
-   *  in order, for the dropping watch's re-pump (`onDropCall`) or the quiescence flush-up. */
+   *  in order, for the dropping watch's re-pump (`onDropCall`) or for whatever watch registers next. */
   private pumpWatch(scope: string): void {
     const scopeState = this.scopes.get(scope);
     const watches = this.watchesByScope.get(scope);
@@ -1142,17 +1145,17 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       if (!delivered) undelivered.push(entry);
     }
     // Anything no live watch could take (every watch winding down) stays mailboxed, in order, ahead of
-    // whatever arrived meanwhile — the dropping watch's re-pump or the quiescence flush-up handles it.
+    // whatever arrived meanwhile — the dropping watch's re-pump, or the next watch to register, handles it.
     providePayload.mailbox = undelivered.concat(providePayload.mailbox);
     this.markCallDirty(scopeState.provide);
   }
 
-  /** Re-raise one mailbox entry under `under` (a watch, or — flushing up — the provide). An ordinary entry
-   *  relays with its fiber's own leg, so the handler's answer descends to the fiber. A SYNTHETIC entry (a
-   *  runtime-authored `crashed` event — its fiber is already dead) relays under FRESH ids that name no live
-   *  delegation: the relay row bridges the answer like any other, but when it descends, the base's moot-answer
-   *  guard (`issuedPeerOf` finds no peer for the fake child) swallows it — the exact behaviour a cancelled
-   *  fiber's in-flight answer already gets, reused rather than re-invented. */
+  /** Re-raise one mailbox entry under `under` (always a watch — a fiber's escalation surfaces at a watch and
+   *  nowhere else). An ordinary entry relays with its fiber's own leg, so the handler's answer descends to the
+   *  fiber. A SYNTHETIC entry (a runtime-authored `crashed` event — its fiber is already dead) relays under
+   *  FRESH ids that name no live delegation: the relay row bridges the answer like any other, but when it
+   *  descends, the base's moot-answer guard (`issuedPeerOf` finds no peer for the fake child) swallows it — the
+   *  exact behaviour a cancelled fiber's in-flight answer already gets, reused rather than re-invented. */
   private emitEntry(under: DelegationId, entry: MailboxEntry): boolean {
     return this.relayAskUnder(
       under,
@@ -1160,22 +1163,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       entry.childEscalation ?? newEscalationId(),
       entry.ask,
     );
-  }
-
-  /** Relay a watch-less nursery's mailboxed escalations UP through the provide to the enclosing program — the
-   *  flush-up path a watch-less nursery takes. Each entry re-raises under the
-   *  provide's own delegation (so its answer descends the base relay bridge back to the fiber). */
-  private flushUp(scope: string): void {
-    const scopeState = this.scopes.get(scope);
-    if (scopeState === undefined) return;
-    const providePayload = this.payloadOf(scopeState.provide);
-    if (providePayload === undefined || providePayload.kind !== "provide") return;
-    if (providePayload.mailbox.length === 0) return;
-    const entries = providePayload.mailbox.splice(0);
-    this.markCallDirty(scopeState.provide);
-    for (const entry of entries) {
-      this.emitEntry(scopeState.provide, entry);
-    }
   }
 
   /** The nursery scope and fiber id a still-running fiber's delegation belongs to, or `undefined` when the
@@ -1228,8 +1215,9 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  reloaded WATCH re-registers as its scope's white hole SYNCHRONOUSLY (before any scheduled pump), its
    *  outstanding relays (possibly many) restored from the durable row so each handler's answer still descends to
    *  its own fiber; the
-   *  provide re-pumps its reloaded mailbox (the "溜まっていた" requests), routing them to the watch (or, watch-less,
-   *  up). There is no external process to reconcile (like `webhook` / `time`). An `operation` call is
+   *  provide re-pumps its reloaded mailbox (the "溜まっていた" requests), routing them to the watch — or, watch-less,
+   *  leaving them buffered for whatever watch registers next. There is no external process to reconcile (like
+   *  `webhook` / `time`). An `operation` call is
    *  at-most-once: it never really began (it fails immediately), so a reloaded one refuses again, never re-run. */
   protected recover(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
@@ -1273,7 +1261,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         this.repopulateRunning(payload.scope, delegation);
         // Re-drain any escalations a watch had not yet serviced before the crash — routed to the watch once
         // every call has re-registered (the scheduled pump runs after this synchronous reload pass); a
-        // watch-less reload leaves the mailbox for `onQuiesce` to flush up.
+        // watch-less reload keeps the mailbox buffered, awaiting whatever watch registers next.
         if (payload.mailbox.length > 0) this.schedule(() => this.pumpWatch(payload.scope));
         if (payload.continuation !== null) this.schedule(() => this.startContinuation(delegation));
         return;
@@ -1306,7 +1294,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  watch and re-pump its scope (the drop hook covers every resolution path at once). A join / cancel that
    *  resolved by SETTLING already dropped its own waiter; this catches one torn down while still waiting (its
    *  own cancel), so a later fiber settle finds nothing stale to resume. A dropped WATCH re-pumps its scope so
-   *  anything it had not yet re-emitted re-routes to another watch or flushes up. */
+   *  anything it had not yet re-emitted re-routes to another watch, or stays buffered for the next one. */
   protected override onDropCall(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined) return;
@@ -1318,7 +1306,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       const scope = this.watchScope.get(delegation);
       this.unregisterWatch(delegation);
       // Re-route anything this watch had not yet re-emitted to a REMAINING watch of the scope; a scope left
-      // watch-less by the drop leaves its mailbox for `onQuiesce` to flush up.
+      // watch-less by the drop keeps its mailbox buffered, awaiting whatever watch registers next.
       if (scope !== undefined) this.schedule(() => this.pumpWatch(scope));
       return;
     }
