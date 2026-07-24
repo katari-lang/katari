@@ -1439,10 +1439,13 @@ checkForBreakStatement forBreakStmt = do
       pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
 
--- | Check @with x = e@ modifiers against the state variable's type. The identifier resolves every
--- modifier target to an enclosing @for@ / handler state variable (K2007 covers the rest), and that
--- variable is in scope while its body is walked, so an unresolved or out-of-scope target here is a
--- compiler bug.
+-- | Check @with x = e@ modifiers against the state variable's type. The identifier resolves a modifier
+-- target to an enclosing @for@ / handler state variable, reporting K2007 when the name is not one; an
+-- unresolved target then arrives here with a @Nothing@ resolution, and this walk recovers (typing the
+-- value for its own well-formedness and carrying the unresolved reference through) rather than aborting
+-- — the K2007 already stands and covers the mistake. A state variable is always a fresh local binding
+-- in scope over the body, so a target that resolved to a local absent from scope, or to a qualified
+-- name, is a compiler bug.
 checkModifiers :: List (Modifier Identified) -> Checker (List (Modifier Typed))
 checkModifiers = traverse checkOneModifier
   where
@@ -1460,7 +1463,11 @@ checkModifiers = traverse checkOneModifier
                   sourceSpan = modifier.sourceSpan
                 }
           Nothing -> panic "checkModifiers: modifier target local is not in scope"
-      _ -> panic "checkModifiers: modifier target is not resolved to a local variable"
+      -- The identifier already reported K2007 (the target names no enclosing state variable), leaving
+      -- the resolution @Nothing@; recover exactly as a misplaced jump does — synthesize the value and
+      -- retag the unresolved reference — so a user typo yields the K2007 rather than a compiler panic.
+      Nothing -> retagModifier modifier
+      Just (VariableResolutionQualifiedName _) -> panic "checkModifiers: modifier target resolved to a qualified name, not a state variable"
 
 retagModifier :: Modifier Identified -> Checker (Modifier Typed)
 retagModifier modifier = do

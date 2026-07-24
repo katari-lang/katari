@@ -791,6 +791,34 @@ spec = do
         )
         `shouldBe` []
 
+  describe "with modifier targeting an unresolved state variable (K2007, not a panic)" $ do
+    -- The identifier reports K2007 for a `with` target that names no enclosing state variable, but the
+    -- resolution it hands the checker is Nothing. The checker used to panic on that Nothing; it must
+    -- instead recover so the user sees the K2007. A whole-program compile is required to reach the
+    -- checker (the identifier phase alone stops at K2007 and never runs it), so these go through
+    -- `compiledCodes`.
+    it "recovers from a handler `next ... with` whose target is a typo of the handler state" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler (var counter = 1) {\n"
+            <> "    request tick() { next counter with { countr = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` ["K2007"]
+
+    it "recovers from a `for` `next ... with` whose target is a typo of the loop state" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  for (let value in [1, 2, 3], var total = 0) {\n"
+            <> "    next with { totl = total + value }\n"
+            <> "  } then (_elements) { total }\n"
+            <> "}"
+        )
+        `shouldBe` ["K2007"]
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
