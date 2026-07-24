@@ -1,12 +1,14 @@
 # playground — a tour of Katari's standard features
 
-One project, thirteen modules, each independently runnable. Use it to smoke-test a runtime and to see
+One project, seventeen modules, each independently runnable. Use it to smoke-test a runtime and to see
 every core feature in a small, deterministic form. Every module lives under the package's own
 namespace (`src/playground/`), so its qualified name is `playground.<module>`.
 
 | Module                                   | Entry              | Shows                                                                                                                              |
 | ---------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | [`basics.ktr`](src/playground/basics.ktr)           | `playground.basics.main`      | data + `match`, `for` (map + accumulator), `parallel for`, stateful inline handlers, partial application (`scale(factor = 2.0, value = _)`, incl. an omitted `?=`-defaulted parameter filled through the residual), prelude (string / array / math / json) |
+| [`match_string.ktr`](src/playground/match_string.ktr) | `playground.match_string.main` | matching on STRING values: `case "literal"` arms with a bare-identifier catch-all, plus input normalisation (trim + lowercase before matching) — the value-level twin of `scoped`'s string-literal singleton types |
+| [`records_and_rows.ktr`](src/playground/records_and_rows.ktr) | `playground.records_and_rows.main` | object (record) LITERALS `{ field = value }` and their `{ field: type }` types (named once with a synonym), plus EFFECT-ROW SYNONYMS (`type conversation = ask \| note`) used after `with` and as an `effect` type argument — the two features newcomers most often misread as absent |
 | [`tools.ktr`](src/playground/tools.ktr)             | `playground.tools.main`       | agents as AI tools: `reflection.get_metadata` schema derivation, the typed JSON boundary (`json.parse_as[T]`), dynamic dispatch (`reflection.call_agent`) |
 | [`errors.ktr`](src/playground/errors.ktr)           | `playground.errors.main`      | the typed error model: `prelude.throw[T]` raised + caught (incl. `env.missing_secret` config fallback), and the ambient `panic` clause catching a runtime failure |
 | [`interactive.ktr`](src/playground/interactive.ktr) | `playground.interactive.main` | escalation: unanswered `request`s bubble out as open questions; parallel delegations — watch the **delegation tree** on the run page |
@@ -15,6 +17,8 @@ namespace (`src/playground/`), so its qualified name is `playground.<module>`.
 | [`finalizers.ktr`](src/playground/finalizers.ktr)   | `playground.finalizers.run`   | `finally { ... }` arms instance finalizers (Go-`defer`-like): reverse arming order, run at the terminal, never on a panic; a finalizer's net effect must stay within `io` (a locally-handled request is fine, an escalating one is rejected K3021) |
 | [`scoped.ktr`](src/playground/scoped.ktr)           | `playground.scoped.main`      | scope-tagged capabilities in the type system: string literal singleton types (`"fast"` as a type), `[literal name]` generics binding a literal argument's singleton, and `effect scoped[resource]` markers that ride effect rows, gate calls, and are discharged by a provider-shaped signature (`with_scope`) |
 | [`time.ktr`](src/playground/time.ktr)               | `playground.time.main`        | durable wall-clock time as built-in reactor calls (no FFI sidecar): `time.now` reads a durably-recorded clock a recovered run agrees with, `time.sleep` waits a persisted deadline that re-arms across a restart, and `time.watch` fires an agent per schedule occurrence — with termination composed *around* the watch (a stateful handler throws to tear it down) |
+| [`store.ktr`](src/playground/store.ktr) | `playground.store.main` | the durable key-value store — state that outlives a run: `store.get` (`found` / `absent`) / `store.set` / `store.list`, a `store.workspace` that prefixes every key AND serves `store.exclusive`, and `store.modify` as the atomic one-key read-modify-write |
+| [`credentials.ktr`](src/playground/credentials.ktr) | `playground.credentials.main` | the one credential shape (WHERE a secret lives, never its value): a package's `credential` request discharged by a `provider` resolving a `credentials.source` (an `env` key or an `oauth` name), and the `string of private` taint that keeps a resolved secret to an http `Authorization` header |
 | [`replay_demo.ktr`](src/playground/replay_demo.ktr) | `playground.replay_demo.main` | failure recovery composed, with the `replay` provider (mechanism) split from a user *converter* (policy) that decides which throws / panics become `replay.interrupted`: exponential backoff with selective retry, `replay.forever` re-arming a `time.watch` daemon, and `replay.immediate` + a converter that performs its own human-in-the-loop escalation |
 | [`region.ktr`](src/playground/region.ktr)           | `playground.region.main`      | structured-concurrency nursery: `region.provide` opens a scope, `region.fork` / `region.join` fan out (a fork's handle is a first-class value you may store and join later — unlike `parallel for`), and `region.watch` is the *white hole* re-emitting fibers' escalations at a surrounding handler (a subscription that forks a second emitter from inside the white hole), plus `region.cancel` |
 | [`mcp_demo.ktr`](src/playground/mcp_demo.ktr)       | `playground.mcp_demo.main`    | the built-in MCP client: `mcp.provide` lists a server's tools as a scoped toolbox of agents, and the reflection loop (`reflection.get_metadata` reads a tool's schema, `reflection.call_agent` dispatches it) runs inside the `provide` scope the tool calls are gated by (pass a server URL via `--arg`) |
@@ -32,6 +36,10 @@ cd examples/playground
 
 katari apply                                             # compile + bundle the sidecar + deploy a snapshot
 katari run playground.basics.main                        # => areas=… | ticks=[0,1,2] | sum(squares(4))=30 | …
+katari run playground.match_string.main                  # => red -> stop | GREEN -> go | amber -> brake gently | blue -> unknown signal: blue
+katari run playground.records_and_rows.main              # => Ada <ada@example.org> [new] | Grace <grace@example.org> [new] || warmly, Ada
+katari run playground.credentials.main                   # => env:EXAMPLE_API_KEY | oauth:example-service
+katari run playground.store.main                         # => visits=2 | greeting="hello" | keys=["greeting","visits"]  (the counter persists, so a later run shows more)
 katari run playground.tools.main                         # => tools=[…]; result=5
 katari run playground.region.main                        # => fan_out=[4,9,16] | parallel=[4,9,16] | subscription saw four messages across two emitters
 katari run playground.webhook.main                       # => delivered: 42 and 8 (a minted URL, called by itself)

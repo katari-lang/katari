@@ -1,0 +1,60 @@
+// The durable key-value store: state that outlives a run. `store.set` writes, `store.get` reads
+// (`found` / `absent`, so a stored `null` never blurs with a missing key), `store.list` enumerates a
+// directory. Keys are AMBIENT — an operation names a path and a WORKSPACE decides where it lands, so
+// `store.workspace(path = "playground/store")` prefixes every key inside it. And because two runs (or
+// two parallel branches of one) can read-modify-write the same key and lose an edit, `store.workspace`
+// also serves `store.exclusive`: a critical section its serial FIFO runs one at a time — `store.modify`
+// is the one-key read-modify-write built on it.
+//
+// These operations escalate to the RUNTIME, which machine-answers them against the project's durable
+// rows (never a human), so this module runs with no handler of its own — and a second run sees what the
+// first one wrote.
+
+@"The pure read-modify-write step `bump` hands `store.modify`: a missing count reads as `null`, so
+start it at 0; any other value has already been an integer, so add 1."
+agent increment(value: unknown) -> unknown {
+  match (value) {
+    case integer(current) -> current + 1
+    case _ -> 1
+  }
+}
+
+@"Bump a durable counter ATOMICALLY. `store.modify` reads the key, applies the pure transform, and
+writes the result back inside a `store.exclusive` critical section, so two concurrent bumps never lose
+a count. The stored value crosses back as `unknown`; a type-filter arm narrows it to `integer`."
+agent bump(value: null) -> integer with store.exclusive {
+  match (store.modify(key = "visits", transform = increment)) {
+    case integer(count) -> count
+    case _ -> 0
+  }
+}
+
+@"Entry: open a workspace, bump a durable counter twice, write and read a memo, and list the
+workspace. The declared row lists all four store operations because `store.workspace` re-performs
+every one outward (prefixed) to the runtime — even the ones this body does not use."
+agent main() -> string with store.get | store.set | store.delete | store.list {
+  // Open the workspace: every key below is prefixed with `playground/store/`, and `store.exclusive`
+  // (hence `store.modify`) is served by the workspace's serial FIFO for the rest of this block.
+  use store.workspace(path = "playground/store")
+
+  // 1. Atomic counter: two bumps, each a critical section of the workspace's serial domain.
+  bump(value = null)
+  let visits = bump(value = null)
+
+  // 2. Plain write / read: `store.set` stores any value; `store.get` distinguishes found from absent.
+  store.set(key = "greeting", value = "hello")
+  let greeting = match (store.get(key = "greeting")) {
+    case store.found(value => value) -> json.stringify(value = value)
+    case store.absent(key => missing) -> f"(absent: ${missing})"
+  }
+
+  // 3. List the workspace: a `leaf` per value-holding key, a `branch` per subdirectory below it.
+  let names = for (let element in store.list()) {
+    next match (element) {
+      case store.leaf(key => key) -> key
+      case store.branch(name => name) -> f"${name}/"
+    }
+  }
+
+  f"visits=${string.to_string(value = visits)} | greeting=${greeting} | keys=${json.stringify(value = names)}"
+}

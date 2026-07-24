@@ -1,0 +1,77 @@
+// Two features newcomers (and editors) have twice misread as "missing from the language" — both ARE
+// here, and this module is the standing proof:
+//
+//   1. OBJECT (RECORD) LITERALS. `{ field = value, ... }` builds an anonymous record; the matching
+//      TYPE is written the same way with `:` for `=` (`{ field: type, ... }`), and a `type` synonym
+//      can name that shape once. Fields read with `.field`, records nest, and a literal is an ordinary
+//      value — return it, array it, pass it. (For DYNAMIC keys, reach for `record[T]` + `record.get` /
+//      `record.set` instead; a literal is for a FIXED, known shape.)
+//   2. EFFECT-ROW SYNONYMS. A `type` synonym can name an effect ROW, not just a data type
+//      (`type conversation = ask | note`). The name then stands in for the row both after `with` and
+//      as an `effect` type argument — the very idiom compiler error K3013 points a `use` binder at:
+//      name the row once, spell it everywhere.
+//
+// No runtime service is needed beyond the inline handlers `main` installs, so it runs deterministically.
+
+// ── object literals ──────────────────────────────────────────────────────────────────────────────
+
+// A fixed record SHAPE, named once as a synonym — the object-literal TYPE, `{ field: type }`.
+// (Type synonyms take no docs.)
+type contact = { name: string, email: string, tags: array[string] }
+
+@"Build a `contact` as an object LITERAL — `{ field = value }` — with an inline array field."
+agent make_contact(name: string, email: string) -> contact {
+  { name = name, email = email, tags = ["new"] }
+}
+
+@"Read fields with `.field`; the literal flows as an ordinary value through `for` and into a string."
+agent render(person: contact) -> string {
+  f"${person.name} <${person.email}> [${string.join(parts = person.tags, separator = ",")}]"
+}
+
+// ── effect-row synonyms ──────────────────────────────────────────────────────────────────────────
+
+@"An ambient question for the operator."
+request ask(question: string) -> string
+
+@"An ambient note the run records."
+request note(message: string) -> null
+
+// Name the two-request row ONCE. `conversation` now stands in for `ask | note` everywhere a row is
+// expected — after `with` and as an `effect` type argument. (Type synonyms take no docs.)
+type conversation = ask | note
+
+@"An agent whose effect row is written as the synonym `conversation`, not the spelled-out `ask | note`."
+agent greeter(name: string) -> string with conversation {
+  note(message = f"greeting ${name}")
+  let style = ask(question = f"How should I greet ${name}?")
+  f"${style}, ${name}"
+}
+
+@"A generic that runs @body@ under whatever row it is instantiated with — `main` passes the synonym
+`conversation` as the `effect` type argument (`run[string, conversation]`), the shape K3013 names."
+agent run[R, effect E](body: agent (value: null) -> R with E) -> R with E {
+  body(value = null)
+}
+
+@"Entry: build and render two contacts (object literals), then greet through `run[..., conversation]`
+under inline handlers that discharge the `conversation` row, so nothing escalates."
+agent main() -> string {
+  let people = [
+    make_contact(name = "Ada", email = "ada@example.org"),
+    make_contact(name = "Grace", email = "grace@example.org"),
+  ]
+  let rendered = for (let person in people) { next render(person = person) }
+
+  use handler {
+    request ask(question: string) -> string { next "warmly" }
+  }
+  use handler {
+    request note(message: string) -> null { next null }
+  }
+  // A nested agent carries the `conversation` row so it fits `run`'s `agent (value: null) -> R with E`.
+  agent greet(value: null) -> string with conversation { greeter(name = "Ada") }
+  let greeting = run[string, conversation](body = greet)
+
+  string.join(parts = [string.join(parts = rendered, separator = " | "), greeting], separator = " || ")
+}

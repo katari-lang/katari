@@ -1,0 +1,34 @@
+// Matching on string VALUES. `case "literal"` scrutinises a string exactly as a constructor case
+// scrutinises a data value — one arm per literal, and a bare-identifier arm binds the rest as a
+// CATCH-ALL, which a match over a `string` needs to stay total (its value set is unbounded). This is
+// the value-level twin of the string-literal SINGLETON TYPES in `scoped.ktr`: there a literal names a
+// TYPE, here it names a BRANCH. (The same literal patterns match integers and booleans too.)
+
+@"Map a traffic-light colour to the action it commands. The final `case other` binds any unrecognised
+string; without that catch-all the match would not be total, since a `string` has infinitely many
+values."
+agent action_for(colour: string) -> string {
+  match (colour) {
+    case "red" -> "stop"
+    case "amber" -> "brake gently"
+    case "green" -> "go"
+    case other -> f"unknown signal: ${other}"
+  }
+}
+
+@"Normalise operator- or model-supplied input before matching: trim surrounding spaces and lowercase,
+so \"  GREEN \" routes exactly like \"green\". Matching on the normalised value is why one arm per
+canonical spelling suffices."
+agent route(raw: string) -> string {
+  action_for(colour = string.to_lower(value = string.trim(value = raw)))
+}
+
+@"Entry: route a handful of signals — three known colours (one padded and upper-cased to show the
+normalisation) and one the catch-all absorbs."
+agent main() -> string {
+  let signals = ["red", "  GREEN ", "amber", "blue"]
+  let actions = for (let signal in signals) {
+    next f"${string.trim(value = signal)} -> ${route(raw = signal)}"
+  }
+  string.join(parts = actions, separator = " | ")
+}
