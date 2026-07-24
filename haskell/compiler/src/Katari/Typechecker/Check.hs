@@ -316,33 +316,11 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 
 handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed, NormalizedType)
 handleUseStatement useStmt = do
-  -- The binder declares the continuation's value type A (required); without a binder the continuation
-  -- receives null.
-  (bindingType, typedBinder, bindings) <- case useStmt.binder of
-    Nothing -> pure (nullType, Nothing, [])
-    Just patternNode -> do
-      (declaredType, typedPattern, binderBindings) <-
-        -- The annotation is often a long effect row written twice (the binder and the provider's
-        -- type argument), so the message also names the synonym idiom that spells the row once.
-        checkAnnotatedBinder
-          "`use` binder requires an explicit type annotation (a type synonym can name the row once: `type my_ceiling = <requests> | io` then `nursery[scope, my_ceiling]` — see prelude.region)"
-          patternNode
-      pure (declaredType, Just typedPattern, binderBindings)
-  -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
-  -- /current/ context — no new return target is pushed, so a @return@ inside targets the enclosing agent
-  -- (it does not end the continuation). A control escape is an effect /of the continuation/, so it rides
-  -- the continuation's inferred effect and is checked against the provider's expected continuation effect:
-  -- a provider whose continuation is pure (@agent(..) -> R@, no @with E@) therefore /rejects/ a continuation
-  -- that escapes, while a handler-shaped provider (@{...E, req}@) admits it via @E@ and it then reaches the
-  -- enclosing agent.
-  (inferredContinuationEffect, (typedBody, resultType)) <-
-    withEffectInference $
-      withParameters bindings $
-        synthBlock useStmt.body
-  let continuationAgent = continuationAgentType bindingType resultType inferredContinuationEffect
   -- Every admitted shape is normalized to ONE application here: a bare provider (a handler literal, a
   -- (qualified) name, an explicit instantiation) becomes its zero-written-argument call, so a single
-  -- pipeline types every provider and a bare shape cannot drift from the call shape.
+  -- pipeline types every provider and a bare shape cannot drift from the call shape. The provider is
+  -- typed up to its scheme FIRST (before the binder and the body): the binder reads its type off the
+  -- provider's continuation-value position, so the provider must be resolved before the binder is.
   providerCall <- case useStmt.provider of
     ExpressionCall callExpression -> do
       when (any (\argument -> argument.name == "continuation") callExpression.arguments) $
@@ -374,12 +352,36 @@ handleUseStatement useStmt = do
       -- downstream checking continues.
       reportType (sourceSpanOf other) (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseProviderShape})
       pure (zeroArgumentApplication other)
+  prepared <- prepareCall providerCall
+  -- The binder declares the continuation's value type A; without a binder the continuation receives null.
+  (bindingType, typedBinder, bindings) <- case useStmt.binder of
+    Nothing -> pure (nullType, Nothing, [])
+    Just patternNode -> do
+      (declaredType, typedPattern, binderBindings) <-
+        -- The annotation is often a long effect row written twice (the binder and the provider's
+        -- type argument), so the message also names the synonym idiom that spells the row once.
+        checkAnnotatedBinder
+          "`use` binder requires an explicit type annotation (a type synonym can name the row once: `type my_ceiling = <requests> | io` then `nursery[scope, my_ceiling]` — see prelude.region)"
+          patternNode
+      pure (declaredType, Just typedPattern, binderBindings)
+  -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
+  -- /current/ context — no new return target is pushed, so a @return@ inside targets the enclosing agent
+  -- (it does not end the continuation). A control escape is an effect /of the continuation/, so it rides
+  -- the continuation's inferred effect and is checked against the provider's expected continuation effect:
+  -- a provider whose continuation is pure (@agent(..) -> R@, no @with E@) therefore /rejects/ a continuation
+  -- that escapes, while a handler-shaped provider (@{...E, req}@) admits it via @E@ and it then reaches the
+  -- enclosing agent.
+  (inferredContinuationEffect, (typedBody, resultType)) <-
+    withEffectInference $
+      withParameters bindings $
+        synthBlock useStmt.body
+  let continuationAgent = continuationAgentType bindingType resultType inferredContinuationEffect
   -- The one rule: apply the provider to its written arguments joined with the continuation, through
   -- the shared call path — same world / effect discipline, closed argument object, and generic
   -- inference as a direct call (a provider generic in @R@ infers it from the continuation argument).
   -- The typed node is always an 'ExpressionCall' — carrying the inferred instantiation — so lowering
   -- emits the same single delegate a hand-written @provider(..., continuation = ...)@ would.
-  (typedProvider, providerResultType) <- synthCallExpressionWith [("continuation", continuationAgent)] providerCall
+  (typedProvider, providerResultType) <- completeCall prepared [("continuation", continuationAgent)]
   -- The application's result is what the enclosing block evaluates to at runtime (the provider
   -- returns its continuation's result — or, for a handler, the break union joined with it), so it
   -- rides back to 'walkStatements' as the block's use-exit type.
@@ -766,29 +768,78 @@ synthCallExpression = synthCallExpressionWith []
 -- residual function over exactly the holed parameters ('synthPartialApplication').
 synthCallExpressionWith :: List (Text, NormalizedType) -> CallExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthCallExpressionWith extraFields expression = do
+  prepared <- prepareCall expression
+  completeCall prepared extraFields
+
+-- | A call typed up to (but not including) the application: its callee paired with the callee's full
+-- 'Scheme' (a generic callee keeps its parameters quantified so the application can infer them), its
+-- written arguments typed into @(label, type)@ fields, and the pieces the application then needs
+-- (literal-labelled arguments, and any @_@ holes). Split out of the one call pipeline so a @use@ site
+-- can read the provider's continuation-value type off 'scheme' — the type it proposes for the binder —
+-- in the WINDOW between typing the written arguments and completing the application ('handleUseStatement').
+data PreparedCall = PreparedCall
+  { sourceSpan :: SourceSpan,
+    typedCallee :: Expression Typed,
+    scheme :: Scheme,
+    typedArguments :: List (CallArgument Typed),
+    writtenFields :: List (Text, NormalizedType),
+    writtenAttribute :: NormalizedAttribute,
+    literalArguments :: Map Text Text,
+    holes :: List (Text, SourceSpan)
+  }
+
+-- | Type a call's callee and its written arguments, stopping just short of applying the callee. See
+-- 'PreparedCall'. The written arguments are typed WITHOUT the extra synthetic fields; 'completeCall'
+-- joins those in, because a @use@ site only knows its continuation's type after it has walked the block.
+prepareCall :: CallExpression Identified -> Checker PreparedCall
+prepareCall expression = do
   -- Take the callee's full 'Scheme' (not a bare-instantiated type): a generic callee keeps its
   -- quantified parameters here so they can be inferred from the arguments below, rather than being
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
-  (typedArgs, suppliedFields, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
-  -- The labels written as string literals, read off the argument EXPRESSIONS (never the synthesized
-  -- types, which stay @string@): the only doorway through which a call proposes a literal singleton.
-  let literalArguments = literalCallArguments expression.arguments
-  (effectiveReturn, instantiation) <- case callArgumentHoles expression.arguments of
+  (typedArguments, writtenFields, writtenAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments []
+  pure
+    PreparedCall
+      { sourceSpan = expression.sourceSpan,
+        typedCallee = typedCallee,
+        scheme = scheme,
+        typedArguments = typedArguments,
+        writtenFields = writtenFields,
+        writtenAttribute = writtenAttribute,
+        -- The labels written as string literals, read off the argument EXPRESSIONS (never the synthesized
+        -- types, which stay @string@): the only doorway through which a call proposes a literal singleton.
+        literalArguments = literalCallArguments expression.arguments,
+        holes = callArgumentHoles expression.arguments
+      }
+
+-- | Complete a 'prepareCall': join any extra synthetic fields (a @use@ provider's @continuation@) into
+-- the argument object, apply the callee (or, when the call carries @_@ holes, take the partial-application
+-- path), and build the typed call node. The result type is the application's effective return.
+completeCall :: PreparedCall -> List (Text, NormalizedType) -> Checker (Expression Typed, NormalizedType)
+completeCall prepared extraFields = do
+  -- The extra fields' attributes fold into the argument's lift the same as any written argument would;
+  -- join is a lattice operation, so folding the written and the extra parts separately and joining
+  -- reproduces folding them together (as 'synthCallArgumentsWith' does for a direct call).
+  extraAttribute <-
+    runNormalizer prepared.sourceSpan $
+      foldr joinAttribute bottomAttribute <$> traverse (foldAttribute . snd) extraFields
+  let argumentAttribute = joinAttribute prepared.writtenAttribute extraAttribute
+      fields = prepared.writtenFields <> extraFields
+  (effectiveReturn, instantiation) <- case prepared.holes of
     [] -> do
       -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
       -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
       -- parameter match (against a required parameter it still fails the optional<:required check).
-      let argumentObject = namedObjectTypeWithRest bottomType suppliedFields
-      applyCallee expression.sourceSpan scheme literalArguments argumentObject argumentAttribute
-    holes -> synthPartialApplication expression.sourceSpan scheme literalArguments holes suppliedFields argumentAttribute
-  typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
+      let argumentObject = namedObjectTypeWithRest bottomType fields
+      applyCallee prepared.sourceSpan prepared.scheme prepared.literalArguments argumentObject argumentAttribute
+    holes -> synthPartialApplication prepared.sourceSpan prepared.scheme prepared.literalArguments holes fields argumentAttribute
+  typedExpression prepared.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
       CallExpression
-        { callee = typedCallee,
-          arguments = typedArgs,
+        { callee = prepared.typedCallee,
+          arguments = prepared.typedArguments,
           instantiation = instantiation,
-          sourceSpan = expression.sourceSpan,
+          sourceSpan = prepared.sourceSpan,
           typeOf = semantic
         }
 
