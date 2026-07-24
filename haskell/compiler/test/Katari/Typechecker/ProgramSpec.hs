@@ -640,17 +640,25 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
       ]
       `shouldSatisfy` any (Text.isInfixOf "Optional field cannot be a subtype of a required field: x")
 
-  it "K3013 on a `use` binder names the effect-row synonym idiom" $
+  it "K3013 on an unreadable `use` binder names the pin-the-arguments fix and the synonym idiom" $
+    -- A provider generic in its continuation's VALUE type (@A@) leaves the binder's type unreadable
+    -- until @A@ is pinned: inference cannot run before the binder is in scope, so the type cannot be
+    -- read off the provider. Neither annotated nor made concrete, so K3013 — naming both the "pin the
+    -- type arguments" fix and the effect-row synonym idiom the annotate path wants. (A binder that IS
+    -- readable — a handler's null continuation, a concrete provider — no longer reports at all.)
     typeErrorMessages
       [ ( "test",
-          "request tick() -> null\n\
+          "external agent prov[A, R, effect E](continuation: agent (value: A) -> R with E) -> R with E\n\
           \agent f() -> null {\n\
-          \  let x = use handler { request tick() -> null { next null } }\n\
-          \  tick()\n\
+          \  let x = use prov\n\
+          \  null\n\
           \}"
         )
       ]
-      `shouldSatisfy` any (Text.isInfixOf "a type synonym can name the row once")
+      `shouldSatisfy` ( \messages ->
+                          any (Text.isInfixOf "could not read the binder's type from the provider") messages
+                            && any (Text.isInfixOf "a type synonym can name the row once") messages
+                      )
 
   -- The doc-on-let / doc-on-nested-agent annotations have no typing effect: a documented binding
   -- checks exactly like its undocumented twin (the stamp is a run-time value attribute).

@@ -12,11 +12,16 @@
 -- (propose) records bounds without ever reporting, 'solveConstraints' picks a candidate, and the caller
 -- substitutes + disposes via 'subtype'.
 --
--- v1 scope: TYPE metavariables are inferred from the structural match of an argument against a
--- parameter type. Effect / attribute metavariables (rare; a scheme quantified over an effect /
--- attribute) collect no constraints here and so report as un-inferrable — the user supplies them
--- explicitly. This is enough for the two motivating cases (operators desugared to generic primitives,
--- and user generic agents whose type parameters appear in their value arguments).
+-- Scope: type, effect, AND attribute metavariables are all inferred, by a variance-directed structural
+-- match of an argument against a parameter type. A metavariable is inferred where it appears on the
+-- parameter side as the recognised bare shape ('asTypeMetavar' / 'asEffectMetavar' / 'asAttributeMetavar')
+-- — or, for an effect, as a flexible /tail/ alongside concrete requests (the @E | scope[url]@ a scoped
+-- provider's continuation has, or the @{...E, req}@ a handler's has), which takes the actual with those
+-- concrete requests subtracted ('collectEffectConstraints'). A metavariable that no argument constrains
+-- this way (e.g. one appearing only covariantly, in a result) is reported un-inferrable and the user
+-- supplies it explicitly. This covers the motivating cases: operators desugared to generic primitives,
+-- user generic agents whose parameters appear in their value arguments, and the scoped providers whose
+-- residual result / effect are inferred from a @use@ continuation.
 module Katari.Typechecker.Inference where
 
 import Control.Monad (foldM)

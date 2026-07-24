@@ -76,7 +76,7 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, lacksNamesOfExpression, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, metavarKinded, solveConstraints)
+import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, deepGenerics, metavarKinded, solveConstraints)
 import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
@@ -354,15 +354,12 @@ handleUseStatement useStmt = do
       pure (zeroArgumentApplication other)
   prepared <- prepareCall providerCall
   -- The binder declares the continuation's value type A; without a binder the continuation receives null.
+  -- An annotation is authoritative, but where it is absent the type is READ from the provider's
+  -- continuation-value position ('checkUseBinder' / 'extractedBinderType') rather than demanded.
   (bindingType, typedBinder, bindings) <- case useStmt.binder of
     Nothing -> pure (nullType, Nothing, [])
     Just patternNode -> do
-      (declaredType, typedPattern, binderBindings) <-
-        -- The annotation is often a long effect row written twice (the binder and the provider's
-        -- type argument), so the message also names the synonym idiom that spells the row once.
-        checkAnnotatedBinder
-          "`use` binder requires an explicit type annotation (a type synonym can name the row once: `type my_ceiling = <requests> | io` then `nursery[scope, my_ceiling]` — see prelude.region)"
-          patternNode
+      (declaredType, typedPattern, binderBindings) <- checkUseBinder prepared.scheme patternNode
       pure (declaredType, Just typedPattern, binderBindings)
   -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
   -- /current/ context — no new return target is pushed, so a @return@ inside targets the enclosing agent
@@ -406,6 +403,79 @@ zeroArgumentApplication provider =
       sourceSpan = sourceSpanOf provider,
       typeOf = ()
     }
+
+-- | Type a @use@ binder against the type it declares. When the pattern already fully describes its type
+-- (an annotation on every leaf), that is authoritative — checked exactly as an agent parameter, so a
+-- present annotation behaves identically to before. Otherwise the type is READ from the provider: a
+-- @use@ applies the provider once with the block as its continuation, so the binder is precisely that
+-- continuation's value type ('extractedBinderType'). Only when NEITHER the pattern nor the provider
+-- yields a type is the binder reported (K3013), degrading to @unknown@.
+--
+-- A partially-annotated destructure (some fields annotated, some bare) takes the provider-read path too,
+-- and 'checkPattern' then relates each annotated field to the read type — an under-annotated destructure
+-- was a K3013 error before, so no previously-legal program changes meaning.
+checkUseBinder :: Scheme -> Pattern Identified -> Checker (NormalizedType, Pattern Typed, List (LocalVariableId, Scheme))
+checkUseBinder providerScheme pattern = do
+  fromAnnotation <- maybeSynthBinderPatternType pattern
+  declaredType <- case fromAnnotation of
+    Just annotated -> pure annotated
+    Nothing -> do
+      fromProvider <- extractedBinderType (sourceSpanOf pattern) providerScheme
+      case fromProvider of
+        Just extracted -> pure extracted
+        Nothing -> do
+          reportMissingAnnotation (sourceSpanOf pattern) useBinderTypeUnreadableReason
+          pure topType
+  (typedPattern, _, bindings) <- checkPattern pattern declaredType
+  pure (declaredType, typedPattern, bindings)
+
+-- | The K3013 wording for a @use@ binder whose type could not be read from its provider (and was not
+-- annotated). It gives the two actionable fixes — annotate the binder, or make the provider concrete so
+-- its continuation's value type is fixed — and keeps the effect-row synonym idiom the annotate path
+-- often wants (a scoped provider's ceiling is a long row, easily named once).
+useBinderTypeUnreadableReason :: Text
+useBinderTypeUnreadableReason =
+  "`use` could not read the binder's type from the provider — annotate the binder, or pin the provider's \
+  \type arguments so its continuation's value type is fixed. A scoped provider infers only its result \
+  \and effect from the block, so supply its scope (and any ceiling) explicitly: \
+  \`region.provide[region.scope, my_ceiling]` / `mcp.provide[mcp.scope]`. When you annotate, a type \
+  \synonym can name the row once (`type my_ceiling = <requests> | io` then `nursery[scope, my_ceiling]` \
+  \— see prelude.region)."
+
+-- | Read a @use@ binder's type off its provider: the value type the provider hands its continuation. A
+-- @use p(args)@ is @p(args, continuation = agent({value: A}) -> R with E')@, so @A@ sits at the provider
+-- function's @continuation@ argument's @value@ argument — navigated here error-free (any missing / wrong
+-- shape yields 'Nothing', never a diagnostic; the shape inspectors raise bounds as they go). Extraction
+-- is only a PROPOSAL for the binder; the trusted subtype check at the provider's application ('applyCallee')
+-- still checks the block against the provider unchanged, so a read that over-reaches cannot be unsound.
+--
+-- Read only when the value type does not still MENTION a generic the provider left quantified: a bare
+-- generic name (@use region.provide@, all of @[Scope, E, R, Eouter]@ residual) has @A = nursery[Scope, E]@,
+-- which names residuals that only the block could pin — inference cannot run before the binder is in scope,
+-- so this is refused ('Nothing', reported as K3013 with the "pin the type arguments" fix). Pinning the
+-- scope/ceiling prefix (@region.provide[region.scope, ceiling]@) substitutes them away, leaving @A@ concrete.
+extractedBinderType :: SourceSpan -> Scheme -> Checker (Maybe NormalizedType)
+extractedBinderType sourceSpan scheme = do
+  maybeProviderFunction <- extractFunction sourceSpan scheme.valueType
+  case maybeProviderFunction of
+    Nothing -> pure Nothing
+    Just (_, providerFunction) -> do
+      maybeContinuation <- maybeReadField sourceSpan "continuation" providerFunction.argumentType
+      case maybeContinuation of
+        Nothing -> pure Nothing
+        Just continuationType -> do
+          maybeContinuationFunction <- extractFunction sourceSpan continuationType
+          case maybeContinuationFunction of
+            Nothing -> pure Nothing
+            Just (_, continuationFunction) -> do
+              maybeValue <- maybeReadField sourceSpan "value" continuationFunction.argumentType
+              pure $ case maybeValue of
+                Just valueType | Set.disjoint (deepGenerics valueType) residualGenerics -> Just valueType
+                _ -> Nothing
+  where
+    -- The generics the provider scheme still leaves quantified — the ones inference would solve at the
+    -- application. If the binder type names any of them, it cannot be read before the block is walked.
+    residualGenerics = Set.fromList [info.genericId | info <- Map.elems scheme.genericParameters.parameterInformation]
 
 ------------------------------------------------------------------------------------------------
 -- Per-expression synthesis (produces Typed AST + NormalizedType)
@@ -3060,33 +3130,46 @@ assembleAgent agentOuterAttribute parameterObject returnType effect =
     }
 
 -- | Synthesize the declared type of a binding-site pattern (an agent parameter, a @use@ binder) from
--- its structure — /reverse inference/, the dual of 'checkPattern': a type filter declares its shape
--- (@number(y)@ ~> @number@), a record / tuple declares a record / tuple of its children's synthesized
--- types (@{label => number(y)}@ ~> @{label: number}@), an annotated variable / wildcard declares its
--- annotation. The synthesized type makes the pattern non-refutable by construction (a @number(y)@
--- parameter is declared @number@, so it always matches). A bare variable / wildcard (no annotation), or
--- a shape that cannot be made total here (a constructor / literal pattern), has nothing to synthesize
--- from, so it is reported as needing an annotation and degrades to 'topType'.
+-- its structure when the pattern fully describes it — /reverse inference/, the dual of 'checkPattern':
+-- a type filter declares its shape (@number(y)@ ~> @number@), a record / tuple declares a record /
+-- tuple of its children's synthesized types (@{label => number(y)}@ ~> @{label: number}@), an annotated
+-- variable / wildcard declares its annotation. The synthesized type makes the pattern non-refutable by
+-- construction (a @number(y)@ parameter is declared @number@, so it always matches). Yields 'Nothing'
+-- when some leaf has nothing to synthesize from — a bare variable / wildcard without an annotation, or a
+-- shape that cannot be made total here (a constructor / literal pattern). It never reports; the caller
+-- decides what an unsynthesizable binder means (an agent parameter requires the annotation —
+-- 'synthBinderPatternType'; a @use@ binder first reads the type from its provider — 'checkUseBinder').
 --
 -- The inner patterns are bound by the caller re-running 'checkPattern' against this type, which narrows
 -- them and enforces the supertype-annotation rule — so @number(y : integer)@ fails (@number </:
 -- integer@), the binder's annotation having to accept every value the filter admits.
+maybeSynthBinderPatternType :: Pattern Identified -> Checker (Maybe NormalizedType)
+maybeSynthBinderPatternType = \case
+  PatternVariable variablePattern -> traverse elaborateAndNormalizeType variablePattern.typeAnnotation
+  PatternWildcard wildcardPattern -> traverse elaborateAndNormalizeType wildcardPattern.typeAnnotation
+  PatternTypeFilter typeFilterPattern -> pure (Just (filterShape typeFilterPattern.matchedType))
+  -- A tuple / record is synthesizable only when EVERY child is: 'sequence' turns one unsynthesizable
+  -- child into 'Nothing' for the whole pattern, so a partial annotation reports (or, for a @use@ binder,
+  -- falls through to provider extraction) rather than silently declaring the missing part @unknown@.
+  PatternTuple tuplePattern -> fmap tupleOf . sequence <$> traverse maybeSynthBinderPatternType tuplePattern.elements
+  PatternRecord recordPattern -> do
+    fieldTypes <- traverse (maybeSynthBinderPatternType . (.bindPattern)) recordPattern.fields
+    -- Zip the (always-present) field names back onto the synthesized types, dropping the whole record
+    -- to 'Nothing' if any child could not be synthesized ('sequence').
+    pure (namedObjectType . zip ((.name) <$> recordPattern.fields) <$> sequence fieldTypes)
+  PatternConstructor _ -> pure Nothing
+  PatternLiteral _ -> pure Nothing
+
+-- | The reporting form of 'maybeSynthBinderPatternType', for a binder whose type has no source but the
+-- pattern (an agent parameter): where the pattern does not fully describe its type, report @reason@
+-- (K3013) and degrade to 'topType'.
 synthBinderPatternType :: Text -> Pattern Identified -> Checker NormalizedType
-synthBinderPatternType reason = \case
-  PatternVariable variablePattern -> annotationOr variablePattern.sourceSpan variablePattern.typeAnnotation
-  PatternWildcard wildcardPattern -> annotationOr wildcardPattern.sourceSpan wildcardPattern.typeAnnotation
-  PatternTypeFilter typeFilterPattern -> pure (filterShape typeFilterPattern.matchedType)
-  PatternTuple tuplePattern -> tupleOf <$> traverse (synthBinderPatternType reason) tuplePattern.elements
-  PatternRecord recordPattern ->
-    namedObjectType <$> traverse (\field -> (,) field.name <$> synthBinderPatternType reason field.bindPattern) recordPattern.fields
-  PatternConstructor constructorPattern -> missing constructorPattern.sourceSpan
-  PatternLiteral literalPattern -> missing literalPattern.sourceSpan
-  where
-    annotationOr sourceSpan = \case
-      Just annotation -> elaborateAndNormalizeType annotation
-      Nothing -> missing sourceSpan
-    missing sourceSpan = do
-      reportMissingAnnotation sourceSpan reason
+synthBinderPatternType reason pattern = do
+  synthesized <- maybeSynthBinderPatternType pattern
+  case synthesized of
+    Just declaredType -> pure declaredType
+    Nothing -> do
+      reportMissingAnnotation (sourceSpanOf pattern) reason
       pure topType
 
 -- | Check a binding-site pattern that declares its own type (an agent parameter, a @use@ binder). The

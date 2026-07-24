@@ -492,6 +492,110 @@ spec = do
           (_, diagnostics) = runAt providerLocal mempty action
        in hasErrorCode "K3013" diagnostics `shouldBe` True
 
+  -- M1-8: a `use` binder without a full annotation reads its type from the provider — the value type
+  -- the provider hands its continuation. Extraction is only a proposal; the trusted subtype check at
+  -- the provider's application still runs, so it can never mask a genuine mismatch.
+  describe "use binder type supply (read the binder's type from the provider)" $ do
+    -- A handler hands its continuation `null`, so an un-annotated `use handler` binder is now READ as
+    -- null rather than reported — it binds a null the body may ignore.
+    it "reads a handler binder as null (no annotation required)" $
+      compiledCodes
+        ( "request tick() -> null\n"
+            <> "agent f() -> null {\n"
+            <> "  let x = use handler { request tick() -> null { next null } }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- A provider whose continuation value type is already concrete: the binder is read straight off it,
+    -- even though the provider is still generic in its result / effect (inferred from the block).
+    it "reads a concrete provider's continuation value type (no annotation)" $
+      compiledCodes
+        ( "external agent prov[R, effect E](continuation: agent (value: integer) -> R with E) -> R with E\n"
+            <> "agent f() -> integer {\n"
+            <> "  let x = use prov\n"
+            <> "  x\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- A scoped provider pinned by its `[scope, ceiling]` prefix: the residual result / effect are still
+    -- inferred from the block, but the continuation's value type is now concrete, so the binder is read.
+    it "reads region.provide[scope, ceiling]'s nursery handle without an annotation" $
+      compiledCodes
+        ( "request on_message(source: string, msg: string) -> null\n"
+            <> "type ev = on_message\n"
+            <> "agent worker(input: null) -> null with ev {\n  let a = on_message(source = \"s\", msg = \"m\")\n  null\n}\n"
+            <> "agent bot() -> null with io {\n"
+            <> "  let r = use region.provide[region.scope, ev]\n"
+            <> "  use handler {\n"
+            <> "    request on_message(source: string, msg: string) -> null { null }\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "  }\n"
+            <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "reads mcp.provide[scope]'s toolbox without an annotation" $
+      compiledCodes
+        ( "agent m() -> null with io {\n"
+            <> "  let tools = use mcp.provide[mcp.scope](url = \"http://x\", auth = mcp.headers(values = {}))\n"
+            <> "  null\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- A user generic agent used as a provider, its value generic pinned by the explicit `[T]` prefix.
+    it "reads a user generic provider f[T](args)'s continuation value type" $
+      compiledCodes
+        ( "agent run[T](seed: T, continuation: agent (value: T) -> null) -> null { continuation(value = seed) }\n"
+            <> "agent f() -> null {\n"
+            <> "  let x = use run[integer](seed = 5)\n"
+            <> "  null\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- The provider is generic in its continuation VALUE type and nothing pins it, so the binder cannot
+    -- be read before the block is walked: K3013 (the wording is asserted in ProgramSpec).
+    it "reports K3013 when the value type still mentions a residual generic" $
+      compiledCodes
+        ( "external agent prov[A, R, effect E](continuation: agent (value: A) -> R with E) -> R with E\n"
+            <> "agent f() -> null {\n"
+            <> "  let x = use prov\n"
+            <> "  null\n"
+            <> "}"
+        )
+        `shouldContain` ["K3013"]
+
+    -- The extracted type is only a PROPOSAL: the provider's application still runs the trusted subtype
+    -- check, so a body that violates the provider's FIXED continuation result is caught (K3001) — no
+    -- annotation was needed for the read, and the read did not mask the mismatch.
+    it "still catches a body that violates the provider's fixed continuation result (K3001)" $
+      compiledCodes
+        ( "external agent fixed(continuation: agent (value: integer) -> string) -> string\n"
+            <> "agent f() -> string {\n"
+            <> "  let x = use fixed\n"
+            <> "  x\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    -- A present annotation is authoritative exactly as before: a WRONG one is rejected (the extractable
+    -- type never silently overrides it).
+    it "prefers a present annotation, so a wrong one is still rejected (K3001)" $
+      compiledCodes
+        ( "external agent prov[R, effect E](continuation: agent (value: integer) -> R with E) -> R with E\n"
+            <> "agent f() -> integer {\n"
+            <> "  let x : string = use prov\n"
+            <> "  0\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
   describe "synthExpressionType (handler)" $ do
     it "handler[integer, all] {} produces the expected outer agent type" $
       let handlerExpr = handlerExpressionBuilder [integerAnnotation, allEffectAnnotation] [] Nothing
