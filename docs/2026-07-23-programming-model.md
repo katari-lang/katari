@@ -48,11 +48,11 @@ replay を組んだ瞬間、end-to-end は at-least-once になる。Discord へ
   運ぶ(最後の 1 行で報告する)。settle した値は discard され、durable な残骸はゼロ。「parallel は待つ、
   region は聞く」— 値を待ち合わせたいなら `parallel`、detach したいなら region。panic だけは system が watch
   経由で知らせる(自力で報告できない終わり方だから)。
-- **region の並列度は watch の本数で決まる。** fiber の escalation は watch 1 本あたり 1 件ずつ
-  (答えが返るまで次を出さない)再放出される。並列にするには `region.watch_many(nursery, width)` **と**
-  受け側の `parallel handler` の両方が要る(直列 handler は自分の FIFO で再直列化する — それが正しい場面も
-  ある: chat loop はメッセージ順 = turn 順が仕様なので watch 1 本を保て)。実測: width=2 + parallel handler
-  で 2 件の escalation 処理が重なり、width=1 では 2 件目が 1 件目の答えを待つ。
+- **region の並列度は受け側 handler で決まる。** watch は透明な white hole で、fiber の escalation を
+  全件並列に再放出する — 1 本で足りる(この並列化に伴い `region.watch_many` は削除済み。本 bullet の旧版が
+  述べていた width 引数はもう無い)。直列化点は handler だけ: `parallel handler` なら処理が重なり、
+  直列(`var`)handler は自分の FIFO で再直列化する — それが正しい場面もある: chat loop はメッセージ順 =
+  turn 順が仕様なので直列 handler を保て。
 - **fiber の escalation は watch 設置まで durable にバッファされる。** watch がまだ無い nursery の fiber
   escalation は run root へ漏れたりせず(provide の宣言 row は `R with Eouter | io` で fiber の `E` を含まない)、
   nursery の durable mailbox に到着順で溜まり、watch が設置された瞬間に再放出される。だから fiber は fork 直後に
