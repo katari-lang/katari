@@ -1,22 +1,30 @@
 # Approval as a fiber — non-blocking human approval over a region
 
-2026-07-24 (revised). A resident agent that must ask a human before it acts — post to a public channel,
-send an email, launch a worker — faces one hard constraint: **the human takes seconds to minutes, and
-nothing serial may block that long.** In tsukasa a gated tool runs inside a sequential DESK turn; if the
-tool blocked on `discord.ask`, that desk would freeze until the operator clicked, and every later message
-on it would queue behind one pending button. The idiom that dissolves this is *approval as a fiber*: the
-gated tool does **not** wait — it triggers a fiber that does the asking and the acting, and returns at
-once.
+2026-07-24 (revised twice). A resident agent that must ask a human before it acts — post to a public
+channel, send an email, launch a worker — faces one hard constraint: **the human takes seconds to
+minutes, and nothing serial may block that long.** In tsukasa a gated tool runs inside a sequential DESK
+turn; if the tool blocked on `discord.ask`, that desk would freeze until the operator clicked, and every
+later message on it would queue behind one pending button. The idiom that dissolves this is *approval as a
+fiber*: the gated tool does **not** wait — it triggers a fiber that does the asking and the acting, and
+returns at once.
 
-> **Correction (this revision).** An earlier version of this note concluded the idiom "cannot be
-> extracted as a library" — that a served, effect-generic approval request "does not typecheck" and hits a
-> wall in the type system. **That conclusion was wrong.** The idiom IS extractable, and it is now shipped
-> as the reusable **`approval`** package (`katari-packages/approval`, `approve_async` + `serve`),
-> consumed by tsukasa. The prior analysis missed the standard discipline that makes an effect-generic
-> served request sound: **`lacks` constraints on the tail effect generics** — exactly what
-> `time.with_deadline` does with `race_settled` and `store.serialize` does with its ceiling. This note now
-> records the shipped package, the discipline that makes it work, and the one honest friction that remains
-> (a use-site type-argument, not a soundness gap).
+> **The correction trail (three revisions).** This note has been wrong twice, in instructive ways:
+>
+> 1. An early version concluded the idiom "cannot be extracted as a library" — that a served,
+>    effect-generic approval request "does not typecheck." **Wrong.** The fix is the standard discipline
+>    that makes an effect-generic served request sound: a **`lacks` constraint on the tail effect
+>    generic**, exactly what `time.with_deadline` does with `race_settled` and `store.serialize` with its
+>    ceiling.
+> 2. A second version made `serve` OWN its region and HAND its nursery back, collapsing to a **single**
+>    effect tail: the use took no explicit type arguments, but a single-tail scoped provider re-emits its
+>    whole ceiling as its residual, which **leaks** for a caller that handles the ceiling internally. That
+>    version claimed the trade was fundamental — "a bare call site OR a precise residual, you cannot have
+>    both." **Also wrong.**
+> 3. This version splits the tail into **two** generics — the fiber ceiling `E` and the residual `Eouter`,
+>    each with `lacks approve_async`. It gives BOTH a bare call site (no explicit type arguments) AND a
+>    precise residual. The apparent conflict in revision 2 came from an incomplete continuation: the
+>    residual is precise **exactly when the continuation handles the fiber-side of `E`** below its watch —
+>    which tsukasa's desks already do. This note records the shipped two-tail package.
 
 ## The shape
 
@@ -34,17 +42,30 @@ The mechanism is three moving parts wired through a `region` nursery:
    ) -> null
    ```
 
-2. **A provider that forks and returns.** `approval.serve`, installed once above the desks where the
-   nursery handle IS in scope. It serves `approve_async` by forking a fiber and returning `null`
-   immediately — the requesting turn ends, the desk stays live:
+2. **A provider that OWNS its region, forks, and hands the nursery back.** `approval.serve` opens its
+   OWN nursery under its own module-local `approval_scope` marker, serves `approve_async` by forking a
+   fiber into it and returning `null` immediately — the requesting turn ends, the desk stays live — and
+   HANDS the nursery to its continuation so the CALLER decides where to `region.watch` it (the
+   `runST`-shaped seam `region.provide` / `mcp.provide` use). The caller mixes it into its own watch,
+   e.g. `parallel [ region.watch(app_nursery), region.watch(approval_nursery) ]`:
 
    ```katari
-   request approve_async(description, on_decide) {
-     agent decide(input: null) -> null with E {
-       on_decide(approved = ask(description = description))   // ask the human, hand over the boolean
+   agent serve[effect E lacks approve_async, R, effect Eouter lacks approve_async](
+     ask: agent (description: string) -> boolean with E,
+     continuation: agent (value: region.nursery[approval_scope, E]) -> R
+       with {...Eouter, approve_async[E], approval_scope, region.crashed} | io,
+   ) -> R with Eouter | region.crashed | io {
+     let nursery: region.nursery[approval_scope, E] = use region.provide[approval_scope, E]
+     use handler {
+       request approve_async(description, on_decide) {
+         agent decide(input: null) -> null with E {
+           on_decide(approved = ask(description = description))  // ask the human, hand over the boolean
+         }
+         let _ = region.fork(nursery = nursery, task = decide, argument = null, name = "approval")
+         next null
+       }
      }
-     let _ = region.fork(nursery = nursery, task = decide, argument = null, name = "approval")
-     next null
+     continuation(value = nursery)  // hand the nursery out; the caller watches it
    }
    ```
 
@@ -75,57 +96,70 @@ Discord buttons on an admin channel, a run-root escalation, a CLI prompt — and
 package knows nothing of Discord, channels, or AI; the ask is passed in. tsukasa's `ask` closure is its
 `discord.ask`-on-`ADMIN_CHANNEL`-or-`confirm_at_root` logic, handed to the library as a value.
 
-## The ceiling discipline, and the `lacks` that makes it generic
+## Two tails, both inferred: a bare call site AND a precise residual
 
-Every fiber in a nursery shares one effect ceiling (`region.provide`'s second type argument), and the
-approval fiber must fit under it. The pieces:
+`serve` carries two effect-generic tails, each with `lacks approve_async`:
 
-- **The action row `E`.** `approve_async` is effect-GENERIC in its payload row `E` — the library serves
-  any app's action ceiling without naming it. `serve` fixes `E` to the nursery's fiber ceiling. A specific
-  action performs a SUBSET of that ceiling and fits by subtyping. (tsukasa names its concrete rows
-  `grant_ceiling` for a granted action and `bus_ceiling = grant_ceiling | confirm_at_root` for the nursery
-  ceiling; a granted action's row ⊆ the served payload row, so it fits.)
+- **`E` — the fiber ceiling.** What every `on_decide`, and every fiber of the handed nursery, may raise.
+  `approve_async` is generic over it, so one library request serves any app's action ceiling without
+  naming it. A specific action performs a SUBSET and fits by subtyping. `E` is INFERRED from the `ask`
+  closure's row (and pinned, in tsukasa, by the nursery binder annotation to `bus_ceiling`).
 
-- **`lacks` on BOTH tail generics is the fix the prior analysis missed.** `serve`'s continuation row is
-  `{...Eouter, approve_async[E]} | Scope | io`, and BOTH tail generics carry `lacks approve_async`:
+- **`Eouter` — `serve`'s own residual.** What escalates PAST the continuation after it handles everything
+  it means to. `serve` returns `R with Eouter | region.crashed | io`. `Eouter` is INFERRED from what the
+  continuation actually lets escape.
 
-  ```katari
-  agent serve[effect Scope lacks approve_async, effect E, R, effect Eouter lacks approve_async](
-    nursery: region.nursery[Scope, E],
-    ask: agent (description: string) -> boolean with E,
-    continuation: agent (value: null) -> R with {...Eouter, approve_async[E]} | Scope | io,
-  ) -> R with Eouter | Scope | io { ... }
-  ```
+The two are **distinct on purpose**, and that is the whole fix. The continuation is expected to HANDLE the
+fiber-side of `E` internally — its desks serve `core_message`, `herald_message`, … below its own
+`region.watch` — while the genuinely-outer effects (store ops, a fatal proxy) well up. With one tail
+serving both roles (revision 2), `serve` had to re-emit the WHOLE ceiling `E` as its residual, so every
+request the continuation handled internally leaked back out as a phantom. Splitting the tail makes the
+residual PRECISE: `serve` re-emits only `Eouter` — exactly the part of the ceiling the continuation did
+NOT handle.
 
-  Factoring `approve_async[E]` out of the continuation's row and requiring the scope marker `Scope` AND
-  the outer row `Eouter` to LACK `approve_async` is what tells the checker the handler discharges every
-  `approve_async` and none survives the peel. This is the SAME standard discipline `time.with_deadline`
-  uses to reserve `race_settled` on its task's row (`effect E lacks race_settled`) and `store.serialize`
-  uses for its ceiling. A generic served request is sound exactly when its tails are constrained to lack
-  it. The earlier note's claim — "a request declared `[effect E]` and served by a handler is rejected
-  (K3001)" — is simply false once the `lacks` constraints are present; the probe and the shipped package
-  both compile clean.
+Crucially, **both tails still infer at the bare call site**, because each is pinned by a *different*
+argument — `E` by `ask`, `Eouter` by the continuation's body — so there is no single ambiguous row to
+split. The `lacks approve_async` on each is the soundness key: factoring `approve_async[E]` out of the
+continuation's row (`{...Eouter, approve_async[E], approval_scope, region.crashed} | io`) is provably
+complete because `Eouter` lacks it and the concrete `approval_scope` / `region.crashed` / `io` trivially
+lack it, and the payload tail `E` lacking it keeps the generic honest (no `approve_async` hides in the
+ceiling it carries). Same discipline `time.with_deadline` uses for `race_settled`. The bare
+`let n = use approval.serve(ask = …)` supplies **no explicit type arguments and no caller Scope**.
 
-## The one honest friction: a use-site type argument
+The one obligation the caller carries: **the continuation must handle the fiber-side of `E`** (which any
+resident does — that is what its desks ARE), or that unhandled part of `E` correctly appears in `Eouter`
+and escalates. That is not a leak — it is the residual telling the truth about what the caller left open.
 
-`serve` is a genuine library provider, but its USE is not the bare `serve(nursery, ask)` an
-inference-only reading would expect. When the continuation's residual row OVERLAPS `E`'s payload — which
-happens whenever `region.watch` re-emits the ceiling `E` (so its members appear standalone in the
-continuation) AND the app's `on_decide` actions are members of that same ceiling — the checker cannot
-INFER the row split `{...Eouter, approve_async[E]}`; it can only CHECK it. So the caller supplies all four
-type arguments explicitly and names the residual row (a `type` synonym is the tidy way):
+## The tsukasa payoff, measured
 
-```katari
-use approval.serve[tsukasa_scope, agents.bus_ceiling, never, approval_residual](
-  nursery = nursery, ask = ask_operator)
+The split is visible in the `katari check` escalation report. `run_session` — the whole session, wrapped
+by `serve` — escalates precisely:
+
+```
+tsukasa.run_session
+  escalates: agents.confirm_at_root, discord.connection,
+             prelude.throw[auth_error | missing_secret],
+             region.crashed, store.{get,set,delete,list}, io
 ```
 
-where `approval_residual` is everything the continuation escalates beyond `approve_async[bus_ceiling]`,
-the scope, and `io`. This is **not a soundness gap** — with the arguments supplied the split is verified —
-and it is not the definition-level wall the prior analysis imagined; it is an inference limitation at the
-call site. `store.serialize`'s `{...E, exclusive}` needs no such help because `exclusive` is monomorphic;
-the extra effect-generic payload inside `approve_async[E]` is what the split-inference cannot resolve.
-Recorded honestly so the next consumer supplies the type arguments without rediscovering the wall.
+The desk traffic the continuation handles — `core_message`, `herald_message`, `worker_message`,
+`admit_worker`, `launch_watch`, `save_digest` — is **absent**. Under the single-tail version every one of
+those appeared as a run-root phantom. Three concrete consequences of the split:
+
+- **`bus_ceiling` is now a pure fiber ceiling.** It dropped its `store` ops
+  (`bus_ceiling = grant_ceiling | confirm_at_root`, no `store.get/set/delete/list`). No fiber stores — a
+  source raises `core_message`, an `on_decide` posts or launches, a watch reports. The desks' store
+  traffic is performed in the CONTINUATION, not a fiber, and surfaces in `Eouter`, inferred, kept out of
+  the ceiling. The single tail had forced the store ops into `bus_ceiling` because payload = residual.
+
+- **The fatal boundary is narrow.** `run_session`'s residual `throw` is `throw[auth_error |
+  missing_secret]` — its own classifier's fatal complement — not `bus_ceiling`'s whole throw family.
+  `main`'s fatal sink still catches `unknown`, but now by DELIBERATE choice (the concrete true root's
+  last-resort net for the unforeseen), not because a leak forced the widening.
+
+- **The install site is still free.** `serve` sits outermost so a gated desk tool's `approve_async`
+  reaches its handler; the bare `let approval_nursery = use approval.serve(ask = ask_operator)` needs no
+  type arguments. The precision cost the single tail imposed is simply gone.
 
 ## When to use it
 
@@ -137,6 +171,8 @@ Recorded honestly so the next consumer supplies the type arguments without redis
 - A durable restart may drop the pending decision harmlessly. A fork mid-ask loses only the pending
   approval (the buttons go stale); the conversation is untouched. If losing the pending decision is
   unacceptable, the ask must be persisted differently.
+- The continuation genuinely handles the fiber-side of its ceiling (its desks/handlers sit below its
+  watch). This is the normal shape for a resident; it is what makes `Eouter` precise.
 
 Pair it with the deadline discipline: a gated tool is exempt from the tool-call deadline
 (`unbounded_tool_names`) only if it truly waits on a human — and here it does NOT wait (it triggers the
@@ -150,6 +186,7 @@ same-error suppression, the sleep, the loop) that every supervised resident woul
 and the app plugs in only DATA. `approval` is a smaller but real mechanism: it owns the fork-ask-over-a-
 region and the decision-as-data seam, and the app plugs in the ask surface and the decision branch (both
 data). Strip tsukasa's ask and its per-tool branches and the *mechanism* — perform-a-request, fork a
-fiber, ask, hand back the boolean, all under the `lacks` discipline that makes the generic request sound —
-remains, and it is the same mechanism any resident with a human-latency gate would write. That is why it
-is now a package, and this note describes the shipped artifact rather than arguing against it.
+fiber, ask, hand back the boolean, all under the two-tail `lacks` discipline that makes the generic
+request sound AND its residual precise — remains, and it is the same mechanism any resident with a
+human-latency gate would write. That is why it is now a package, and this note describes the shipped
+artifact rather than arguing against it.
