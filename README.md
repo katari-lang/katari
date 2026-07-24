@@ -10,6 +10,16 @@ question, and recover from a crash without losing their place.
 > language, IR, runtime APIs, and standard library all still change without notice, and there is
 > no stability guarantee yet. Expect breaking changes between commits.
 
+The project site is **[katari-lang.dev](https://katari-lang.dev)**. To use the CLI without building
+from source, install the published binary from npm:
+
+```sh
+npm install -g @katari-lang/cli
+```
+
+Building from source (for contributors, or on an unsupported platform) is under
+[Getting started](#getting-started).
+
 ## A taste
 
 Agents are Katari's unit of execution — think "function". They call each other (a *delegation*),
