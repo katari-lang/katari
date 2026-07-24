@@ -147,3 +147,16 @@ agent post_json(
     prelude.throw(error = status_error(status = response.status, body = response.body))
   }
 }
+
+@"GET @url@ with @headers@ — `fetch` with the method fixed to \"GET\" and NO body (a GET carries none),
+the shape a read-only API call takes, so the caller drops the `body = http.text(content = \"\")` a GET
+otherwise respells. Returns the same `{ status, headers, body }` as `fetch`: branch on @status@ for a
+non-2xx reply, catch `fetch_error` for a transport failure. Each header value may be a secret, submitted
+only to @url@'s server. To send a body, or for any other method, call `fetch` directly."
+agent get(
+  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
+) -> { status: integer, headers: record[string], body: string } with io | prelude.throw[fetch_error] {
+  // A GET drops its body at the transport, so the empty text body is a placeholder the reactor ignores.
+  fetch(url = url, method = "GET", headers = headers, body = text(content = ""))
+}

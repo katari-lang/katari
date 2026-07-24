@@ -58,6 +58,39 @@ type lookup = found | absent
 shape with `json.validate[T]` on the found value."
 request get(@"The path-like key, relative to the current workspace." key: string) -> lookup
 
+@"Read @key@ as a string, resolved against the surrounding workspace, falling back to @fallback@ when the
+key is ABSENT or holds a NON-string value — `get` folded to a plain string, the found/absent + string-shape
+match a text cell (a note pad, a digest, a soul) otherwise respells. A stored `null`, a number or a record
+all read as @fallback@, so a reader never branches on shape; reach for a bare `get` when a missing entry
+must be told apart from a wrong-typed one."
+agent get_text(@"The path-like key, relative to the current workspace." key: string, @"The value when the key is absent or not a string." fallback: string) -> string with get {
+  match (get(key = key)) {
+    case found(value => value) -> {
+      match (value) {
+        case string(string_value) -> string_value
+        case _ -> fallback
+      }
+    }
+    case absent(key => _) -> fallback
+  }
+}
+
+@"Read @key@ as an integer, resolved against the surrounding workspace, falling back to @fallback@ when the
+key is ABSENT or holds a NON-integer value — the integer twin of `get_text` (a monotonic counter, a stored
+threshold). A number with a fractional part is NOT an integer and reads as @fallback@, as does a `null`, a
+string or a record; reach for a bare `get` when a missing entry must be told apart from a wrong-typed one."
+agent get_integer(@"The path-like key, relative to the current workspace." key: string, @"The value when the key is absent or not an integer." fallback: integer) -> integer with get {
+  match (get(key = key)) {
+    case found(value => value) -> {
+      match (value) {
+        case integer(integer_value) -> integer_value
+        case _ -> fallback
+      }
+    }
+    case absent(key => _) -> fallback
+  }
+}
+
 @"Write @value@ at @key@, resolved against the surrounding workspace, creating or replacing the
 entry (last write wins). Any value fits: a document, a data value, a `file`, a secret (sealed at
 rest). A stored `file` joins the project's file library — it becomes a project file (visible on the
