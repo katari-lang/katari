@@ -264,4 +264,6 @@ export interface StoreEntryDetail {
 export interface Health {
   status: string;
   uptimeSeconds: number;
+  /** The runtime's package version, shown in the account menu so an operator can spot a CLI/runtime skew. */
+  version: string;
 }

@@ -5,6 +5,7 @@
 import { LogOut, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { setStoredApiToken } from "../../api/client";
+import { useHealth } from "../../api/queries";
 import { reportUnauthorized } from "../../lib/auth";
 
 export function UserMenu() {
@@ -12,6 +13,8 @@ export function UserMenu() {
   const containerRef = useRef<HTMLDivElement>(null);
   // The console talks to its runtime same-origin (`/api/v1`), so the origin is the runtime it serves.
   const runtimeUrl = window.location.origin;
+  // The runtime's version, shown beside its URL so an operator can spot a CLI/runtime skew.
+  const runtimeVersion = useHealth().data?.version;
 
   useEffect(() => {
     if (!open) return;
@@ -55,6 +58,9 @@ export function UserMenu() {
             <p className="truncate font-mono text-xs text-fg" title={runtimeUrl}>
               {runtimeUrl}
             </p>
+            {runtimeVersion !== undefined && (
+              <p className="mt-1 font-mono text-xs text-fg-faint">Runtime v{runtimeVersion}</p>
+            )}
           </div>
           <button
             type="button"

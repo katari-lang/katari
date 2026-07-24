@@ -4,6 +4,7 @@
 
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
+import { runtimeVersion } from "../../lib/version.js";
 import type { AppEnv } from "../../types/app-env.js";
 
 // Captured once at module load; the process start time the uptime is measured from.
@@ -14,6 +15,8 @@ export const healthRoutes = new Hono<AppEnv>().get("/health", (c) =>
     success({
       status: "ok",
       uptimeSeconds: Math.round((performance.now() - startedAt) / 1000),
+      // The runtime's package version, so an operator (and the console) can spot a CLI/runtime skew.
+      version: runtimeVersion,
     }),
   ),
 );

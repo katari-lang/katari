@@ -206,3 +206,14 @@ export function useAnswerEscalation(projectId: string) {
     },
   });
 }
+
+/** The runtime's identity for skew diagnosis (its version). Static within a session, so it never polls and
+ *  stays fresh forever; a failure is non-fatal (the account menu just omits the version). */
+export function useHealth() {
+  return useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+  });
+}
