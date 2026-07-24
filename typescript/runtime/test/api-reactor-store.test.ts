@@ -65,7 +65,6 @@ function harness(rows: StoreRows = memoryRows()) {
 }
 
 const str = (value: string): Value => ({ kind: "string", value });
-const view = (prefix: string): Value => ({ kind: "record", fields: { prefix: str(prefix) } });
 const record = (fields: Record<string, Value>): Value => ({ kind: "record", fields });
 const fileRef = (blobId: string): Value => ({
   kind: "ref",
@@ -105,16 +104,16 @@ async function answer(
 describe("api reactor: machine-answering prelude.store.*", () => {
   test("set → get round trip: the get's escalateAck carries the value set before it", async () => {
     const { api } = harness();
-    const setAck = await answer(api, "prelude.store.set", record({ target: view("memos"), key: str("today"), value: str("hi") }));
+    const setAck = await answer(api, "prelude.store.set", record({ key: str("memos/today"), value: str("hi") }));
     expect(setAck.value).toEqual({ kind: "null" });
 
-    const getAck = await answer(api, "prelude.store.get", record({ target: view("memos"), key: str("today") }));
+    const getAck = await answer(api, "prelude.store.get", record({ key: str("memos/today") }));
     expect(getAck.value).toMatchObject({ ctor: "prelude.store.found", fields: { value: str("hi") } });
   });
 
-  test("a get on a missing key answers `absent` carrying the full key", async () => {
+  test("a get on a missing key answers `absent` carrying the key as it arrived", async () => {
     const { api } = harness();
-    const ack = await answer(api, "prelude.store.get", record({ target: view("memos"), key: str("gone") }));
+    const ack = await answer(api, "prelude.store.get", record({ key: str("memos/gone") }));
     expect(ack.value).toMatchObject({ ctor: "prelude.store.absent", fields: { key: str("memos/gone") } });
   });
 
@@ -125,7 +124,7 @@ describe("api reactor: machine-answering prelude.store.*", () => {
     // run→api handoff), ready for a receiver to claim it.
     pool.registerBlob(BLOB, { owner: null, hash: "hash", size: 3, semanticKind: "file" });
 
-    const ack = await answer(api, "prelude.store.set", record({ target: view(""), key: str("pic"), value: fileRef(BLOB) }));
+    const ack = await answer(api, "prelude.store.set", record({ key: str("pic"), value: fileRef(BLOB) }));
     expect(ack.value).toEqual({ kind: "null" });
     // Landed on the api root: a project file, listed on the Files page, outliving the writing run.
     expect(store.blobs[BLOB]?.owner).toBe(API_ROOT);
@@ -136,17 +135,17 @@ describe("api reactor: machine-answering prelude.store.*", () => {
     const BLOB = "blob-kept" as BlobId;
     pool.registerBlob(BLOB, { owner: null, hash: "hash", size: 3, semanticKind: "file" });
 
-    await answer(api, "prelude.store.set", record({ target: view(""), key: str("pic"), value: fileRef(BLOB) }));
+    await answer(api, "prelude.store.set", record({ key: str("pic"), value: fileRef(BLOB) }));
     expect(store.blobs[BLOB]?.owner).toBe(API_ROOT);
     // Replace the entry with a plain value: the store forgets the reference, but the file stays in the
     // library (there is no reclaim path — it is removed only by an explicit file delete).
-    await answer(api, "prelude.store.set", record({ target: view(""), key: str("pic"), value: str("replaced") }));
+    await answer(api, "prelude.store.set", record({ key: str("pic"), value: str("replaced") }));
     expect(store.blobs[BLOB]?.owner).toBe(API_ROOT);
   });
 
   test("a store escalation never becomes an open question", async () => {
     const { api } = harness();
-    await answer(api, "prelude.store.get", record({ target: view(""), key: str("k") }));
+    await answer(api, "prelude.store.get", record({ key: str("k") }));
     expect(api.listOpenEscalations()).toHaveLength(0);
   });
 });

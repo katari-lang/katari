@@ -1540,87 +1540,82 @@ spec = do
         )
         `shouldBe` []
 
-  -- The `prelude.store` serialization scope: `serialize` opens ONE write-serialization domain over
-  -- ONE subtree, serving the ambient `current` and the critical-section `exclusive` from a
-  -- deliberately sequential handler. The ceiling `Etask` is pinned explicitly at the install (it
-  -- cannot be inferred through the request payload — the same explicit-first discipline as a
-  -- nursery's fiber ceiling), and it `lacks current | exclusive`, so a task reads the subtree
-  -- through a value closed over before entering and a nested exclusive is a type error rather than
-  -- an escaped perform.
-  describe "store.serialize (one subtree's write-serialization scope)" $ do
-    it "the provider usage example type-checks: install once (ceiling explicit, rest inferred), modify under it — the residual is the bare store row" $
+  -- The `prelude.store` workspace geometry: keys are ambient, `scope` is the prefixing workspace
+  -- provider (its four parallel handlers re-perform outward with the prefixed key), and
+  -- `serialize` opens a serial domain whose `exclusive` critical sections carry a FIXED row — the
+  -- four store operations, nothing else — so a section can never block on a model, a network, or
+  -- another domain. No type arguments anywhere: the fixed row replaced the old ceiling generics.
+  describe "store workspaces (scope / serialize / exclusive / modify)" $ do
+    it "scope-prefix composition type-checks: nested workspaces over ambient keys, a listing under a subdirectory" $
       compiledCodes
-        ( "agent increment(value: unknown) -> unknown {\n"
-            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
-            <> "agent driver() -> unknown with store.get | store.set {\n"
-            <> "  use store.serialize[store.get | store.set](subtree = store.root())\n"
-            <> "  store.modify(key = \"count\", transform = increment)\n"
+        ( "agent driver() -> array[store.entry] with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.scope(path = \"assistant\")\n"
+            <> "  use store.scope(path = \"core\")\n"
+            <> "  store.set(key = \"memos/today\", value = \"hi\")\n"
+            <> "  store.list(path = \"memos\")\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "the general form type-checks: a multi-key exclusive task over a subtree closed over from `current`, narrowed back from `unknown`" $
+    it "serialize + exclusive + modify happy path: install bare, run a multi-key task and the one-key sugar" $
       compiledCodes
-        ( "agent move() -> string with store.current | store.exclusive[store.get | store.set] {\n"
-            <> "  let subtree = store.current()\n"
+        ( "agent increment(value: unknown) -> unknown {\n"
+            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
+            <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.serialize\n"
             <> "  agent move_note(value: null) -> string {\n"
-            <> "    match (store.get(target = subtree, key = \"draft\")) {\n"
+            <> "    match (store.get(key = \"draft\")) {\n"
             <> "      case store.found(value => value) -> {\n"
-            <> "        store.set(target = subtree, key = \"published\", value = value)\n"
+            <> "        store.set(key = \"published\", value = value)\n"
             <> "        \"(moved)\"\n"
             <> "      }\n"
             <> "      case store.absent(key => _) -> \"(nothing to move)\"\n"
             <> "    }\n"
             <> "  }\n"
-            <> "  match (store.exclusive(task = move_note)) {\n"
-            <> "    case string(text) -> text\n"
-            <> "    case _ -> \"(no confirmation)\"\n"
-            <> "  }\n"
-            <> "}\n"
-            <> "agent driver() -> string with store.get | store.set {\n"
-            <> "  use store.serialize[store.get | store.set](subtree = store.root())\n"
-            <> "  move()\n"
+            <> "  let _moved = store.exclusive(task = move_note)\n"
+            <> "  store.modify(key = \"count\", transform = increment)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "the ceiling is explicit-first: an install that leaves it to inference is rejected (K3016)" $
-      -- The tripwire for the known inference gap: `Etask` sits in `exclusive`'s payload position,
-      -- which unification does not solve through — if this test ever flips, the explicit-first
-      -- calling convention (and this section's docstrings) can be relaxed.
+    it "a facility's subdirectory travels with the task: an exclusive task may open store.scope as its first move" $
       compiledCodes
-        ( "agent increment(value: unknown) -> unknown {\n"
-            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
-            <> "agent driver() -> unknown with store.get | store.set {\n"
-            <> "  use store.serialize(subtree = store.root())\n"
-            <> "  store.modify(key = \"count\", transform = increment)\n"
+        ( "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.scope(path = \"core\")\n"
+            <> "  use store.serialize\n"
+            <> "  agent save_index(value: null) -> null {\n"
+            <> "    use store.scope(path = \"memory\")\n"
+            <> "    store.set(key = \"index\", value = 1)\n"
+            <> "    null\n"
+            <> "  }\n"
+            <> "  store.exclusive(task = save_index)\n"
             <> "}"
         )
-        `shouldContain` ["K3016"]
+        `shouldBe` []
 
-    it "rejects an exclusive task whose row exceeds the installed ceiling (K3001)" $
+    it "rejects an exclusive task raising a NON-store request: the fixed row is a K3001" $
       compiledCodes
-        ( "agent overreach(value: null) -> null {\n"
-            <> "  store.set(target = store.root(), key = \"x\", value = 1)\n"
+        ( "request notify(text: string) -> null\n"
+            <> "agent chatty(value: null) -> null {\n"
+            <> "  notify(text = \"hi\")\n"
             <> "  null\n"
             <> "}\n"
-            <> "agent driver() -> unknown with store.get {\n"
-            <> "  use store.serialize[store.get](subtree = store.root())\n"
-            <> "  store.exclusive(task = overreach)\n"
+            <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.serialize\n"
+            <> "  store.exclusive(task = chatty)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
 
-    it "rejects a ceiling that carries exclusive itself: a nested exclusive would escape its scope, so the lacks bound stops it (K3001)" $
+    it "rejects an impure modify transform: what a new value depends on is closed over, not performed (K3001)" $
       compiledCodes
-        ( "agent noop(value: null) -> null { null }\n"
-            <> "agent nested(value: null) -> null {\n"
-            <> "  store.exclusive(task = noop)\n"
-            <> "  null\n"
+        ( "agent leaky(value: unknown) -> unknown with io {\n"
+            <> "  let _now = time.now()\n"
+            <> "  value\n"
             <> "}\n"
-            <> "agent driver() -> unknown with store.get {\n"
-            <> "  use store.serialize[store.exclusive[pure]](subtree = store.root())\n"
-            <> "  store.exclusive(task = nested)\n"
+            <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.serialize\n"
+            <> "  store.modify(key = \"count\", transform = leaky)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]

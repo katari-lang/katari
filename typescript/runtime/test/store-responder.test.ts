@@ -1,7 +1,10 @@
 // The store responder — the pure answer construction the runtime machine-answers a `prelude.store.*`
-// request with, over a stubbed rows port: full-key resolution through the view's prefix, the found/absent
-// sum, and the FS-shaped listing with its "/" boundary. (The escalation wiring — recognise the request,
-// reply on the downward path, land a stored file in the library — is exercised in `api-reactor-store`.)
+// request with, over a stubbed rows port. Keys are AMBIENT under the workspace design: the `key` (and
+// `list`'s `path`) that reaches the runtime is already the full project-root path — every `store.scope`
+// between the perform and the root re-performed the operation with its prefix joined on — so the
+// responder resolves nothing: it reads the key as-is, answers the found/absent sum, and shapes the
+// FS-shaped listing with its "/" boundary. (The escalation wiring — recognise the request, reply on the
+// downward path, land a stored file in the library — is exercised in `api-reactor-store`.)
 
 import { describe, expect, test } from "vitest";
 import { answerStoreRequest, type StoreRows } from "../src/runtime/actor/store-responder.js";
@@ -32,42 +35,30 @@ function memoryRows(): StoreRows & { table: Map<string, Value> } {
 }
 
 const str = (value: string): Value => ({ kind: "string", value });
-/** The `store` view — a record with a `prefix` field (the responder reads the field, not the ctor). */
-const view = (prefix: string): Value => ({ kind: "record", fields: { prefix: str(prefix) } });
 const record = (fields: Record<string, Value>): Value => ({ kind: "record", fields });
 
 describe("store responder", () => {
-  test("set writes under the view's prefix and get reads it back as `found`", async () => {
+  test("set writes at the full ambient key and get reads it back as `found`", async () => {
     const rows = memoryRows();
     const setAnswer = await answerStoreRequest(
       rows,
       PROJECT,
       SET,
-      record({ target: view("memos"), key: str("today"), value: str("hi") }),
+      record({ key: str("memos/today"), value: str("hi") }),
     );
     expect(setAnswer).toEqual({ kind: "null" });
     expect(rows.table.has("memos/today")).toBe(true);
 
-    const getAnswer = await answerStoreRequest(
-      rows,
-      PROJECT,
-      GET,
-      record({ target: view("memos"), key: str("today") }),
-    );
+    const getAnswer = await answerStoreRequest(rows, PROJECT, GET, record({ key: str("memos/today") }));
     expect(getAnswer).toMatchObject({
       ctor: "prelude.store.found",
       fields: { value: str("hi") },
     });
   });
 
-  test("get on a missing key is `absent` carrying the full key", async () => {
+  test("get on a missing key is `absent` carrying the key as it arrived", async () => {
     const rows = memoryRows();
-    const answer = await answerStoreRequest(
-      rows,
-      PROJECT,
-      GET,
-      record({ target: view("memos"), key: str("gone") }),
-    );
+    const answer = await answerStoreRequest(rows, PROJECT, GET, record({ key: str("memos/gone") }));
     expect(answer).toMatchObject({
       ctor: "prelude.store.absent",
       fields: { key: str("memos/gone") },
@@ -76,19 +67,21 @@ describe("store responder", () => {
 
   test("delete removes the entry; a later get is `absent`", async () => {
     const rows = memoryRows();
-    await answerStoreRequest(rows, PROJECT, SET, record({ target: view(""), key: str("k"), value: str("v") }));
-    const del = await answerStoreRequest(rows, PROJECT, DELETE, record({ target: view(""), key: str("k") }));
+    await answerStoreRequest(rows, PROJECT, SET, record({ key: str("k"), value: str("v") }));
+    const del = await answerStoreRequest(rows, PROJECT, DELETE, record({ key: str("k") }));
     expect(del).toEqual({ kind: "null" });
-    const answer = await answerStoreRequest(rows, PROJECT, GET, record({ target: view(""), key: str("k") }));
+    const answer = await answerStoreRequest(rows, PROJECT, GET, record({ key: str("k") }));
     expect(answer).toMatchObject({ ctor: "prelude.store.absent" });
   });
 
-  test("list is FS-shaped: leaves and deduplicated branches directly under the prefix, /-bounded", async () => {
+  test("list is FS-shaped: leaves and deduplicated branches directly under the path, /-bounded", async () => {
     const rows = memoryRows();
     for (const key of ["a", "dir/x", "dir/y", "dirx", "dir/deep/z"]) {
-      await answerStoreRequest(rows, PROJECT, SET, record({ target: view(""), key: str(key), value: str(key) }));
+      await answerStoreRequest(rows, PROJECT, SET, record({ key: str(key), value: str(key) }));
     }
-    const root = await answerStoreRequest(rows, PROJECT, LIST, record({ target: view("") }));
+    // `path = ""` is the project root here — the empty path a bare `list()` carries when no
+    // workspace prefixed it on the way up.
+    const root = await answerStoreRequest(rows, PROJECT, LIST, record({ path: str("") }));
     expect(root).toMatchObject({
       kind: "array",
       elements: [
@@ -97,7 +90,7 @@ describe("store responder", () => {
         { ctor: "prelude.store.leaf", fields: { key: str("dirx") } },
       ],
     });
-    const under = await answerStoreRequest(rows, PROJECT, LIST, record({ target: view("dir") }));
+    const under = await answerStoreRequest(rows, PROJECT, LIST, record({ path: str("dir") }));
     expect(under).toMatchObject({
       kind: "array",
       elements: [

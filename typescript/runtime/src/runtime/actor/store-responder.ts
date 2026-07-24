@@ -57,9 +57,12 @@ export function isStoreRequest(request: string): boolean {
 
 /** Compute the answer to one store request against the durable rows: `get` reads (`found` / `absent`),
  *  `set` writes and answers `null`, `delete` removes and answers `null`, `list` is the FS-shaped listing.
- *  Async (the rows I/O is a DB round-trip); the api reactor replies with the returned Value on a fresh
- *  serial turn. An unknown request is engine/compiler drift (the api reactor gates on `isStoreRequest`
- *  first), surfaced as a defect. */
+ *  The request's `key` (and `list`'s `path`) IS the full project-root path already: keys are ambient, and
+ *  every workspace between the perform and the root has re-performed the operation with its own prefix
+ *  joined on (`prefix + "/" + key` per scope — the same join the old target-prefix composition produced,
+ *  so row addressing is unchanged). Async (the rows I/O is a DB round-trip); the api reactor replies with
+ *  the returned Value on a fresh serial turn. An unknown request is engine/compiler drift (the api reactor
+ *  gates on `isStoreRequest` first), surfaced as a defect. */
 export async function answerStoreRequest(
   rows: StoreRows,
   projectId: ProjectId,
@@ -68,19 +71,20 @@ export async function answerStoreRequest(
 ): Promise<Value> {
   switch (request) {
     case GET_REQUEST: {
-      const value = await rows.read(projectId, fullKeyOf(argument));
-      return value === undefined ? absentValue(fullKeyOf(argument)) : foundValue(value);
+      const key = stringFieldOf(argument, "key");
+      const value = await rows.read(projectId, key);
+      return value === undefined ? absentValue(key) : foundValue(value);
     }
     case SET_REQUEST: {
-      await rows.upsert(projectId, fullKeyOf(argument), fieldOf(argument, "value"));
+      await rows.upsert(projectId, stringFieldOf(argument, "key"), fieldOf(argument, "value"));
       return NULL_VALUE;
     }
     case DELETE_REQUEST: {
-      await rows.remove(projectId, fullKeyOf(argument));
+      await rows.remove(projectId, stringFieldOf(argument, "key"));
       return NULL_VALUE;
     }
     case LIST_REQUEST: {
-      const prefix = prefixOf(fieldOf(argument, "target"));
+      const prefix = stringFieldOf(argument, "path");
       return listing(prefix, await rows.listKeys(projectId, prefix));
     }
     default:
@@ -128,29 +132,6 @@ function listing(prefix: string, keys: string[]): Value {
  *  guard, so the prefix `"memo"` never matches the key `"memos/a"`. */
 function keyBelowPrefix(key: string, prefix: string): string | undefined {
   return key.startsWith(`${prefix}/`) ? key.slice(prefix.length + 1) : undefined;
-}
-
-/** The full key of a store operation: the target view's prefix joined to the call's `key`. */
-function fullKeyOf(argument: Value | null): string {
-  const prefix = prefixOf(fieldOf(argument, "target"));
-  const key = stringFieldOf(argument, "key");
-  return prefix === "" ? key : `${prefix}/${key}`;
-}
-
-/** The `prefix` field of a `store` view value. */
-function prefixOf(target: Value): string {
-  if (target.kind !== "record") {
-    throw new Error(
-      `store: expected a store record, got ${target.kind} (compiler/runtime drift — a bug)`,
-    );
-  }
-  const prefix = target.fields.prefix;
-  if (prefix === undefined || prefix.kind !== "string") {
-    throw new Error(
-      "store: the store value is missing a string `prefix` (compiler/runtime drift — a bug)",
-    );
-  }
-  return prefix.value;
 }
 
 /** A required field off a store request's record argument, any kind. A missing field is drift (the stdlib

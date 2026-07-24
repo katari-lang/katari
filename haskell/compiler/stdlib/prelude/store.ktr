@@ -2,19 +2,40 @@
 // outlive any single run. Where a handler's `var` is state WITHIN a run and `env` is operator-set
 // configuration INTO a run, the store is state BETWEEN runs: any run reads what another wrote, the
 // operator browses and edits the same tree in the console, and an AI reads a stored note back into
-// its context. Keys are path-like strings (`"memos/2026-07"`); a `store` value is a PREFIX — a view
-// of one subtree, plain data (`scope` narrows it), so an agent can be handed exactly the subtree it
-// should touch. Values are ordinary Katari values: a document, a data value, a `file`, a secret
+// its context. Values are ordinary Katari values: a document, a data value, a `file`, a secret
 // (`string of private` seals at rest exactly like a secret env entry, and stays redacted at every
-// user-facing boundary). Writes are last-write-wins; one project's runs are serialized, so two
-// writers never interleave.
+// user-facing boundary). Writes are last-write-wins.
+//
+// KEYS ARE AMBIENT. An operation names a path-like key (`"memos/2026-07"`) and nothing else; WHERE
+// the key lands is decided by the environment, not by a value threaded through the code. Three
+// concepts cover the whole module:
+//
+//   - WORKSPACE (`scope`): the store's working directory, opened as a provider. Under
+//     `use store.scope(path = "core")` every operation's key is prefixed with `core/`; nested
+//     scopes accumulate prefixes; the outermost bare perform is project-root access. An agent
+//     dispatched inside a workspace lives in that directory BY CONSTRUCTION — it holds no value
+//     it could widen.
+//   - FACILITY: a workspace-relative toolset — a package (a memory, a task list) whose tools open
+//     ONE fixed subdirectory scope (`use store.scope(path = "memory")`) around their own
+//     operations. The path is the package's constant; WHERE the facility's data lives is the
+//     CALLING workspace's decision, which is the whole inversion.
+//   - SERIAL DOMAIN (`serialize` / `exclusive` / `modify`): a FIFO for read-modify-writes, installed
+//     for the extent of one dispatch (a turn), so the concurrently dispatched tools of one turn
+//     cannot interleave their critical sections.
+//
+// SHARED knowledge — data several workspaces must read — never travels by path escape: there is
+// deliberately no `..`. It is a NAMED request (a `read_digest`, a `read_layer`) served by a handler
+// installed ABOVE the workspaces, which opens the shared subtree's own scope in its body. The proxy
+// IS the semantics: what an inner install must not capture goes by a different request name, so a
+// workspace can never capture it by accident.
 //
 // Each operation is a `request` — part of the run's ENVIRONMENT. A program performs it; a handler in
-// scope may catch it (the same mechanism that catches `prelude.throw`) to intervene — a test stub, a
-// sandboxed subtree, a redirect. Unhandled, it escalates like any request to the run's OUTERMOST
-// environment, the runtime itself, which MACHINE-ANSWERS it against the project's durable rows — it is
-// never surfaced as a question to a human operator. The answer is durable, so a re-run during recovery
-// observes the same value the first attempt did: the store is replay-deterministic.
+// scope may catch it (the same mechanism that catches `prelude.throw`) to intervene — a workspace
+// prefix, a test stub, a redirect. Unhandled, it escalates like any request to the run's OUTERMOST
+// environment, the runtime itself, which MACHINE-ANSWERS it against the project's durable rows at
+// the PROJECT ROOT — it is never surfaced as a question to a human operator. The answer is durable,
+// so a re-run during recovery observes the same value the first attempt did: the store is
+// replay-deterministic.
 //
 // Storing a `file` JOINS its bytes to the project's FILE LIBRARY: the stored file becomes a project
 // file (owned by the api root, listed on the console's Files page) that outlives the run that wrote
@@ -23,149 +44,159 @@
 // to a file that was explicitly deleted reads as `gone` (`prelude.files`' contract for any handle to a
 // removed file).
 
-@"A view of one subtree of the project store: the path prefix every operation resolves its key
-under. Plain data, not a permission — `scope` narrows it, and handing an agent a scoped store is
-composition, not enforcement."
-data store(@"The path prefix; \"\" is the root." prefix: string)
-
-@"The whole project store — the root view."
-agent root() -> store {
-  store(prefix = "")
-}
-
-@"A narrowed view: the subtree at @path@ under @target@ — the store's `cd`. Plain prefix
-arithmetic, usable anywhere a `store` is."
-agent scope(target: store, path: string) -> store {
-  if (target.prefix == "") {
-    store(prefix = path)
-  } else {
-    store(prefix = f"${target.prefix}/${path}")
-  }
-}
-
 @"A lookup that found a value."
 data found(@"The stored value." value: unknown)
 
 @"A lookup that found nothing — distinct from a stored `null`."
-data absent(@"The key that had no entry." key: string)
+data absent(@"The key that had no entry, as the environment resolved it (workspace prefixes applied)." key: string)
 
 // One lookup's outcome. (Type synonyms take no docs.)
 type lookup = found | absent
 
-@"Read the value at @key@ under @target@'s prefix: `found(value)` or `absent(key)` — a stored
-`null` is `found(null)`, so presence and value never blur. Pin an expected shape with
-`json.validate[T]` on the found value."
-request get(target: store, key: string) -> lookup
+@"Read the value at @key@, resolved against the surrounding workspace: `found(value)` or
+`absent(key)` — a stored `null` is `found(null)`, so presence and value never blur. Pin an expected
+shape with `json.validate[T]` on the found value."
+request get(@"The path-like key, relative to the current workspace." key: string) -> lookup
 
-@"Write @value@ at @key@ under @target@'s prefix, creating or replacing the entry (last write
-wins). Any value fits: a document, a data value, a `file`, a secret (sealed at rest). A stored
-`file` joins the project's file library — it becomes a project file (visible on the Files page)
-that outlives the writing run. Overwriting the entry does NOT free the file it replaced; a file is
-removed only by an explicit delete through the file API or the Files page."
-request set(target: store, key: string, value: unknown) -> null
+@"Write @value@ at @key@, resolved against the surrounding workspace, creating or replacing the
+entry (last write wins). Any value fits: a document, a data value, a `file`, a secret (sealed at
+rest). A stored `file` joins the project's file library — it becomes a project file (visible on the
+Files page) that outlives the writing run. Overwriting the entry does NOT free the file it
+replaced; a file is removed only by an explicit delete through the file API or the Files page."
+request set(@"The path-like key, relative to the current workspace." key: string, @"The value to store." value: unknown) -> null
 
-@"Delete the entry at @key@ under @target@'s prefix; deleting a missing key is a no-op. Deleting an
-entry that held a `file` does NOT free the file — it stays in the project's file library; remove it
-with an explicit delete through the file API or the Files page."
-request delete(target: store, key: string) -> null
+@"Delete the entry at @key@, resolved against the surrounding workspace; deleting a missing key is
+a no-op. Deleting an entry that held a `file` does NOT free the file — it stays in the project's
+file library; remove it with an explicit delete through the file API or the Files page."
+request delete(@"The path-like key, relative to the current workspace." key: string) -> null
 
-@"A `list` entry: a key holding a value, directly under the listed prefix."
-data leaf(@"The key, relative to the listed prefix." key: string)
+@"A `list` entry: a key holding a value, directly under the listed place."
+data leaf(@"The key, relative to the listed place." key: string)
 
-@"A `list` entry: a path segment with more entries below it — descend with `scope`."
-data branch(@"The segment name, relative to the listed prefix." name: string)
+@"A `list` entry: a path segment with more entries below it — descend by listing @path@ deeper."
+data branch(@"The segment name, relative to the listed place." name: string)
 
 // One listing's element. (Type synonyms take no docs.)
 type entry = leaf | branch
 
-@"List what sits DIRECTLY under @target@'s prefix: a `leaf` per value-holding key and a `branch`
-per segment with entries below it (sorted; a name that is both leaf and branch yields both). The
-file-system face of the tree — descend a branch with `scope`."
-request list(target: store) -> array[entry]
+@"List what sits DIRECTLY under @path@ in the current workspace: a `leaf` per value-holding key and
+a `branch` per segment with entries below it (sorted; a name that is both leaf and branch yields
+both). The default @path@ of \"\" lists the workspace itself; a subdirectory path lists below it —
+the path parameter is how a prefix travels for listings, since a listing has no key to carry it."
+request list(@"The subdirectory to list, relative to the current workspace; \"\" is the workspace itself." path: string ?= "") -> array[entry]
 
-// ── serialize: one subtree's write-serialization scope ───────────────────────────────────────────
+// ── scope: the workspace — the store's ambient working directory ─────────────────────────────────
+
+@"Open the workspace at @path@ under the current one, for the extent of @continuation@ — the
+`use store.scope(path = ...)` form, the store's `cd`. Four handlers catch the store operations and
+RE-PERFORM them outward with the prefixed key (`get(key = \"index\")` under a scope at \"core\"
+escalates as `get(key = \"core/index\")`; a `list` gets @path@ prepended to its own path
+parameter), so nested scopes accumulate prefixes and the outermost bare perform is project-root
+access — unhandled at the very top, the runtime machine-answers against the project's durable rows.
+The handlers are PARALLEL on purpose: a scope is pure prefix arithmetic and must not serialize the
+traffic passing through it (a turn's tool batch stays concurrent); ordering is `serialize`'s job,
+never a workspace's. And a scope is a one-way descent: there is deliberately no `..`, so data
+several workspaces share is NOT reached by path escape — express it as a NAMED request (a
+`read_digest`) served by a handler installed ABOVE the workspaces, which opens the shared subtree's
+own scope in its body. That proxy is the semantics: a different request name is what an inner
+install can never capture by accident."
+agent scope[R, effect E](
+  @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"." path: string,
+  @"Runs with every store operation prefixed; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list},
+) -> R with E | get | set | delete | list {
+  // Clause parameter names are structural, so the `list` clause below MUST bind `path` — which
+  // would shadow this agent's own `path`. The prefix is rebound once, before the handler.
+  let base = path
+  // PARALLEL on purpose: prefixing is stateless arithmetic, and a sequential handler here would
+  // needlessly serialize a turn's concurrent tool batch through the workspace.
+  use parallel handler {
+    request get(key: string) {
+      next get(key = f"${base}/${key}")
+    }
+    request set(key: string, value: unknown) {
+      next set(key = f"${base}/${key}", value = value)
+    }
+    request delete(key: string) {
+      next delete(key = f"${base}/${key}")
+    }
+    request list(path: string) {
+      // An empty incoming path lists the workspace itself, so only the prefix travels outward.
+      if (path == "") {
+        next list(path = base)
+      } else {
+        next list(path = f"${base}/${path}")
+      }
+    }
+  }
+  continuation(value = null)
+}
+
+// ── serialize: the serial domain — a FIFO whose extent is one dispatch ───────────────────────────
 //
 // Writes are last-write-wins, so a read-modify-write is NOT atomic on its own: two concurrently
 // dispatched tools (a `parallel for` tool batch) that each read a record, edit it and write it
-// back lose one edit. `serialize` packages the discipline every app hand-rolled for this (a
-// mutation sum, a request carrying it, a deliberately sequential handler): ONE install = ONE
-// serialization domain = ONE subtree. The scope is AMBIENT, reader-monad style — no subtree is
-// threaded through the tools; `current` answers the one subtree where it is needed, and
-// `exclusive` runs a whole task as a CRITICAL SECTION inside the provider's own SEQUENTIAL
-// handler, whose FIFO is the atomicity.
+// back lose one edit. `serialize` opens a serial domain: `exclusive` runs a whole task as a
+// CRITICAL SECTION inside the provider's own SEQUENTIAL handler, whose FIFO is the atomicity.
 
-@"The ambient subtree of the enclosing `serialize` scope — the reader-monad read: no subtree is
-threaded through the tools, the scope's one subtree is asked for where it is needed. Served
-statelessly by `serialize`. Performable anywhere in its continuation EXCEPT inside an `exclusive`
-task (the ceiling's `lacks` bound excludes it there — read it BEFORE entering and close over the
-value, as `modify` does; the subtree is constant for the scope, so nothing is lost)."
-request current() -> store
-
-@"Run @task@ as a CRITICAL SECTION of the enclosing `serialize` scope: the provider's SEQUENTIAL
-handler calls it in its own body, so two exclusives can never interleave — the handler's FIFO is
-the atomicity, even against a `parallel for` tool batch. This is the general form: a task may read
-and write several keys as one atomic unit (`modify` is the one-key sugar). The task's answer
-crosses the handler as `unknown`; narrow it back with a `match` (or `json.validate[T]`). An
-`exclusive` cannot nest: an inner perform would escape the scope it is already inside, so the
-ceiling's `lacks` bound makes it a type error rather than an escaped request."
-request exclusive[effect E](
-  @"The critical section; its row must fit the ceiling the install pinned." task: agent (value: null) -> unknown with E,
+@"Run @task@ as a CRITICAL SECTION of the nearest enclosing `serialize`: the provider's SEQUENTIAL
+handler calls it in its own body, so two exclusives of one domain can never interleave — the
+handler's FIFO is the atomicity, even against a `parallel for` tool batch. The row is FIXED to the
+store operations: a critical section reads, computes and writes, NOTHING ELSE — any other input is
+computed BEFORE entering and closed over (as `modify` closes over its transform), so a section can
+never block on a model, a network, or another domain. TWO GEOMETRY FACTS, both load-bearing: the
+task runs AT THE SERIALIZE INSTALL SITE, not at this perform site — so a facility's subdirectory
+prefix must be applied INSIDE the task body (`use store.scope(path = \"memory\")` as the task's
+first move; a scope around the perform site does not travel with the task, but the install site's
+own enclosing workspaces do apply). And an `exclusive` binds to the NEAREST enclosing `serialize`:
+an inner domain shadows an outer one BY DESIGN — the nearest domain is the semantics, exactly as
+the nearest workspace is. The task's answer crosses the handler as `unknown`; narrow it back with a
+`match` (or `json.validate[T]`)."
+request exclusive(
+  @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
 ) -> unknown
 
-@"Open a write-serialization scope over @subtree@ for the extent of @continuation@ — the
-`use store.serialize[<ceiling>](subtree = ...)` form. Serves `current` (the ambient subtree,
-stateless) and `exclusive` (the critical section) — the latter with a deliberately SEQUENTIAL
-handler: its FIFO applies exclusives one at a time, in arrival order, which is the whole point (a
-`parallel handler` would forfeit the atomicity). Pin the ceiling `Etask` — the union row an
-`exclusive` task may raise, which therefore also joins this provider's own result row — as the
-first type argument; it cannot be inferred from the payload, exactly like a nursery's fiber
-ceiling. The ceiling `lacks current | exclusive`: a task reads the subtree through a value closed
-over BEFORE entering (see `modify`), and a nested `exclusive` is a compile error instead of an
-escaped perform. Install ONCE per dynamic scope: `current` / `exclusive` are one AMBIENT channel,
-so an install below another SHADOWS it — the inner captures every exclusive beneath it, typed
-against the inner ceiling and answering the inner subtree — which is why several store-mutating
-toolsets serialize by UNIONING their ceilings into one install, never by nesting installs. And
-ONCE per subtree: two scopes over one subtree (in sibling contexts) are two independent
-serialization domains, i.e. exactly the race this scope exists to prevent. Atomicity is
-WITHIN-RUN: the FIFO serializes one run's exclusives; a concurrent writer RUN on the same subtree
-is out of scope, so keep the single-writer discipline (one resident run owns a subtree's writes)."
-agent serialize[effect Etask lacks current | exclusive, R, effect E](
-  @"The one subtree this scope serializes." subtree: store,
-  @"Runs with `current` and `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, current, exclusive[Etask]},
-) -> R with E | Etask {
-  use handler {
-    request current() { next subtree }
-  }
+@"Open a serial domain for the extent of @continuation@ — the bare `use store.serialize` form (no
+arguments, no type arguments: the domain is WHERE it is installed). Serves `exclusive` with a
+deliberately SEQUENTIAL handler: its FIFO applies critical sections one at a time, in arrival
+order, which is the whole point (a `parallel handler` would forfeit the atomicity). THE INSTALL
+DISCIPLINE: a desk's dispatch clause installs its workspace and its domain together —
+`use store.scope(path = <its workspace>)` then `use store.serialize` — once per dispatch. The race
+this closes is exactly one turn's parallel tool batch, so a turn-lifetime FIFO covers it, and the
+turns themselves already serialize at the desk's own sequential handler; tasks re-perform their
+store operations from THIS install site, so installing under the workspace is what routes a
+critical section's keys into it. An `exclusive` performed below a nested install binds to the
+NEAREST domain (inner shadows outer, by design); one performed with no install above it rides to
+the run root, where nothing serves it — keep the per-dispatch install discipline."
+agent serialize[R, effect E](
+  @"Runs with `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, exclusive},
+) -> R with E | get | set | delete | list {
   // Deliberately NOT a `parallel handler`: the FIFO of a sequential handler is what makes an
   // exclusive a critical section — tasks run one at a time, in arrival order.
   use handler {
-    request exclusive(task: agent (value: null) -> unknown with Etask) {
+    request exclusive(task: agent (value: null) -> unknown with get | set | delete | list) {
       next task(value = null)
     }
   }
   continuation(value = null)
 }
 
-@"Read the scope's @key@ (a missing entry reads as `null`), apply @transform@, write the result
-back, and return it — the one-key read-modify-write, atomic because it rides `exclusive`. The
-stored value crosses as `unknown`; pin an expected shape inside @transform@ with a `match` (or
-`json.validate[T]`), and remember a stored `null` and a missing entry read the same here (use a
-bare `get` when that distinction matters)."
-agent modify[effect E](
-  @"The key under the scope's subtree." key: string,
-  @"Old value in (`null` when the entry is missing), new value out." transform: agent (value: unknown) -> unknown with E,
-) -> unknown with current | exclusive[{...E, get, set}] {
-  // The ambient read is hoisted OUT of the critical section on purpose: the subtree is constant
-  // for the scope (so reading it early loses nothing), and the ceiling's `lacks` bound excludes
-  // `current` inside a task.
-  let subtree = current()
-  agent update(value: null) -> unknown with {...E, get, set} {
-    let existing = match (get(target = subtree, key = key)) {
+@"Read @key@ (a missing entry reads as `null`), apply @transform@, write the result back, and
+return it — the one-key read-modify-write, atomic because it rides `exclusive`. @transform@ is
+PURE: everything the new value depends on is computed before entering and closed over — the
+critical-section discipline made a type. The stored value crosses as `unknown`; pin an expected
+shape inside @transform@ with a `match` (or `json.validate[T]`), and remember a stored `null` and a
+missing entry read the same here (use a bare `get` when that distinction matters)."
+agent modify(
+  @"The key, relative to the workspace of the enclosing serialize's install site." key: string,
+  @"Old value in (`null` when the entry is missing), new value out; pure." transform: agent (value: unknown) -> unknown with pure,
+) -> unknown with exclusive {
+  agent update(value: null) -> unknown with get | set {
+    let existing = match (get(key = key)) {
       case found(value => value) -> value
       case absent(key => _) -> null
     }
     let updated = transform(value = existing)
-    set(target = subtree, key = key, value = updated)
+    set(key = key, value = updated)
     updated
   }
   exclusive(task = update)
