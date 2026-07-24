@@ -180,6 +180,21 @@ agent serialize[R, effect E](
   continuation(value = null)
 }
 
+@"Open a WORKSPACE at @path@ — the working directory AND its serial domain in ONE install: `scope`
+composed with `serialize`, which is the DESK form (`use store.workspace(path = \"core\")` once per
+dispatch clause). The two only ever separate inside a FACILITY, which opens bare `scope`s for its
+subdirectory — its critical sections already serialize at the enclosing workspace's FIFO, so a
+facility never opens a domain of its own. `exclusive` binds to the nearest enclosing domain as
+always, so a nested workspace is a nested domain, exactly as it reads."
+agent workspace[R, effect E](
+  @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"." path: string,
+  @"Runs with every store operation prefixed AND `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list, exclusive},
+) -> R with E | get | set | delete | list {
+  use scope(path = path)
+  use serialize
+  continuation(value = null)
+}
+
 @"Read @key@ (a missing entry reads as `null`), apply @transform@, write the result back, and
 return it — the one-key read-modify-write, atomic because it rides `exclusive`. @transform@ is
 PURE: everything the new value depends on is computed before entering and closed over — the
