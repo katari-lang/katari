@@ -1,0 +1,22 @@
+{
+  // Isolated config for the wire drift trip-wire (`src/api/wire-drift.ts`). It re-derives the runtime's
+  // API types from `@katari-lang/runtime`'s SOURCE, which is Node-flavoured (no DOM, needs `@types/node`)
+  // — the opposite of the app's browser `tsconfig.json` — so it must be checked on its own. It extends the
+  // workspace base (esnext lib + node types, the runtime's own environment) rather than the app config.
+  //
+  // Nothing is added to the app's dependencies: `@katari-lang/runtime` maps to its source (the package
+  // ships no `.d.ts`), and `hono/client` + `@types/node` resolve from the runtime's OWN install. Every
+  // import here is `import type`, so this never reaches the Vite bundle.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "typeRoots": ["../runtime/node_modules/@types"],
+    "paths": {
+      "@katari-lang/runtime": ["../runtime/src/index.ts"],
+      "hono": ["../runtime/node_modules/hono/dist/types/index.d.ts"],
+      "hono/client": ["../runtime/node_modules/hono/dist/types/client/index.d.ts"]
+    }
+  },
+  "include": ["src/api/wire-drift.ts"]
+}

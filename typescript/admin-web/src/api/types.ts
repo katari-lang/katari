@@ -129,8 +129,18 @@ export interface TreeEscalation {
 }
 
 /** The runtime's reactor names — every kind an instance / delegation edge / trace event can carry
- *  (mirrors the runtime's `ReactorName`). One alias so a new reactor is a single edit here. */
-export type ReactorKind = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth";
+ *  (mirrors the runtime's `ReactorName` / `InstanceKind`). One alias so a new reactor is a single edit
+ *  here; `wire-drift.ts` fails the typecheck if this set falls out of step with the runtime's. */
+export type ReactorKind =
+  | "core"
+  | "api"
+  | "ffi"
+  | "http"
+  | "webhook"
+  | "mcp"
+  | "time"
+  | "oauth"
+  | "region";
 
 export interface TreeInstance {
   id: string;
