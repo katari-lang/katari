@@ -154,11 +154,21 @@ function playgroundId(): Promise<string> {
 // ─── suite lifecycle ────────────────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
-  // The real katari binary — this suite exists to test it, so refuse to run without one.
-  const { stdout } = await sh("stack", ["path", "--local-install-root"]).catch(() => {
-    throw new Error("no stack toolchain found; the e2e suite needs the real katari CLI (`stack build`)");
-  });
-  katariBin = join(stdout.trim(), "bin", "katari");
+  // The real katari binary — this suite exists to test it, so refuse to run without one. Release CI
+  // sets KATARI_E2E_BIN to the binary the build job already produced, so the gate reuses that
+  // artifact instead of reinvoking stack; unset (locally and in the ci.yml e2e job) we resolve it
+  // from the stack install tree.
+  const override = process.env.KATARI_E2E_BIN?.trim();
+  if (override) {
+    katariBin = override;
+  } else {
+    const { stdout } = await sh("stack", ["path", "--local-install-root"]).catch(() => {
+      throw new Error(
+        "no stack toolchain found; the e2e suite needs the real katari CLI (`stack build`) or KATARI_E2E_BIN",
+      );
+    });
+    katariBin = join(stdout.trim(), "bin", "katari");
+  }
   readFileSync(katariBin); // fails clearly when the binary was never built
 
   // Infrastructure: the dev compose services (idempotent when already up; the dummies only satisfy

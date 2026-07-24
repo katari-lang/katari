@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -107,3 +108,65 @@ jobs:
 
       - name: Test
         run: pnpm run test
+
+  e2e:
+    name: e2e
+    # The wire-compatibility net between the Haskell compiler's IR/schema output and the TypeScript
+    # runtime (see e2e/README.md). It is heavy — a stack build plus a dockerized postgres + s3mock —
+    # so it runs on main pushes and manual dispatch, not on every PR.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: "3.7.1"
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: |
+          echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Cache .stack-work
+        uses: actions/cache@v4
+        with:
+          path: |
+            .stack-work
+            haskell/*/.stack-work
+          key: ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # The suite resolves the CLI via `stack path --local-install-root`, so the katari executable must
+      # exist. It boots the runtime from source (tsx) and builds the sidecar bundler itself, so no
+      # TypeScript build step is needed here — only the compiled CLI binary.
+      - name: Build the katari CLI
+        run: stack build --fast katari-cli:katari
+
+      # The suite brings up its own compose services (postgres + s3mock) and provisions an isolated
+      # database and bucket, so no `services:` block or extra setup is required — docker is preinstalled
+      # on the GitHub-hosted runner.
+      - name: e2e
+        run: pnpm run test:e2e

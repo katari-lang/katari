@@ -129,8 +129,59 @@ jobs:
             ${{ steps.package.outputs.lsp_tarball }}
             ${{ steps.package.outputs.lsp_tarball }}.sha256
 
-  publish-npm:
+  e2e:
+    # The wire-compatibility gate: the compiler's IR/schema output must still drive the runtime end to
+    # end (see e2e/README.md) before ANY channel publishes — a publish is otherwise irreversible. It
+    # reuses the linux-x64 binary the build job already produced (the suite honors KATARI_E2E_BIN
+    # instead of reinvoking stack), so the gate needs no Haskell toolchain — only node + docker, and
+    # docker is preinstalled on the GitHub-hosted runner.
     needs: [verify-versions, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Download the linux-x64 CLI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-x64
+          path: .cli
+
+      - name: Unpack the CLI binary
+        id: cli
+        shell: bash
+        run: |
+          tar xzf ".cli/katari-${{ steps.version.outputs.version }}-linux-x64.tar.gz" -C .cli katari
+          chmod +x .cli/katari
+          echo "bin=$GITHUB_WORKSPACE/.cli/katari" >> "$GITHUB_OUTPUT"
+
+      # The suite brings up its own compose services (postgres + s3mock), boots the runtime from source
+      # (tsx), and builds the sidecar bundler itself — so `pnpm install` plus the reused binary is all
+      # it needs.
+      - name: e2e
+        run: pnpm run test:e2e
+        env:
+          KATARI_E2E_BIN: ${{ steps.cli.outputs.bin }}
+
+  publish-npm:
+    needs: [verify-versions, build, e2e]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -203,7 +254,7 @@ jobs:
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
 
   runtime-image:
-    needs: verify-versions
+    needs: [verify-versions, e2e]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -249,7 +300,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   package-vsix:
-    needs: [verify-versions, build]
+    needs: [verify-versions, build, e2e]
     runs-on: ubuntu-22.04
     strategy:
       # One platform-specific VSIX per binary, same targets as the build matrix. The VSIX is just a
