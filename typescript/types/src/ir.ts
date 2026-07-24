@@ -35,9 +35,19 @@ export type GenericId = number;
 export type Metadata = {
   /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles.
    *  Version 2 added the `drop` operation, version 3 the `defer` operation, and version 4 the
-   *  `stampDescription` operation, each of which an older runtime cannot execute. */
+   *  `stampDescription` operation, each of which an older runtime cannot execute. The runtime gates a
+   *  deploy against `SUPPORTED_IR_SCHEMA_VERSION` below. */
   schemaVersion: number;
 };
+
+/**
+ * The single IR schema version this build of the toolchain speaks. It is the source of truth the runtime
+ * gates a deploy against (rejecting any uploaded module whose `metadata.schemaVersion` differs) and the
+ * TypeScript mirror of the Haskell compiler's `Katari.Data.IR.currentMetadata` — the two are bumped in
+ * lockstep. The gate exists because a version skew otherwise surfaces not as an error but as a silent
+ * "zero callables resolved" failure at run time: the older side cannot execute the newer side's IR shape.
+ */
+export const SUPPORTED_IR_SCHEMA_VERSION = 4;
 
 /** One module's lowered output. Callables resolve by `QualifiedName` through `entries`. */
 export type IRModule = {
