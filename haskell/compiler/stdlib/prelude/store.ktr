@@ -183,8 +183,10 @@ first move; a scope around the perform site does not travel with the task, but t
 own enclosing workspaces do apply). And an `exclusive` binds to the NEAREST enclosing `serialize`:
 an inner domain shadows an outer one BY DESIGN — the nearest domain is the semantics, exactly as
 the nearest workspace is. The task's answer crosses the handler as `unknown`; narrow it back with a
-`match` (or `json.validate[T]`)."
-request exclusive(
+`match` (or `json.validate[T]`). `local` — only a `serialize` (or `workspace`) handler installed inside the
+program can answer it; the runtime never machine-answers `exclusive`, so an `exclusive` with no domain
+installed above it stalls the run rather than resolving (the compiler rejects that at the run root, K3027)."
+local request exclusive(
   @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
 ) -> unknown
 

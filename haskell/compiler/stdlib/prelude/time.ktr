@@ -86,8 +86,10 @@ type raced[T] = completed[T] | deadline_passed
 
 @"`with_deadline`'s settle channel — performed by whichever arm finishes first, handled (and `break`ed
 on) inside `with_deadline` alone. Its `lacks` constraint is what reserves it: a task cannot perform it,
-so the handler peel stays sound over the task's still-generic row."
-request race_settled[T](@"The settling side's outcome." outcome: T) -> null
+so the handler peel stays sound over the task's still-generic row. `local` — only the `with_deadline`
+handler inside the program answers it; nothing outside the run can, so it must never reach a run root
+on its own (the compiler rejects that, K3027)."
+local request race_settled[T](@"The settling side's outcome." outcome: T) -> null
 
 @"Race @task@ against a @milliseconds@ deadline and return whichever settled first: `completed` with
 the task's value, or `deadline_passed` — the loser's arm is cancelled (the ordinary cancel cascade; an

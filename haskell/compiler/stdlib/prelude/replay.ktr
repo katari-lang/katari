@@ -38,8 +38,10 @@ module exports. A converter performs it to ask that the enclosing block be re-ru
 chose to represent as @failure@ (of the converter's own type @F@). `-> never`: performing it transfers
 control to the provider (which applies its delay policy and re-runs) and does not return. This is the whole
 seam between policy and mechanism — a provider reasons only about `interrupted`, never about `throw` or
-`panic`."
-request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
+`panic`. `local` — only a `replay` provider installed inside the program serves it; the runtime never
+machine-answers `interrupted`, so signalling it with no provider above stalls the run (the compiler rejects
+that at the run root, K3027)."
+local request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 
 // INTERNAL LOOP MACHINERY (below): `run_once` and the `ran` / `signalled` / `replay_after` / `give_up` sums.
 // A user never performs or handles any of them — `run_once` is called only by the providers, and the sums

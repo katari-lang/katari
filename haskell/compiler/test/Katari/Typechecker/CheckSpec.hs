@@ -14,6 +14,7 @@ import Katari.Data.Id (GenericId (..), LocalVariableId (..), TypeResolution (..)
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
+import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (Diagnostics, renderDiagnostics)
@@ -34,6 +35,7 @@ import Katari.Typechecker.Context
 import Katari.Typechecker.Elaborate (emptyContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..), emptyTypeEnvironment)
 import Katari.Typechecker.Normalizer (joinAttribute, union)
+import Katari.Typechecker.RootRow (escalatingRequestNames)
 import Test.Hspec
 
 spec :: Spec
@@ -894,6 +896,103 @@ spec = do
             <> "}"
         )
         `shouldBe` []
+
+  describe "local request escalating an inferred root row (K3027)" $ do
+    it "rejects an unserved local request performed at an inferred top-level root" $
+      compiledCodes
+        ( "local request approve(subject: string) -> boolean\n"
+            <> "agent main(value: null) -> boolean { approve(subject = \"ship\") }"
+        )
+        `shouldBe` ["K3027"]
+
+    it "accepts the same perform once the row is declared explicitly (the obligation is handed to callers on purpose)" $
+      compiledCodes
+        ( "local request approve(subject: string) -> boolean\n"
+            <> "agent main(value: null) -> boolean with approve { approve(subject = \"ship\") }"
+        )
+        `shouldBe` []
+
+    it "does not flag an ordinary (non-local) request escalating to the root — the runtime can surface it as an operator question" $
+      compiledCodes
+        ( "request approve(subject: string) -> boolean\n"
+            <> "agent main(value: null) -> boolean { approve(subject = \"ship\") }"
+        )
+        `shouldBe` []
+
+    it "rejects an unserved store.exclusive at an inferred root (the stdlib's own local request)" $
+      compiledCodes
+        ( "agent bump(value: null) -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  store.set(key = \"counter\", value = 1)\n"
+            <> "  null\n"
+            <> "}\n"
+            <> "agent main(value: null) -> unknown { store.exclusive(task = bump) }"
+        )
+        `shouldBe` ["K3027"]
+
+    it "accepts store.exclusive once a store.serialize provider serves it below the root" $
+      compiledCodes
+        ( "agent bump(value: null) -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  store.set(key = \"counter\", value = 1)\n"
+            <> "  null\n"
+            <> "}\n"
+            <> "agent main(value: null) -> unknown {\n"
+            <> "  use store.serialize\n"
+            <> "  store.exclusive(task = bump)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "flags an indirect leak through store.modify (which itself performs exclusive)" $
+      compiledCodes
+        ( "agent increment(value: unknown) -> unknown with pure { 1 }\n"
+            <> "agent main(value: null) -> unknown { store.modify(key = \"k\", transform = increment) }"
+        )
+        `shouldBe` ["K3027"]
+
+    it "does not flag an inferred `all` row (an unconstrained row escalates no NAMED local request)" $
+      compiledCodes
+        ( "agent broad(value: null) -> null with all { null }\n"
+            <> "agent main(value: null) -> null { broad(value = null) }"
+        )
+        `shouldBe` []
+
+    it "names the request, the fix, and the declaration site in the message" $
+      compiledMessages
+        ( "agent bump(value: null) -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  store.set(key = \"counter\", value = 1)\n"
+            <> "  null\n"
+            <> "}\n"
+            <> "agent main(value: null) -> unknown { store.exclusive(task = bump) }"
+        )
+        `shouldSatisfy` ( \message ->
+                            all
+                              (`Text.isInfixOf` message)
+                              ["K3027", "`store.exclusive`", "with store.exclusive", "prelude.store:"]
+                        )
+
+  -- Direct unit tests of the root-row walk (the leaf rules that an inferred top-level row cannot
+  -- exercise end to end — a lacks overwrite only arises on an annotated generic-effect agent, which
+  -- is exempt, and a request's generic-argument row is never itself performed).
+  describe "escalatingRequestNames (the root-row walk)" $ do
+    let requestNamed segmentPath leaf = QualifiedName {moduleName = ModuleName segmentPath, name = leaf}
+        exclusive = requestNamed "prelude.store" "exclusive"
+        get = requestNamed "prelude.store" "get"
+    it "collects a bare request leaf's own name" $
+      escalatingRequestNames (SemanticEffectRequest exclusive Map.empty)
+        `shouldBe` Set.singleton exclusive
+    it "does not descend into a request leaf's generic arguments" $
+      escalatingRequestNames
+        (SemanticEffectRequest get (Map.singleton "T" (SemanticGenericArgumentEffect (SemanticEffectRequest exclusive Map.empty))))
+        `shouldBe` Set.singleton get
+    it "collects every arm of a union" $
+      escalatingRequestNames (SemanticEffectUnion [SemanticEffectRequest exclusive Map.empty, SemanticEffectRequest get Map.empty])
+        `shouldBe` Set.fromList [exclusive, get]
+    it "treats all / io / a generic tail / pure as escalating no named request" $
+      foldMap escalatingRequestNames [SemanticEffectAny, SemanticEffectIo, SemanticEffectGeneric aId, SemanticEffectPure]
+        `shouldBe` Set.empty
+    it "subtracts an overwrite's lacks names from the base and adds the overwrites" $
+      escalatingRequestNames (SemanticEffectOverwrite (SemanticEffectRequest exclusive Map.empty) (Set.singleton exclusive) [(get, Map.empty)])
+        `shouldBe` Set.singleton get
 
   describe "with modifier targeting an unresolved state variable (K2007, not a panic)" $ do
     -- The identifier reports K2007 for a `with` target that names no enclosing state variable, but the

@@ -265,6 +265,7 @@ resolveRequestDeclaration declaration =
     pure
       RequestDeclaration
         { annotation = declaration.annotation,
+          local = declaration.local,
           name = declaration.name,
           variableReference = variableReference,
           typeReference = typeReference,
