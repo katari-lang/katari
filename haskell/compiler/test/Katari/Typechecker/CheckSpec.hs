@@ -18,7 +18,7 @@ import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (.
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (Diagnostics, renderDiagnostics)
-import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
+import Katari.Error (CompilerError (..), LoweringError (..), UnsupportedErrorInfo (..), compilerErrorCode, typeErrorCode)
 import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
@@ -1058,6 +1058,44 @@ spec = do
         )
         `shouldBe` []
 
+  -- Regression net for K-codes the audit found untested. Each pins the code the diagnostic reports so a
+  -- refactor of the error tables (or the pass that raises it) cannot silently renumber or drop one.
+  describe "K-code regressions (K2008 / K3005 / K3006 / K4001)" $ do
+    it "rejects a user module whose name is compiler-reserved (K2008)" $
+      -- `prelude` is an embedded stdlib module; a user module claiming that name is dropped before the
+      -- pipeline (it would otherwise shadow the stdlib or pollute the default-import namespace).
+      compiledCodesIn (ModuleName "prelude") "agent main() -> integer { 1 }"
+        `shouldBe` ["K2008"]
+
+    it "rejects unioning two instantiations of an invariant generic (K3005)" $
+      -- `cell[T]` uses T covariantly (`get: T`) AND contravariantly (`put: agent T -> null`), so T is
+      -- invariant; the `if` branches try to union `cell[integer]` with `cell[string]`, which cannot agree.
+      compiledCodes
+        ( "data cell[T](get: T, put: agent T -> null)\n"
+            <> "agent main(flag: boolean, a: cell[integer], b: cell[string]) -> unknown {\n"
+            <> "  if (flag) { a } else { b }\n"
+            <> "}"
+        )
+        `shouldBe` ["K3005"]
+
+    it "rejects intersecting two instantiations of an invariant generic (K3006)" $
+      -- Unioning two agent types meets their (contravariant) parameters, so the branches force
+      -- `cell[integer]` to intersect with `cell[string]` — the invariant argument cannot agree.
+      compiledCodes
+        ( "data cell[T](get: T, put: agent T -> null)\n"
+            <> "agent main(flag: boolean, f: agent cell[integer] -> null, g: agent cell[string] -> null) -> unknown {\n"
+            <> "  if (flag) { f } else { g }\n"
+            <> "}"
+        )
+        `shouldBe` ["K3006"]
+
+    it "maps the lowering `unsupported` error to K4001" $
+      -- Lowering well-typed code never fails today, so no source reaches this catch-all; the regression
+      -- pins the code the mapping assigns, so the reserved number is not reused if a raise site appears.
+      compilerErrorCode
+        (CompilerErrorLowering (LoweringErrorUnsupported (UnsupportedErrorInfo {message = "an unsupported construct"})))
+        `shouldBe` "K4001"
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
@@ -1950,8 +1988,13 @@ hasErrorCode code diagnostics =
 -- (stdlib spliced in). Used where the assertion needs surface syntax the direct-AST fixtures cannot
 -- spell (partial-application holes); @== []@ asserts a clean compile.
 compiledCodes :: Text -> List Text
-compiledCodes source =
-  let result = compile CompileInput {sources = Map.singleton (ModuleName "test") source}
+compiledCodes = compiledCodesIn (ModuleName "test")
+
+-- | Like 'compiledCodes' but compiling the single source under a chosen module name, so a
+-- compiler-reserved name (which the driver rejects before the pipeline) can be exercised.
+compiledCodesIn :: ModuleName -> Text -> List Text
+compiledCodesIn moduleName source =
+  let result = compile CompileInput {sources = Map.singleton moduleName source}
    in [compilerErrorCode located.value | located <- toList result.diagnostics]
 
 -- | The rendered diagnostic text of a single-module compile — for asserting on a message's WORDING
