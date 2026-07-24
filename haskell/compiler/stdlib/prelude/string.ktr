@@ -66,3 +66,40 @@ zero-pad of a date field, the column alignment of a table row. A value already @
 returned unchanged (never truncated); the last repetition of a multi-point @padding@ is cut to fit.
 An empty @padding@ returns the value unchanged."
 primitive agent pad_start(value: string, width: integer, padding: string) -> string
+
+// ── byte-level text codecs ──────────────────────────────────────────────────────────────────────
+//
+// base64 and percent-encoding are the wire encodings a REST API asks for (an email's `raw` body, a
+// query parameter); Katari has no byte / code-point access, so they cannot be composed from the other
+// string agents and must be primitives. Each operates on TEXT: it encodes the string's UTF-8 bytes,
+// and decodes back to a UTF-8 string (a payload that is not UTF-8 text decodes best-effort). The url
+// (`-_`) alphabet is the one Gmail / JWT / many Google APIs use.
+
+@"The Base64 (standard `+/` alphabet, padded) of the string's UTF-8 bytes — the wire form a REST body
+or an HTTP Basic header takes. `from_base64` is the inverse for UTF-8-text payloads."
+primitive agent to_base64(value: string) -> string
+
+@"Decode standard Base64 (`+/`, padding optional) back to a UTF-8 string — the inverse of
+`to_base64` for text payloads. Non-Base64 characters are ignored and a non-UTF-8 payload decodes
+best-effort, so this is total (never throws); use `files.from_base64` when the bytes are a binary
+file, not text."
+primitive agent from_base64(value: string) -> string
+
+@"The Base64URL (`-_` alphabet, unpadded) of the string's UTF-8 bytes — the form Gmail's message
+`raw`, a JWT segment, and many Google APIs take. `from_base64url` is the inverse for text payloads."
+primitive agent to_base64url(value: string) -> string
+
+@"Decode Base64URL (`-_`, padding optional) back to a UTF-8 string — the inverse of `to_base64url`
+for text payloads (a Gmail message body's `data`). Total: unknown characters are ignored and a
+non-UTF-8 payload decodes best-effort."
+primitive agent from_base64url(value: string) -> string
+
+@"Percent-encode the string for use inside ONE URL component — a query value, a path segment. Every
+character outside the unreserved set (`A-Z a-z 0-9 - _ . ~`) becomes `%HH` of its UTF-8 bytes (a
+space is `%20`, not `+`). `url_decode` is the inverse."
+primitive agent url_encode(value: string) -> string
+
+@"Decode a percent-encoded (`%HH`) string back to its text — the inverse of `url_encode`. A `+` is
+left as-is (it is a literal plus in a path; a form body's `+`-for-space is a different convention the
+caller handles). A malformed `%` escape is left verbatim, so this is total."
+primitive agent url_decode(value: string) -> string

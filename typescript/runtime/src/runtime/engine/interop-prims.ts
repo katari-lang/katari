@@ -423,6 +423,48 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       ? { kind: "number", value: parsed }
       : NULL_VALUE;
   },
+  "prelude.string.to_base64": async (argument, context) => ({
+    kind: "string",
+    value: Buffer.from(await readStringField(argument, "value", context), "utf8").toString(
+      "base64",
+    ),
+  }),
+  "prelude.string.from_base64": async (argument, context) => ({
+    // Total: Buffer's base64 decode is lenient (skips non-alphabet chars, tolerates missing padding),
+    // and a non-UTF-8 payload decodes best-effort — the module contract, for text payloads.
+    kind: "string",
+    value: Buffer.from(await readStringField(argument, "value", context), "base64").toString(
+      "utf8",
+    ),
+  }),
+  "prelude.string.to_base64url": async (argument, context) => ({
+    kind: "string",
+    value: Buffer.from(await readStringField(argument, "value", context), "utf8").toString(
+      "base64url",
+    ),
+  }),
+  "prelude.string.from_base64url": async (argument, context) => ({
+    // `base64url` decoding also accepts the standard alphabet and optional padding, so it is total.
+    kind: "string",
+    value: Buffer.from(await readStringField(argument, "value", context), "base64url").toString(
+      "utf8",
+    ),
+  }),
+  "prelude.string.url_encode": async (argument, context) => ({
+    // One URL COMPONENT: `encodeURIComponent` leaves exactly the unreserved set `A-Za-z0-9-_.~` and
+    // percent-encodes everything else as UTF-8 bytes (a space is `%20`), which is the contract.
+    kind: "string",
+    value: encodeURIComponent(await readStringField(argument, "value", context)),
+  }),
+  "prelude.string.url_decode": async (argument, context) => {
+    const text = await readStringField(argument, "value", context);
+    // Total: a malformed `%` escape (which `decodeURIComponent` would throw on) is left verbatim.
+    try {
+      return { kind: "string", value: decodeURIComponent(text) };
+    } catch {
+      return { kind: "string", value: text };
+    }
+  },
   "prelude.string.pad_start": async (argument, context) => {
     const value = await readStringField(argument, "value", context);
     const width = integerOf(field(argument, "width"));

@@ -985,6 +985,38 @@ describe("the scalar comparison order (comparison operators and the sort prims)"
     ).resolves.toEqual(stringValue("hello"));
   });
 
+  test("base64 / base64url / url codecs round-trip UTF-8 text and are total", async () => {
+    // Standard base64 round-trip, including multi-byte UTF-8.
+    await expect(
+      run("prelude.string.to_base64", { value: stringValue("hi 👍 café") }),
+    ).resolves.toEqual(stringValue(Buffer.from("hi 👍 café", "utf8").toString("base64")));
+    await expect(
+      run("prelude.string.from_base64", {
+        value: stringValue(Buffer.from("hi 👍 café", "utf8").toString("base64")),
+      }),
+    ).resolves.toEqual(stringValue("hi 👍 café"));
+    // base64url uses -_ and drops padding; a Gmail body's `data` decodes back to text.
+    await expect(
+      run("prelude.string.to_base64url", { value: stringValue("subject?&=/+") }),
+    ).resolves.toEqual(stringValue(Buffer.from("subject?&=/+", "utf8").toString("base64url")));
+    await expect(
+      run("prelude.string.from_base64url", {
+        value: stringValue(Buffer.from("From: a@b\r\n\r\nhello", "utf8").toString("base64url")),
+      }),
+    ).resolves.toEqual(stringValue("From: a@b\r\n\r\nhello"));
+    // Percent-encoding one component: space is %20, unreserved survives, and decode is the inverse.
+    await expect(
+      run("prelude.string.url_encode", { value: stringValue("is:unread newer_than:1d") }),
+    ).resolves.toEqual(stringValue("is%3Aunread%20newer_than%3A1d"));
+    await expect(
+      run("prelude.string.url_decode", { value: stringValue("is%3Aunread%20newer_than%3A1d") }),
+    ).resolves.toEqual(stringValue("is:unread newer_than:1d"));
+    // Total: a malformed percent escape is left verbatim, never a throw.
+    await expect(
+      run("prelude.string.url_decode", { value: stringValue("100%off") }),
+    ).resolves.toEqual(stringValue("100%off"));
+  });
+
   test("sort_entries orders [key, value] tuples by key and is stable on equal keys", async () => {
     const entries: Value = {
       kind: "array",
