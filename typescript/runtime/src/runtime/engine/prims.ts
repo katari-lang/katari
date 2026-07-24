@@ -124,6 +124,19 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     const value = numberOf(field(argument, "value"));
     return { kind: "integer", value: Math.sign(value) * Math.round(Math.abs(value)) + 0 };
   },
+  "prelude.math.pow": (argument) => {
+    const base = field(argument, "base");
+    const exponent = field(argument, "exponent");
+    const result = numberOf(base) ** numberOf(exponent);
+    // A non-finite result (0 to a negative power is Infinity; a negative base to a fractional power is
+    // NaN) has no JSON representation, so fail fast rather than defer the break to a far-away encode.
+    if (!Number.isFinite(result)) throw new Error("math.pow is not finite");
+    // Preserve integer-ness when both operands are integers and the power came out whole (2^3 = 8),
+    // exactly as `numeric` does for the arithmetic operators; a negative / fractional power is a number.
+    const integral =
+      base.kind === "integer" && exponent.kind === "integer" && Number.isInteger(result);
+    return integral ? { kind: "integer", value: result } : { kind: "number", value: result };
+  },
   "prelude.string.to_string": async (argument, context) => {
     const value = field(argument, "value");
     // A blob-backed string renders as its content, like every other string-accepting prim.

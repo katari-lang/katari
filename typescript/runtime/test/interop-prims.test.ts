@@ -456,6 +456,19 @@ describe("prelude.math", () => {
     await expect(run("prelude.math.round", { value: num(-2.5) })).resolves.toEqual(int(-3));
     await expect(run("prelude.math.round", { value: num(-0.4) })).resolves.toEqual(int(0));
   });
+
+  test("pow raises base to exponent; integer when whole, number for a fractional / negative power", async () => {
+    // Both integer and the power whole: integer preserved (the backoff `2^n` case).
+    await expect(run("prelude.math.pow", { base: int(2), exponent: int(3) })).resolves.toEqual(int(8));
+    // A number operand keeps the result a number, even when the value is whole.
+    await expect(run("prelude.math.pow", { base: num(2), exponent: int(10) })).resolves.toEqual(num(1024));
+    // A negative exponent takes an integer base off the integers -> number.
+    await expect(run("prelude.math.pow", { base: int(2), exponent: int(-1) })).resolves.toEqual(num(0.5));
+    // A fractional exponent (a square root) is a number.
+    await expect(run("prelude.math.pow", { base: num(9), exponent: num(0.5) })).resolves.toEqual(num(3));
+    // A non-finite result fails fast rather than minting Infinity / NaN.
+    await expect(run("prelude.math.pow", { base: int(0), exponent: int(-1) })).rejects.toThrow(/finite/);
+  });
 });
 
 describe("prelude.reflection.get_metadata", () => {

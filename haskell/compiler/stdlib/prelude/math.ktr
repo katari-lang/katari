@@ -21,3 +21,9 @@ primitive agent ceil(value: number) -> integer
 
 @"The nearest integer (half away from zero, the grade-school rule — not banker's rounding)."
 primitive agent round(value: number) -> integer
+
+@"@base@ raised to the @exponent@ power. Yields a `number`: a negative or fractional @exponent@ takes an
+integer @base@ off the integers (`pow(base = 2, exponent = -1)` is 0.5), so the type cannot promise integer,
+exactly as `/` cannot — floor the result when an integer is wanted. A non-finite result (0 to a negative
+power, or a negative base to a fractional power) panics, like a zero divisor."
+primitive agent pow(base: number, exponent: number) -> number
