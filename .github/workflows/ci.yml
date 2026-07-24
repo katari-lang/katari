@@ -109,6 +109,12 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      # The published npm CLI (@katari-lang/cli) is a Node shim with no unit coverage: it packs, then
+      # resolves the stack-built binary out of a staged @katari-lang/cli-<platform> package and runs
+      # `katari --version` / `--help` through it. Reuses this job's already-built binary.
+      - name: npm CLI post-pack smoke
+        run: node scripts/smoke-npm-cli.mjs
+
   e2e:
     name: e2e
     # The wire-compatibility net between the Haskell compiler's IR/schema output and the TypeScript
