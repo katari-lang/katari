@@ -394,10 +394,16 @@ jobs:
         shell: bash
         env:
           OVSX_PAT: ${{ secrets.OVSX_TOKEN }}
+          PRERELEASE: ${{ needs.verify-versions.outputs.prerelease }}
         run: |
           VSIX=".vsix/katari-vscode-${{ steps.version.outputs.version }}-${{ matrix.platform }}.vsix"
           # --skip-duplicate keeps a re-run idempotent (a version+target already on Open VSX is a no-op).
-          npx --yes ovsx publish "$VSIX" --pat "$OVSX_PAT" --skip-duplicate
+          # A suffixed tag ships as an Open VSX pre-release so it never outranks the stable line.
+          FLAGS=(--skip-duplicate)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            FLAGS+=(--pre-release)
+          fi
+          npx --yes ovsx publish "$VSIX" --pat "$OVSX_PAT" "${FLAGS[@]}"
 
   publish-marketplace:
     needs: [verify-versions, package-vsix]
