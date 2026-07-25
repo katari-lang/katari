@@ -38,6 +38,8 @@ import Katari.Cli.Api
     listRuns,
     listSnapshots,
     oauthTargetDescription,
+    parseRunState,
+    runStateLabel,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, makeRuntimeClient, tryLoadNearestConfig, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
@@ -116,11 +118,11 @@ run options = do
       case target of
         TargetRuns -> do
           (raw, runs) <-
-            listRuns context.client context.projectId RunListQuery {state = options.state, limit = Just (fromMaybe 20 options.limit)}
+            listRuns context.client context.projectId RunListQuery {state = fmap parseRunState options.state, limit = Just (fromMaybe 20 options.limit)}
           emit options raw $
             table
               ["ID", "STATE", "AGENT", "NAME", "CREATED", "COMPLETED"]
-              [ [shortId row.id, row.state, row.qualifiedName, row.name, compactTimestamp row.createdAt, maybe "" compactTimestamp row.completedAt]
+              [ [shortId row.id, runStateLabel row.state, row.qualifiedName, row.name, compactTimestamp row.createdAt, maybe "" compactTimestamp row.completedAt]
                 | row <- runs
               ]
         TargetAgents -> do

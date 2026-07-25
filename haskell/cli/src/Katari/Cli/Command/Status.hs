@@ -16,7 +16,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations, oauthTargetDescription)
+import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations, oauthTargetDescription, runStateLabel)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -145,7 +145,7 @@ renderDetail detail = do
   field "Run" detail.id
   field "Name" detail.name
   field "Agent" detail.qualifiedName
-  field "State" detail.state
+  field "State" (runStateLabel detail.state)
   field "Snapshot" (fromMaybe "(head at start)" detail.snapshotId)
   field "Argument" (maybe "(none)" compactJson detail.argument)
   field "Result" (maybe "(none)" compactJson detail.result)

@@ -17,11 +17,13 @@ import Katari.Cli.Api
     EscalationView (..),
     RunDetail (..),
     RunListQuery (..),
+    RunState,
     RuntimeError (..),
     getRun,
     listEscalations,
     listRuns,
     oauthTargetDescription,
+    runStateLabel,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, renderPrefixError, resolveIdPrefix)
 import Katari.Cli.Output (OutputContext (..), compactTimestamp)
@@ -39,7 +41,7 @@ prefixResolutionLimit = 500
 
 -- | Resolve the run a command targets. @stateFilter@ narrows the interactive picker (e.g. @cancel@
 -- offers only running runs); an explicit prefix resolves against every state.
-resolveRunId :: Text -> RuntimeContext -> Maybe Text -> Maybe Text -> IO Text
+resolveRunId :: Text -> RuntimeContext -> Maybe Text -> Maybe RunState -> IO Text
 resolveRunId subcommand context given stateFilter = case given of
   Just candidate -> do
     -- A complete id resolves straight against the runtime's per-id endpoint, so a valid full id
@@ -56,7 +58,7 @@ resolveRunId subcommand context given stateFilter = case given of
     | context.output.interactive -> do
         (_, runs) <- listRuns context.client context.projectId RunListQuery {state = stateFilter, limit = Just pickerPageSize}
         case runs of
-          [] -> dieIn subcommand ("no " <> maybe "" (<> " ") stateFilter <> "runs to pick from")
+          [] -> dieIn subcommand ("no " <> maybe "" (\filtered -> runStateLabel filtered <> " ") stateFilter <> "runs to pick from")
           _ -> do
             chosen <- select context.output "Which run?" [(runLabel run, run.id) | run <- runs]
             case chosen of
@@ -77,7 +79,7 @@ runExists context candidate = do
 
 runLabel :: RunDetail -> Text
 runLabel run =
-  Text.intercalate "  " [Text.take 8 run.id, padState run.state, run.qualifiedName, compactTimestamp run.createdAt]
+  Text.intercalate "  " [Text.take 8 run.id, padState (runStateLabel run.state), run.qualifiedName, compactTimestamp run.createdAt]
   where
     -- The longest state is `cancelling` (10); padding keeps picker rows scannable.
     padState state = state <> Text.replicate (10 - Text.length state) " "

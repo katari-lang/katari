@@ -12,7 +12,7 @@ where
 
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Cli.Api (cancelRun)
+import Katari.Cli.Api (RunState (..), cancelRun)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (hint, printText, progress)
@@ -44,7 +44,7 @@ optionsParser =
 run :: Options -> IO ()
 run options = do
   context <- withRuntimeContext "cancel" options.global options.projectName
-  target <- resolveRunId "cancel" context options.runId (Just "running")
+  target <- resolveRunId "cancel" context options.runId (Just RunStateRunning)
   cancelRun context.client context.projectId target options.reason
   progress context.output ("Cancelling " <> target)
   hint context.output ("katari status " <> Text.take 8 target)

@@ -39,6 +39,7 @@ import Katari.Cli.Api
     EscalationView (..),
     RunEventView (..),
     RunEventsResponse (..),
+    RunState (..),
     RunView (..),
     StartRunRequest (..),
     answerEscalation,
@@ -220,20 +221,26 @@ waitForRun context runId = loop initialDelayMicroseconds Set.empty 0
       -- One events poll serves both needs: the new trace lines AND the run's lifecycle state — read from
       -- the same response, so the terminal turn's final events always print before the exit path runs.
       (state, seqNow) <- drainTrace lastSeq
+      -- The two live states share one poll-again body; the terminal states exit; an unrecognized state
+      -- is a loud version-skew failure rather than a silent keep-polling fall-through.
+      let keepPolling = do
+            (_, escalations) <- listEscalations context.client context.projectId
+            let mine = filter (\escalation -> escalation.runId == runId) escalations
+            notifiedNow <- foldM (surfaceEscalation context) notified mine
+            threadDelay delay
+            loop (min (delay * 2) ceilingMicroseconds) notifiedNow seqNow
       case state of
-        "done" -> do
+        RunStateDone -> do
           view <- getRun context.client context.projectId runId
           printJson (fromMaybe Null view.result)
-        "error" -> do
+        RunStateError -> do
           view <- getRun context.client context.projectId runId
           dieProgram "run" ("run failed: " <> fromMaybe "(no message)" view.errorMessage)
-        "cancelled" -> dieProgram "run" "run was cancelled"
-        _ -> do
-          (_, escalations) <- listEscalations context.client context.projectId
-          let mine = filter (\escalation -> escalation.runId == runId) escalations
-          notifiedNow <- foldM (surfaceEscalation context) notified mine
-          threadDelay delay
-          loop (min (delay * 2) ceilingMicroseconds) notifiedNow seqNow
+        RunStateCancelled -> dieProgram "run" "run was cancelled"
+        RunStateUnknown raw ->
+          dieProgram "run" ("run reached an unrecognized state '" <> raw <> "' (CLI/runtime version skew?)")
+        RunStateRunning -> keepPolling
+        RunStateCancelling -> keepPolling
 
     -- Print every trace event past `lastSeq`, following full pages until the tail is drained (the
     -- endpoint returns one server-capped page per call), and return the run's state as of the last page

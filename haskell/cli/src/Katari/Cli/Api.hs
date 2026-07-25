@@ -44,6 +44,9 @@ module Katari.Cli.Api
     getAgent,
 
     -- * Runs
+    RunState (..),
+    parseRunState,
+    runStateLabel,
     StartRunRequest (..),
     RunView (..),
     RunDetail (..),
@@ -92,7 +95,7 @@ where
 
 import Control.Exception (Exception, throwIO, try)
 import Control.Monad (unless)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
@@ -401,6 +404,50 @@ getAgent client projectId qualifiedName snapshotId = do
 -- Runs
 -- ===========================================================================
 
+-- | A run's lifecycle state, folded from the wire string once here so no surface re-derives it from a
+-- raw 'Text'. The runtime is the source of truth (@RunState@ in @typescript\/runtime\/src\/db\/tables\/
+-- execution.ts@: @running | cancelling | done | error | cancelled@, of which @done@ / @error@ /
+-- @cancelled@ are terminal). An unrecognized string becomes 'RunStateUnknown' rather than being dropped
+-- or defaulted, so a dispatch site (the @run@ wait loop) is forced to handle it — a state this CLI does
+-- not know can never silently fall into a keep-polling arm — while a render site can still show it.
+data RunState
+  = RunStateRunning
+  | RunStateCancelling
+  | RunStateDone
+  | RunStateError
+  | RunStateCancelled
+  | -- | A state string this CLI does not recognize (CLI/runtime version skew). It carries the raw text
+    -- so a render site prints it faithfully and a dispatch site can name it in a skew diagnostic.
+    RunStateUnknown Text
+  deriving stock (Show, Eq)
+
+-- | Fold a wire state string into 'RunState'. Total by construction: an unrecognized string lands on
+-- 'RunStateUnknown' instead of failing, so a run whose state this CLI does not know is still listable.
+parseRunState :: Text -> RunState
+parseRunState = \case
+  "running" -> RunStateRunning
+  "cancelling" -> RunStateCancelling
+  "done" -> RunStateDone
+  "error" -> RunStateError
+  "cancelled" -> RunStateCancelled
+  other -> RunStateUnknown other
+
+-- | The wire string for a 'RunState' — the inverse of 'parseRunState' on the known states, and the raw
+-- text an unknown state carried. Serves both display and the outbound @state@ list filter, so the two
+-- directions round-trip through one table.
+runStateLabel :: RunState -> Text
+runStateLabel = \case
+  RunStateRunning -> "running"
+  RunStateCancelling -> "cancelling"
+  RunStateDone -> "done"
+  RunStateError -> "error"
+  RunStateCancelled -> "cancelled"
+  RunStateUnknown other -> other
+
+-- | Decode a 'RunState' from its wire string, folding through 'parseRunState' at this one boundary.
+instance FromJSON RunState where
+  parseJSON = withText "RunState" (pure . parseRunState)
+
 -- | Start an agent run: the agent to run, an optional human label / pinned snapshot, and the run argument
 -- as JSON (the runtime lifts it into a value at its boundary).
 data StartRunRequest = StartRunRequest
@@ -428,11 +475,10 @@ newtype RunStarted = RunStarted {id :: Text}
 instance FromJSON RunStarted where
   parseJSON = withObject "RunStarted" $ \object' -> RunStarted <$> object' .: "id"
 
--- | The slice of a run's view the wait loop needs: the lifecycle @state@ (running / cancelling / done /
--- cancelled / error), the @result@ JSON (present once @done@), and the @errorMessage@ (present once
--- @error@). The other view fields are ignored.
+-- | The slice of a run's view the wait loop needs: the lifecycle 'RunState', the @result@ JSON (present
+-- once @done@), and the @errorMessage@ (present once @error@). The other view fields are ignored.
 data RunView = RunView
-  { state :: Text,
+  { state :: RunState,
     result :: Maybe Value,
     errorMessage :: Maybe Text
   }
@@ -448,7 +494,7 @@ data RunDetail = RunDetail
     name :: Text,
     qualifiedName :: Text,
     snapshotId :: Maybe Text,
-    state :: Text,
+    state :: RunState,
     argument :: Maybe Value,
     result :: Maybe Value,
     errorMessage :: Maybe Text,
@@ -473,9 +519,11 @@ instance FromJSON RunDetail where
       <*> object' .: "createdAt"
       <*> object' .:? "completedAt"
 
--- | Listing filters, mirroring the runtime's query parameters.
+-- | Listing filters, mirroring the runtime's query parameters. A 'RunState' filter (including an
+-- unknown one, which round-trips its raw text so the runtime rejects it exactly as before) is rendered
+-- back to its wire label at the request.
 data RunListQuery = RunListQuery
-  { state :: Maybe Text,
+  { state :: Maybe RunState,
     limit :: Maybe Int
   }
   deriving stock (Show)
@@ -504,7 +552,7 @@ listRuns client projectId query =
     ( "/projects/"
         <> projectId
         <> "/runs"
-        <> queryString [("state", query.state), ("limit", fmap (Text.pack . show) query.limit)]
+        <> queryString [("state", fmap runStateLabel query.state), ("limit", fmap (Text.pack . show) query.limit)]
     )
 
 -- | One event of a run's execution trace, as the events endpoint presents it — the slice the CLI
@@ -526,10 +574,10 @@ instance FromJSON RunEventView where
       <*> object' .: "summary"
       <*> object' .: "createdAt"
 
--- | One page of a run's execution trace. The run's lifecycle @state@ rides along so a watcher's single
--- poll both extends the trace and answers "is it still running".
+-- | One page of a run's execution trace. The run's lifecycle 'RunState' rides along so a watcher's
+-- single poll both extends the trace and answers "is it still running".
 data RunEventsResponse = RunEventsResponse
-  { state :: Text,
+  { state :: RunState,
     events :: List RunEventView
   }
   deriving stock (Show)
@@ -572,7 +620,7 @@ listRunEvents client projectId runId query after =
 
 -- | A run's whole (optionally filtered) trace, following pages until the tail is drained (the endpoint
 -- returns at most one page per call). Returns the run's state as of the last page.
-listAllRunEvents :: RuntimeClient -> Text -> Text -> RunEventsQuery -> IO (Text, List RunEventView)
+listAllRunEvents :: RuntimeClient -> Text -> Text -> RunEventsQuery -> IO (RunState, List RunEventView)
 listAllRunEvents client projectId runId query = go 0 []
   where
     go after collected = do
