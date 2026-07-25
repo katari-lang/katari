@@ -303,6 +303,10 @@ jobs:
           TAG: ${{ needs.verify-versions.outputs.tag }}
 
       - uses: docker/build-push-action@v6
+        env:
+          # The auto-uploaded buildx build-record artifact is a debug trace that has failed to
+          # download and broken finalize; the image itself is the release output, so skip it.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: typescript/runtime/Dockerfile
@@ -495,6 +499,10 @@ jobs:
       - name: Download every release asset
         uses: actions/download-artifact@v4
         with:
+          # Only the assets this workflow uploaded on purpose — the buildx build-record artifact
+          # docker/build-push-action auto-uploads is a debug trace, not a release asset, and has
+          # proven undownloadable enough to fail the whole job.
+          pattern: "{cli,lsp,vsix}-*"
           path: .assets
           merge-multiple: true
 
