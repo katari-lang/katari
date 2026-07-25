@@ -389,3 +389,46 @@ export const runEscalationsAudit = pgTable(
   },
   (table) => [primaryKey({ columns: [table.runId, table.escalationId] })],
 );
+
+/** The project's serial-domain FIFO: one row per `store.exclusive` the runtime serves as the root workspace,
+ *  keyed by the escalation. The runtime runs at most one critical section at a time across the WHOLE project
+ *  (the root domain's semantics), so this table IS the durable queue — a task cannot be a blind re-drive like
+ *  a `store.get` (re-running a completed critical section would double its writes), so the queue is the source
+ *  of truth for what has and has not yet run. Rows are inserted when an `exclusive` escalates to the root
+ *  (queued), stamped with a `task_delegation_id` when spawned as a `core` delegate (running), and deleted when
+ *  the task settles or its run is torn down. A row cascades with its run only on RUN DELETION (a run reaching a
+ *  terminal state does not delete its `runs` row); the api reactor explicitly clears a terminating run's rows. */
+export const runExclusiveTasks = pgTable(
+  "run_exclusive_tasks",
+  {
+    /** The `store.exclusive` escalation this queued task answers — its identity and the answer's correlation. */
+    escalationId: uuid("escalation_id").primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** The run this exclusive belongs to (its run instance's id) — the trace context, and the cascade owner on
+     *  run deletion. */
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    /** The delegation the answering `escalateAck` descends (the run's own delegation, the leg the escalate
+     *  arrived on) — stored so recovery can answer the escalation without reloading it into any answerable set. */
+    escalationDelegationId: uuid("escalation_delegation_id").notNull(),
+    /** The critical-section closure to run (`agent (value: null) -> unknown`), sealed at rest. Needed to spawn a
+     *  still-QUEUED task on recovery; a running task resumes from its durable `core` frame, not from this. */
+    task: jsonb("task").$type<Value>().notNull(),
+    /** The `core` delegate that runs the task once spawned; `null` while queued. Its presence ⟺ running, so
+     *  recovery re-registers a running task's routing but never re-spawns it (no double execution). */
+    taskDelegationId: uuid("task_delegation_id"),
+    /** The FIFO order — a bigserial, so the queue replays in arrival order after a restart (the `run_events.seq`
+     *  / `outbox.ordinal` pattern), never `created_at` (which ties within a commit). */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Recovery reads the project's queue in arrival order (`where project_id = ? order by seq`); the cascade on
+    // run delete finds a run's rows without a table scan.
+    index("run_exclusive_tasks_project_id_seq_idx").on(table.projectId, table.seq),
+    index("run_exclusive_tasks_run_id_idx").on(table.runId),
+  ],
+);

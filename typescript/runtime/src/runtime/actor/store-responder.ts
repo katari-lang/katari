@@ -35,6 +35,13 @@ const SET_REQUEST = "prelude.store.set";
 const DELETE_REQUEST = "prelude.store.delete";
 const LIST_REQUEST = "prelude.store.list";
 
+/** The compiled name `store.exclusive` escalates under — the SERIAL DOMAIN request. Unlike the four KV
+ *  operations above it is not answered by reading rows: the runtime serves it as the OUTERMOST serial domain
+ *  (the root workspace), running its `task` closure as a critical section of a project-wide durable FIFO (see
+ *  the ApiReactor). Named here beside `isStoreRequest` so every site that recognises a runtime-served store
+ *  request reads the same set. */
+export const EXCLUSIVE_REQUEST = "prelude.store.exclusive";
+
 /** The `prelude.store` result constructors (`prelude/store.ktr` declares them). */
 const FOUND_CTOR = createAgentName("prelude.store.found");
 const ABSENT_CTOR = createAgentName("prelude.store.absent");
@@ -53,6 +60,14 @@ export function isStoreRequest(request: string): boolean {
     request === DELETE_REQUEST ||
     request === LIST_REQUEST
   );
+}
+
+/** Whether a request name is `store.exclusive` — the serial-domain request the runtime serves as the root
+ *  workspace (a project-wide durable FIFO), distinct from the four KV operations `isStoreRequest` matches.
+ *  Named here so the api reactor's dispatch and the user-facing filter (`escalation-filter`) both recognise
+ *  it as a runtime-served request rather than an operator question. */
+export function isExclusiveRequest(request: string): boolean {
+  return request === EXCLUSIVE_REQUEST;
 }
 
 /** Compute the answer to one store request against the durable rows: `get` reads (`found` / `absent`),

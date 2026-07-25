@@ -23,6 +23,7 @@ import type {
   PersistedCapabilityRoute,
   PersistedDelegation,
   PersistedEscalation,
+  PersistedExclusiveTask,
   PersistedExternalCallRow,
   PersistedRun,
   PersistedRunEscalationAudit,
@@ -49,8 +50,25 @@ interface StoredRun extends PersistedRun {
   completedAt: Date | null;
 }
 
+/** A stored serial-domain task tagged with the monotonic `seq` the DB assigns via its `bigserial` — the FIFO
+ *  order, so the twin replays the queue in the same arrival order production does (not incidental Map order). */
+interface StoredExclusiveTask extends PersistedExclusiveTask {
+  seq: number;
+}
+
+/** Deep-copy a payload crossing the write boundary — the twin's stand-in for the DB's value serialization.
+ *  A stored row must NOT share structure with the live engine objects: a thread row's `payload` IS the warm
+ *  thread object, and `sealForStorage` is a structural no-op for a secret-free payload (it returns the same
+ *  reference), so without this copy a later warm turn — possibly one whose commit FAILS and is rolled back —
+ *  would mutate "durable" rows retroactively, and the twin would stop witnessing production (Postgres
+ *  serializes by value at every commit, so no warm mutation can ever reach a committed row). */
+function atRest<T>(value: T): T {
+  return structuredClone(value);
+}
+
 /** The Map-backed row CRUD — one Map per logical table, keyed as the DB is. Payloads arrive already
- *  sealed (the shared logic owns the seal boundary), so what these maps hold is the at-rest form. */
+ *  sealed (the shared logic owns the seal boundary), so what these maps hold is the at-rest form — each
+ *  write passing through `atRest`, the twin's serialization boundary. */
 class MapRowStore implements RowStore {
   readonly envelopes = new Map<InstanceId, PersistedInstanceEnvelope>();
   readonly coreRows = new Map<InstanceId, PersistedCoreInstance>();
@@ -63,6 +81,10 @@ class MapRowStore implements RowStore {
   readonly escalations = new Map<EscalationId, PersistedEscalation>();
   readonly runs = new Map<InstanceId, StoredRun>();
   readonly audits: PersistedRunEscalationAudit[] = [];
+  /** The serial-domain FIFO, keyed by escalation and tagged with the monotonic `seq` the DB `bigserial`
+   *  assigns — so `exclusiveTasks` replays in the same arrival order production does. */
+  readonly exclusiveTaskRows = new Map<EscalationId, StoredExclusiveTask>();
+  private nextExclusiveSeq = 0;
   /** Each undrained outbox row tagged with the monotonic `ordinal` the DB assigns via its `bigserial`. A
    *  `Map` already iterates in insertion order, but tagging + sorting on read makes the replay order the SAME
    *  explicit concept production replays by — not an incidental Map property — so the twin cannot silently
@@ -75,7 +97,10 @@ class MapRowStore implements RowStore {
     // Merge only the contract's mutable field into an existing row (see `RowStore.putInstance`), so an
     // immutable column the DB would preserve cannot silently change in the twin.
     const existing = this.envelopes.get(row.id);
-    this.envelopes.set(row.id, existing === undefined ? row : { ...existing, status: row.status });
+    this.envelopes.set(
+      row.id,
+      existing === undefined ? atRest(row) : { ...existing, status: row.status },
+    );
   }
 
   async deleteInstance(id: InstanceId): Promise<void> {
@@ -102,10 +127,14 @@ class MapRowStore implements RowStore {
       if (row.raiser === id) this.escalations.delete(escalation);
     }
     // A run IS its permanent instance (`runs.id` FK), so dropping it cascades the run record and,
-    // transitively through the runs FK, the run's audit and journal rows — exactly the DB's edges.
+    // transitively through the runs FK, the run's audit, journal, and serial-domain queue rows — exactly the
+    // DB's edges (a run reaching a terminal state keeps its `runs` row, so this fires only on run DELETION).
     this.runs.delete(id);
     for (let index = this.audits.length - 1; index >= 0; index -= 1) {
       if (this.audits[index]?.run === id) this.audits.splice(index, 1);
+    }
+    for (const [escalation, task] of this.exclusiveTaskRows) {
+      if (task.run === id) this.exclusiveTaskRows.delete(escalation);
     }
     for (let index = this.journal.length - 1; index >= 0; index -= 1) {
       if (this.journal[index]?.run === id) this.journal.splice(index, 1);
@@ -117,7 +146,7 @@ class MapRowStore implements RowStore {
     const existing = this.delegations.get(row.delegation);
     this.delegations.set(
       row.delegation,
-      existing === undefined ? row : { ...existing, state: row.state },
+      existing === undefined ? atRest(row) : { ...existing, state: row.state },
     );
   }
 
@@ -138,7 +167,7 @@ class MapRowStore implements RowStore {
         `escalations_raiser_instance_id FK: raiser instance ${row.raiser} absent for escalation ${row.escalation}`,
       );
     }
-    this.escalations.set(row.escalation, row);
+    this.escalations.set(row.escalation, atRest(row));
   }
 
   async deleteEscalation(id: EscalationId): Promise<void> {
@@ -152,30 +181,31 @@ class MapRowStore implements RowStore {
     this.coreRows.set(
       row.instanceId,
       existing === undefined
-        ? row
+        ? atRest(row)
         : {
             ...existing,
-            engineState: row.engineState,
-            ambientGenerics: row.ambientGenerics ?? existing.ambientGenerics,
+            engineState: atRest(row.engineState),
+            ambientGenerics: atRest(row.ambientGenerics) ?? existing.ambientGenerics,
           },
     );
   }
 
   async replaceThreads(instance: InstanceId, rows: PersistedThread[]): Promise<void> {
-    this.threadRows.set(instance, rows);
+    // The copy here is LOAD-BEARING: a thread row's `payload` is the warm engine's live thread object.
+    this.threadRows.set(instance, atRest(rows));
   }
 
   async putExternalCall(row: PersistedExternalCallRow): Promise<void> {
-    this.externalRows.set(row.instanceId, row);
+    this.externalRows.set(row.instanceId, atRest(row));
   }
 
   async putRoute(route: PersistedCapabilityRoute): Promise<void> {
     // Insert-if-absent: the route is immutable, so a re-register is a no-op (see `RowStore.putRoute`).
-    if (!this.routes.has(route.token)) this.routes.set(route.token, route);
+    if (!this.routes.has(route.token)) this.routes.set(route.token, atRest(route));
   }
 
   async putScope(row: PersistedScope): Promise<void> {
-    this.scopeRows.set(row.scopeId, row);
+    this.scopeRows.set(row.scopeId, atRest(row));
   }
 
   async deleteScope(scopeId: number): Promise<void> {
@@ -187,7 +217,7 @@ class MapRowStore implements RowStore {
     const existing = this.blobRows.get(row.blobId);
     this.blobRows.set(
       row.blobId,
-      existing === undefined ? row : { ...existing, ownerInstanceId: row.ownerInstanceId },
+      existing === undefined ? atRest(row) : { ...existing, ownerInstanceId: row.ownerInstanceId },
     );
   }
 
@@ -198,7 +228,7 @@ class MapRowStore implements RowStore {
   async insertRun(row: PersistedRun): Promise<void> {
     if (this.runs.has(row.run)) return;
     this.runs.set(row.run, {
-      ...row,
+      ...atRest(row),
       state: "running",
       result: null,
       errorMessage: null,
@@ -211,7 +241,7 @@ class MapRowStore implements RowStore {
     const stored = this.runs.get(run);
     if (stored === undefined) return;
     stored.state = patch.state;
-    stored.result = patch.result;
+    stored.result = atRest(patch.result);
     stored.errorMessage = patch.errorMessage;
     if (patch.completedAt !== undefined) stored.completedAt = patch.completedAt;
     if (patch.cancelReason !== undefined) stored.cancelReason = patch.cancelReason;
@@ -221,7 +251,36 @@ class MapRowStore implements RowStore {
     const exists = this.audits.some(
       (audit) => audit.run === row.run && audit.escalation === row.escalation,
     );
-    if (!exists) this.audits.push(row);
+    if (!exists) this.audits.push(atRest(row));
+  }
+
+  async insertExclusiveTask(row: PersistedExclusiveTask): Promise<void> {
+    // Insert-if-absent (the escalation is the key): a replayed enqueue turn is a no-op, and the `seq` is
+    // stamped once, in arrival order — the twin's stand-in for the DB `bigserial`.
+    if (this.exclusiveTaskRows.has(row.escalation)) return;
+    this.exclusiveTaskRows.set(row.escalation, { ...atRest(row), seq: this.nextExclusiveSeq });
+    this.nextExclusiveSeq += 1;
+  }
+
+  async updateExclusiveTaskDelegation(
+    escalation: EscalationId,
+    taskDelegation: DelegationId,
+  ): Promise<void> {
+    // Merge only `taskDelegation` into an existing row (the queued → running transition); a patch for an
+    // unknown escalation is a no-op, like the DB's `where` matching nothing.
+    const existing = this.exclusiveTaskRows.get(escalation);
+    if (existing !== undefined) existing.taskDelegation = taskDelegation;
+  }
+
+  async deleteExclusiveTask(escalation: EscalationId): Promise<void> {
+    this.exclusiveTaskRows.delete(escalation);
+  }
+
+  async exclusiveTasks(): Promise<PersistedExclusiveTask[]> {
+    // Replay in `seq` order — the same monotonic arrival order the DB `bigserial` gives.
+    return [...this.exclusiveTaskRows.values()]
+      .sort((left, right) => left.seq - right.seq)
+      .map(({ seq: _seq, ...task }) => task);
   }
 
   async deleteOutbox(seq: OutboxSeq): Promise<void> {
@@ -462,5 +521,14 @@ export class StoringPersistence implements Persistence {
    *  project holds zero). */
   escalationCount(): number {
     return this.store.escalations.size;
+  }
+
+  /** Test helper: the serial-domain FIFO in arrival (`seq`) order, tasks unsealed — for asserting the queue's
+   *  running / queued shape (a running task carries a `taskDelegation`) survives a recovery in order, and that
+   *  a completed task's row is gone (no double spawn). */
+  exclusiveTasks(): StoredExclusiveTask[] {
+    return [...this.store.exclusiveTaskRows.values()]
+      .sort((left, right) => left.seq - right.seq)
+      .map((task) => ({ ...task, task: unsealFromStorage(task.task) }));
   }
 }

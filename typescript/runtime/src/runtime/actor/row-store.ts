@@ -28,6 +28,7 @@ import type {
   PersistedCapabilityRoute,
   PersistedDelegation,
   PersistedEscalation,
+  PersistedExclusiveTask,
   PersistedExternalCall,
   PersistedExternalCallRow,
   PersistedRun,
@@ -127,6 +128,18 @@ export interface RowStore {
   updateRun(run: InstanceId, patch: RunOutcomePatch): Promise<void>;
   /** Append an answered-escalation audit row; a replayed answer turn is a no-op (same key). */
   insertAudit(row: PersistedRunEscalationAudit): Promise<void>;
+  /** Enqueue a serial-domain task; a replayed insert is a no-op (the escalation is the key). The `seq`
+   *  bigserial is assigned here (arrival order). */
+  insertExclusiveTask(row: PersistedExclusiveTask): Promise<void>;
+  /** Stamp a queued task's `core` delegate (queued → running). Only `task_delegation_id` is mutable; a patch
+   *  for an unknown escalation is a no-op. */
+  updateExclusiveTaskDelegation(
+    escalation: EscalationId,
+    taskDelegation: DelegationId,
+  ): Promise<void>;
+  deleteExclusiveTask(escalation: EscalationId): Promise<void>;
+  /** The project's serial-domain FIFO in arrival (`seq`) order. */
+  exclusiveTasks(): Promise<PersistedExclusiveTask[]>;
   deleteOutbox(seq: OutboxSeq): Promise<void>;
   insertOutbox(rows: OutboxMessage[]): Promise<void>;
   appendJournal(events: ExternalEvent[]): Promise<void>;
@@ -199,6 +212,14 @@ export function storeTx(store: RowStore): PersistenceTx {
           question: sealForStorage(audit.question),
           answer: sealForStorage(audit.answer),
         }),
+      // The critical-section closure seals like any at-rest Value (it captures a scope that may hold private
+      // vars — the closure references it, and the referenced scope seals in `scopes` too, but the closure is
+      // sealed here uniformly with every other value-bearing payload).
+      putExclusiveTask: (task) =>
+        store.insertExclusiveTask({ ...task, task: sealForStorage(task.task) }),
+      setExclusiveTaskDelegation: (escalation, taskDelegation) =>
+        store.updateExclusiveTaskDelegation(escalation, taskDelegation),
+      deleteExclusiveTask: (escalation) => store.deleteExclusiveTask(escalation),
     },
     external: {
       // The ONE seal rule for external calls: the whole extension document seals, wherever its private
@@ -295,6 +316,14 @@ export function storeLoader(store: RowStore): Loader {
         unsealEscalations(await store.openEscalations({ to: "api" })).filter((row) =>
           isStoreRequest(row.request),
         ),
+      // The serial-domain FIFO, unsealed and ordered. NOT derived from the open `store.exclusive` escalations
+      // (a completed critical section must never be blind re-driven like a `store.get`): this durable queue is
+      // the source of truth for what has and has not run.
+      exclusiveTasks: async () =>
+        (await store.exclusiveTasks()).map((row) => ({
+          ...row,
+          task: unsealFromStorage(row.task),
+        })),
     },
     external: {
       instances: async (reactor) => {

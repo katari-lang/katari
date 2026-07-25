@@ -18,6 +18,7 @@ import {
   outbox,
   runEscalationsAudit,
   runEvents,
+  runExclusiveTasks,
   runs,
 } from "../../db/tables/execution.js";
 import type {
@@ -256,6 +257,62 @@ class DrizzleRowStore implements RowStore {
         answer: row.answer,
       })
       .onConflictDoNothing();
+  }
+
+  async insertExclusiveTask(row: Parameters<RowStore["insertExclusiveTask"]>[0]): Promise<void> {
+    await this.executor
+      .insert(runExclusiveTasks)
+      .values({
+        escalationId: row.escalation,
+        projectId: this.projectId,
+        runId: row.run,
+        escalationDelegationId: row.escalationDelegation,
+        task: row.task,
+        taskDelegationId: row.taskDelegation,
+      })
+      // A replayed enqueue turn is a no-op (the escalation is the key); the `seq` bigserial rides the insert.
+      .onConflictDoNothing();
+  }
+
+  async updateExclusiveTaskDelegation(
+    escalation: EscalationId,
+    taskDelegation: DelegationId,
+  ): Promise<void> {
+    await this.executor
+      .update(runExclusiveTasks)
+      .set({ taskDelegationId: taskDelegation })
+      .where(
+        and(
+          eq(runExclusiveTasks.projectId, this.projectId),
+          eq(runExclusiveTasks.escalationId, escalation),
+        ),
+      );
+  }
+
+  async deleteExclusiveTask(escalation: EscalationId): Promise<void> {
+    await this.executor
+      .delete(runExclusiveTasks)
+      .where(
+        and(
+          eq(runExclusiveTasks.projectId, this.projectId),
+          eq(runExclusiveTasks.escalationId, escalation),
+        ),
+      );
+  }
+
+  async exclusiveTasks(): ReturnType<RowStore["exclusiveTasks"]> {
+    const rows = await this.executor
+      .select()
+      .from(runExclusiveTasks)
+      .where(eq(runExclusiveTasks.projectId, this.projectId))
+      .orderBy(asc(runExclusiveTasks.seq));
+    return rows.map((row) => ({
+      escalation: row.escalationId as EscalationId,
+      run: row.runId as InstanceId,
+      escalationDelegation: row.escalationDelegationId as DelegationId,
+      task: row.task,
+      taskDelegation: row.taskDelegationId as DelegationId | null,
+    }));
   }
 
   async deleteOutbox(seq: OutboxSeq): Promise<void> {

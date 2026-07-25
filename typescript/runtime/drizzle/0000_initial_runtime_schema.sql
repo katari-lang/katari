@@ -123,6 +123,17 @@ CREATE TABLE "run_escalations_audit" (
 	CONSTRAINT "run_escalations_audit_run_id_escalation_id_pk" PRIMARY KEY("run_id","escalation_id")
 );
 --> statement-breakpoint
+CREATE TABLE "run_exclusive_tasks" (
+	"escalation_id" uuid PRIMARY KEY NOT NULL,
+	"project_id" uuid NOT NULL,
+	"run_id" uuid NOT NULL,
+	"escalation_delegation_id" uuid NOT NULL,
+	"task" jsonb NOT NULL,
+	"task_delegation_id" uuid,
+	"seq" bigserial NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "run_events" (
 	"seq" bigserial PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -229,6 +240,8 @@ ALTER TABLE "run_events" ADD CONSTRAINT "run_events_run_id_runs_id_fk" FOREIGN K
 ALTER TABLE "runs" ADD CONSTRAINT "runs_id_instances_id_fk" FOREIGN KEY ("id") REFERENCES "public"."instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_exclusive_tasks" ADD CONSTRAINT "run_exclusive_tasks_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_exclusive_tasks" ADD CONSTRAINT "run_exclusive_tasks_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_clients" ADD CONSTRAINT "oauth_clients_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "env_entries" ADD CONSTRAINT "env_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "modules" ADD CONSTRAINT "modules_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -246,6 +259,8 @@ CREATE INDEX "instances_delegation_id_idx" ON "instances" USING btree ("delegati
 CREATE INDEX "outbox_project_id_ordinal_idx" ON "outbox" USING btree ("project_id","ordinal");--> statement-breakpoint
 CREATE INDEX "run_events_run_id_seq_idx" ON "run_events" USING btree ("run_id","seq");--> statement-breakpoint
 CREATE INDEX "runs_project_id_idx" ON "runs" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "run_exclusive_tasks_project_id_seq_idx" ON "run_exclusive_tasks" USING btree ("project_id","seq");--> statement-breakpoint
+CREATE INDEX "run_exclusive_tasks_run_id_idx" ON "run_exclusive_tasks" USING btree ("run_id");--> statement-breakpoint
 CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");
 -- caller instance, its delegation, the callee instance that delegation summoned -- into one commit.
 -- No fixed per-table insert order satisfies both edges of the cycle across reactors, so the references

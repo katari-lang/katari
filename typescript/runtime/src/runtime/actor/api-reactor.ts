@@ -21,9 +21,10 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { THROW_REQUEST } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
-import { isUserFacingRequest } from "../escalation-filter.js";
+import { isFailureRequest, isUserFacingRequest } from "../escalation-filter.js";
 import { type ExternalEvent, escalateValue, type ReactorName } from "../event/types.js";
 import {
   type BlobId,
@@ -41,6 +42,7 @@ import type { Value } from "../value/types.js";
 import { messageOf } from "./failure.js";
 import type {
   Loader,
+  PersistedExclusiveTask,
   PersistedRun,
   PersistedRunEscalationAudit,
   PersistedRunOutcome,
@@ -48,7 +50,17 @@ import type {
 } from "./persistence.js";
 import { type AckContext, Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
-import { answerStoreRequest, isStoreRequest, type StoreRows } from "./store-responder.js";
+import {
+  answerStoreRequest,
+  isExclusiveRequest,
+  isStoreRequest,
+  type StoreRows,
+} from "./store-responder.js";
+
+/** The parameter record every serial-domain task is called with: `store.exclusive`'s `task` is typed
+ *  `agent (value: null) -> unknown`, so it receives `{ value: null }` (the same by-name parameter convention
+ *  region's continuation `{ value: nursery }` and fork's `{ input: ... }` use). */
+const EXCLUSIVE_TASK_INPUT: Value = { kind: "record", fields: { value: { kind: "null" } } };
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
 export interface OpenEscalation {
@@ -103,6 +115,40 @@ export class ApiReactor extends Reactor {
   private pendingRunOutcomes: PersistedRunOutcome[] = [];
   private pendingAudits: PersistedRunEscalationAudit[] = [];
 
+  // ─── serial domain (root-served `store.exclusive`) ────────────────────────────────────────────────
+  //
+  // The runtime serves the OUTERMOST serial domain (the root workspace) when no `serialize` / `workspace`
+  // handler in the program catches an `exclusive`: it runs the task closure as a critical section of a
+  // PROJECT-WIDE durable FIFO — at most one task runs at a time across the whole project (the root domain's
+  // permanent semantics; a per-workspace domain is a future additive API). A task is a `core` delegate ISSUED
+  // BY THE API ROOT (not the run instance), so its own `get` / `set` / `delete` / `list` escalations reach the
+  // api root and are machine-answered by the store branch unchanged (routing is by delegation id). The durable
+  // `run_exclusive_tasks` queue is the source of truth — a completed critical section must never be blind
+  // re-driven like a `store.get` (it would double its writes) — so recovery rebuilds this warm state from it.
+
+  /** The FIFO, keyed by escalation, in arrival order (a Map iterates insertion order, which IS the order;
+   *  reloaded in `seq` order). Every queued / running task lives here until it settles or its run is torn down. */
+  private readonly exclusiveTasks: Map<EscalationId, PersistedExclusiveTask> = new Map();
+  /** The running task's `core` delegate → its escalation, so an ack / failure escalate reaching the api root is
+   *  recognised as a TASK's (its run is NOT settled by it) rather than a run's. */
+  private readonly exclusiveTaskDelegations: Map<DelegationId, EscalationId> = new Map();
+  /** Task delegates whose run has terminated: we terminated the task (a child of the api root, outside the
+   *  run's subtree), so its eventual ack — a raced `delegateAck`, or the teardown `terminateAck` — is dropped
+   *  (the escalation is never answered; its raiser cascaded with the run). */
+  private readonly abandonedTaskDelegations: Set<DelegationId> = new Set();
+  /** Task delegates whose ack `onDelegateAck` / `onTerminateAck` handled this batch — consulted (and cleared)
+   *  by `afterCommit` to suppress the run-promise settlement its kind would otherwise trigger (a task's result
+   *  is not the run's terminal). Warm-only; a poisoned batch clears it, and a replay re-adds it. */
+  private readonly settledTaskAcks: Set<DelegationId> = new Set();
+  /** This turn's `run_exclusive_tasks` writes, flushed by `persist`: enqueues (as queued), queued → running
+   *  delegate stamps, and deletes. Disjoint per escalation within a turn (an enqueue never also deletes). */
+  private pendingExclusiveInserts: PersistedExclusiveTask[] = [];
+  private pendingExclusiveDelegations: Array<{
+    escalation: EscalationId;
+    taskDelegation: DelegationId;
+  }> = [];
+  private pendingExclusiveDeletes: EscalationId[] = [];
+
   constructor(
     private readonly apiRootId: InstanceId,
     private readonly commands: CommandSink,
@@ -140,9 +186,19 @@ export class ApiReactor extends Reactor {
     for (const run of this.pendingRunStarts) await tx.api.putRun(run);
     for (const outcome of this.pendingRunOutcomes) await tx.api.setRunOutcome(outcome);
     for (const audit of this.pendingAudits) await tx.api.putRunEscalationAudit(audit);
+    // The serial-domain queue, in dependency order: enqueue rows first (as queued), then the queued → running
+    // delegate stamps (an enqueue that spawned in the same turn writes the row then stamps it), then deletes.
+    for (const task of this.pendingExclusiveInserts) await tx.api.putExclusiveTask(task);
+    for (const update of this.pendingExclusiveDelegations)
+      await tx.api.setExclusiveTaskDelegation(update.escalation, update.taskDelegation);
+    for (const escalation of this.pendingExclusiveDeletes)
+      await tx.api.deleteExclusiveTask(escalation);
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
     this.pendingAudits = [];
+    this.pendingExclusiveInserts = [];
+    this.pendingExclusiveDelegations = [];
+    this.pendingExclusiveDeletes = [];
   }
 
   /** Drop the api root's durable-derived warm state so reactivation rebuilds it (idempotent — safe on a cold
@@ -158,6 +214,14 @@ export class ApiReactor extends Reactor {
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
     this.pendingAudits = [];
+    // Serial-domain warm state is rebuilt from `run_exclusive_tasks` on the next `load`, so drop it here.
+    this.exclusiveTasks.clear();
+    this.exclusiveTaskDelegations.clear();
+    this.abandonedTaskDelegations.clear();
+    this.settledTaskAcks.clear();
+    this.pendingExclusiveInserts = [];
+    this.pendingExclusiveDelegations = [];
+    this.pendingExclusiveDeletes = [];
   }
 
   /** Register a freshly uploaded file as an api-root-owned blob (its bytes already in the BlobStore). Owned
@@ -301,6 +365,7 @@ export class ApiReactor extends Reactor {
         errorMessage: message,
       });
       this.send({ kind: "terminate", delegation, from: this.name, to: "core", run });
+      this.cleanupExclusiveTasksForRun(run);
     });
   }
 
@@ -347,29 +412,44 @@ export class ApiReactor extends Reactor {
     request: QualifiedName;
     argument: Value | null;
   }): void {
-    void answerStoreRequest(this.storeRows, this.projectId, escalate.request, escalate.argument)
-      .then((value) =>
-        this.commands.enqueue(() => {
-          this.send({
-            kind: "escalateAck",
-            delegation: escalate.delegation,
-            escalation: escalate.escalation,
-            value,
-            from: this.name,
-            to: "core",
-            run: escalate.run,
-          });
-        }),
-      )
-      .catch((error) =>
-        this.commands.enqueue(() => this.failRunForStore(escalate, messageOf(error))),
-      );
+    // Only a ROWS failure takes the failure arm (the two-handler `then`): a rejection of the reply
+    // command's own commit must NOT fail the run — nothing durable was lost (the open escalation row
+    // survives), and the reactivation's machine-answer re-drive replays this same answer. Both commands
+    // swallow their commit rejection for that same reason: recovery re-drives from durable state (a rows
+    // failure that recurs on the re-drive re-enqueues the failure arm, so a genuine failure still lands).
+    void answerStoreRequest(
+      this.storeRows,
+      this.projectId,
+      escalate.request,
+      escalate.argument,
+    ).then(
+      (value) =>
+        this.commands
+          .enqueue(() => {
+            this.send({
+              kind: "escalateAck",
+              delegation: escalate.delegation,
+              escalation: escalate.escalation,
+              value,
+              from: this.name,
+              to: "core",
+              run: escalate.run,
+            });
+          })
+          .catch(() => undefined),
+      (error: unknown) =>
+        this.commands
+          .enqueue(() => this.failRunForStore(escalate, messageOf(error)))
+          .catch(() => undefined),
+    );
   }
 
   /** Fail a run whose machine-answered store request could not be served (a durable-rows failure): retire the
    *  run delegation, record the `error` outcome, and terminate the still-suspended root — exactly the failure
    *  path a panic reaching the run root takes. Guarded by the retirement so a run already terminal (a racing
-   *  cancel) is untouched. */
+   *  cancel) is untouched. A store request raised by a serial-domain TASK arrives on the TASK delegation, not
+   *  the run's — retiring that leg would strand the run root suspended under its exclusive — so it reroutes
+   *  through the task failure path, which fails the run on its own delegation and tears the section down. */
   private failRunForStore(
     escalate: {
       delegation: DelegationId;
@@ -379,6 +459,14 @@ export class ApiReactor extends Reactor {
     },
     message: string,
   ): void {
+    const taskEscalation = this.exclusiveTaskDelegations.get(escalate.delegation);
+    if (taskEscalation !== undefined) {
+      const task = this.exclusiveTasks.get(taskEscalation);
+      if (task !== undefined) {
+        this.failExclusiveTask(task, `store: ${message}`, escalate.argument);
+      }
+      return;
+    }
     if (!this.retireDelegation(escalate.delegation)) return;
     this.pendingRunOutcomes.push({
       run: escalate.run,
@@ -399,6 +487,159 @@ export class ApiReactor extends Reactor {
       to: "core",
       run: escalate.run,
     });
+    this.cleanupExclusiveTasksForRun(escalate.run);
+  }
+
+  // ─── the serial domain's mechanics (enqueue / spawn / settle / teardown) ─────────────────────────
+
+  /** Enqueue one `store.exclusive` on the project FIFO (warm map + the durable row, committed atomically with
+   *  consuming the escalate that raised it) and, when no critical section holds the domain, spawn it in this
+   *  same turn — so the enqueue and its spawn are one atomic unit. Idempotent per escalation (the replay
+   *  backstop; a re-set would also lose a stamped running delegation). */
+  private enqueueExclusiveTask(task: PersistedExclusiveTask): void {
+    if (this.exclusiveTasks.has(task.escalation)) return;
+    this.exclusiveTasks.set(task.escalation, task);
+    this.pendingExclusiveInserts.push(task);
+    this.spawnExclusiveHeadIfIdle();
+  }
+
+  /** Spawn the FIFO head if the domain is idle. ONE critical section at a time, project-wide: a RUNNING task
+   *  (the delegation mapping) blocks it, and so does a terminated task whose teardown has not yet confirmed
+   *  (the abandoned set — the fence that keeps a dying section's tail from overlapping the next). The fence is
+   *  warm-only: after a crash the queue spawns its head immediately, accepting the (already-terminated,
+   *  storeless) zombie teardown window rather than parking the domain on an ack that may never replay. */
+  private spawnExclusiveHeadIfIdle(): void {
+    if (this.exclusiveTaskDelegations.size > 0 || this.abandonedTaskDelegations.size > 0) return;
+    const head = this.exclusiveTasks.values().next();
+    if (head.done === true) return;
+    this.spawnExclusiveTask(head.value);
+  }
+
+  /** Spawn one queued task: resolve its closure through the ONE value→target dispatch every runtime-decided
+   *  callable uses, stamp the minted delegation onto the durable row (queued → running, atomic with the
+   *  `delegate`), and summon it. The delegate is ISSUED BY THE API ROOT, not the run instance — the run's
+   *  single live delegation (`liveRunDelegation`) must stay the run's own — while `run` stays the task's run,
+   *  so its events belong to that run's trace and its instance carries that ambient. The task instance's
+   *  caller reactor is `api`, so its own store escalations flow back here and machine-answer unchanged
+   *  (routing is by delegation id). A non-callable task fails its run (the dispatch error is the failure). */
+  private spawnExclusiveTask(task: PersistedExclusiveTask): void {
+    const dispatched = dispatchCallable(task.task, EXCLUSIVE_TASK_INPUT);
+    if ("error" in dispatched) {
+      this.failExclusiveTask(task, `the task is ${dispatched.error}`, null);
+      return;
+    }
+    const delegation = newDelegationId();
+    task.taskDelegation = delegation;
+    this.exclusiveTaskDelegations.set(delegation, task.escalation);
+    this.pendingExclusiveDelegations.push({
+      escalation: task.escalation,
+      taskDelegation: delegation,
+    });
+    this.send(
+      {
+        kind: "delegate",
+        delegation,
+        target: dispatched.target,
+        argument: dispatched.argument,
+        ...(dispatched.generics !== undefined ? { generics: dispatched.generics } : {}),
+        from: this.name,
+        to: dispatched.to,
+        run: task.run,
+      },
+      this.apiRootId,
+    );
+  }
+
+  /** A task settled with a result: answer its exclusive down the run's own delegation (the raiser resumes
+   *  from its suspension) and delete the queue row — atomically with consuming the task's `delegateAck` — then
+   *  let the next section take the domain. The result's resources reown onto the RUN instance (the answer
+   *  descends into the run's world and must outlive this commit; the run's eventual deletion reclaims them). */
+  private completeExclusiveTask(
+    escalation: EscalationId,
+    event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+  ): void {
+    this.exclusiveTaskDelegations.delete(event.delegation);
+    const task = this.exclusiveTasks.get(escalation);
+    if (task === undefined) {
+      // Torn down while the ack was in flight (a racing run terminal already cleaned the row): the answer
+      // has no waiter, so only the domain moves on.
+      this.spawnExclusiveHeadIfIdle();
+      return;
+    }
+    this.reownIncoming(event.value, task.run);
+    this.exclusiveTasks.delete(escalation);
+    this.pendingExclusiveDeletes.push(escalation);
+    this.send({
+      kind: "escalateAck",
+      delegation: task.escalationDelegation,
+      escalation,
+      value: event.value,
+      from: this.name,
+      to: "core",
+      run: task.run,
+    });
+    this.spawnExclusiveHeadIfIdle();
+  }
+
+  /** A task failed (its panic / throw escalated, its closure was not callable, or it nested an exclusive):
+   *  fail ITS OWN RUN through the run delegation its exclusive escalated on — the same terminal
+   *  `failRunForStore` takes, sticky if the run already reached one — and tear down every task of that run.
+   *  Other runs' sections are untouched; the next queued one proceeds. */
+  private failExclusiveTask(
+    task: PersistedExclusiveTask,
+    message: string,
+    question: Value | null,
+  ): void {
+    if (this.retireDelegation(task.escalationDelegation)) {
+      this.pendingRunOutcomes.push({
+        run: task.run,
+        state: "error",
+        result: null,
+        errorMessage: `store.exclusive: ${message}`,
+      });
+      this.pendingAudits.push({
+        run: task.run,
+        escalation: task.escalation,
+        question,
+        answer: null,
+      });
+      this.send({
+        kind: "terminate",
+        delegation: task.escalationDelegation,
+        from: this.name,
+        to: "core",
+        run: task.run,
+      });
+    }
+    this.cleanupExclusiveTasksForRun(task.run);
+  }
+
+  /** Drop every serial-domain task belonging to a run that reached a terminal: delete the queue rows, and
+   *  TERMINATE a running task's delegate (the task is the api root's child, OUTSIDE the run's own teardown
+   *  cascade, so nothing else reclaims it). The caller-side delegation row is retired NOW (the `failRun`
+   *  pattern): a post-recovery ack for it then finds no row (`settled` stays false) and can never record an
+   *  outcome over the run's durable terminal. Idempotent; ends by offering the domain to the next run's head. */
+  private cleanupExclusiveTasksForRun(run: InstanceId): void {
+    let removed = false;
+    for (const [escalation, task] of this.exclusiveTasks) {
+      if (task.run !== run) continue;
+      this.exclusiveTasks.delete(escalation);
+      this.pendingExclusiveDeletes.push(escalation);
+      removed = true;
+      if (task.taskDelegation !== null) {
+        this.exclusiveTaskDelegations.delete(task.taskDelegation);
+        this.retireDelegation(task.taskDelegation);
+        this.abandonedTaskDelegations.add(task.taskDelegation);
+        this.send({
+          kind: "terminate",
+          delegation: task.taskDelegation,
+          from: this.name,
+          to: "core",
+          run,
+        });
+      }
+    }
+    if (removed) this.spawnExclusiveHeadIfIdle();
   }
 
   /** The run-root escalations currently awaiting an answer. */
@@ -443,6 +684,20 @@ export class ApiReactor extends Reactor {
         argument: open.argument,
       });
     }
+    // The serial-domain FIFO — the durable queue is the SoT, deliberately NOT a blind re-drive of open
+    // `store.exclusive` escalation rows (unlike a store answer, re-running a completed critical section would
+    // double its writes; a completed task's row is gone, so it can never re-spawn). A RUNNING task (its
+    // `taskDelegation` stamped) only re-registers its routing — its instance resumes from its durable core
+    // frames; a still-QUEUED head spawns on a fresh command turn once the reload completes.
+    for (const task of await loader.api.exclusiveTasks()) {
+      this.exclusiveTasks.set(task.escalation, task);
+      if (task.taskDelegation !== null) {
+        this.exclusiveTaskDelegations.set(task.taskDelegation, task.escalation);
+      }
+    }
+    if (this.exclusiveTasks.size > 0) {
+      void this.commands.enqueue(() => this.spawnExclusiveHeadIfIdle());
+    }
   }
 
   // ─── reactions (a run's delegateAck / escalate / terminateAck reaching the management root) ──────
@@ -453,18 +708,37 @@ export class ApiReactor extends Reactor {
   // outcome inherits the same sticky-terminal protection (a second ack for an already-terminal run records
   // nothing). The in-process result promise settles strictly post-commit in `afterCommit`.
 
-  /** A run finished: reown its result onto the run's own instance and record the `done` outcome (only if
-   *  the retirement fired — a no-op means the run already reached a terminal state, whose durable outcome
-   *  stands). */
+  /** A delegateAck reaching the api reactor is EITHER a run's terminal or a serial-domain TASK's settlement —
+   *  told apart by the delegation, never the run (a task's ack carries its run's trace stamp too). A task's
+   *  ack answers its exclusive and spawns the next section; it must NOT record the run outcome `done` (the run
+   *  is alive, suspended under the exclusive). A RUN's ack reowns its result onto the run's own instance and
+   *  records the `done` outcome (only if the retirement fired — a no-op means the run already reached a
+   *  terminal state, whose durable outcome stands). */
   protected onDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
     context: AckContext,
   ): void {
+    const taskEscalation = this.exclusiveTaskDelegations.get(event.delegation);
+    if (taskEscalation !== undefined) {
+      this.settledTaskAcks.add(event.delegation);
+      this.completeExclusiveTask(taskEscalation, event);
+      return;
+    }
+    if (this.abandonedTaskDelegations.delete(event.delegation)) {
+      // A torn-down task raced its terminate with a result: the outcome is discarded (its run is already
+      // terminal, its exclusive never answered), but the value's resources land on the run instance — an
+      // owner whose deletion reclaims them — rather than dangling in transit. The teardown fence lifts.
+      this.settledTaskAcks.add(event.delegation);
+      this.reownIncoming(event.value, event.run);
+      this.spawnExclusiveHeadIfIdle();
+      return;
+    }
     // The same two-step reown a core caller does for a sub-call — keeps a run that returns a closure / blob
     // alive instead of dropping it (the core root released it to in-transit as it retired). The owner is the
     // *run instance* (permanent, = event.run), not the project root: the result's resources live exactly as
     // long as the run's record, so a future run deletion reclaims them by cascade.
     this.reownIncoming(event.value, event.run);
+    this.cleanupExclusiveTasksForRun(event.run);
     if (context.settled) {
       this.pendingRunOutcomes.push({
         run: event.run,
@@ -475,13 +749,25 @@ export class ApiReactor extends Reactor {
     }
   }
 
-  /** A run's cancel cascade confirmed: record `cancelled` only if the retirement fired. A *failed* run already
-   *  recorded `error` and retired its delegation, so the terminateAck from tearing down its still-suspended root
-   *  is a sticky no-op here — it must NOT clobber the durable `error` outcome with `cancelled`. */
+  /** A terminateAck reaching the api reactor: a serial-domain TASK's teardown confirmation is only the fence
+   *  lifting (never the run's `cancelled` — the task was terminated because its run already reached a
+   *  terminal, whose durable outcome stands). A RUN's cancel cascade records `cancelled` only if the
+   *  retirement fired: a *failed* run already recorded `error` and retired its delegation, so the terminateAck
+   *  from tearing down its still-suspended root is a sticky no-op here — it must NOT clobber the durable
+   *  `error` outcome with `cancelled`. */
   protected onTerminateAck(
     event: Extract<ExternalEvent, { kind: "terminateAck" }>,
     context: AckContext,
   ): void {
+    if (
+      this.exclusiveTaskDelegations.delete(event.delegation) ||
+      this.abandonedTaskDelegations.delete(event.delegation)
+    ) {
+      this.settledTaskAcks.add(event.delegation);
+      this.spawnExclusiveHeadIfIdle();
+      return;
+    }
+    this.cleanupExclusiveTasksForRun(event.run);
     if (context.settled) {
       this.pendingRunOutcomes.push({
         run: event.run,
@@ -520,6 +806,52 @@ export class ApiReactor extends Reactor {
       });
       return;
     }
+    if (ask.kind === "request" && isExclusiveRequest(ask.request)) {
+      // The runtime IS the outermost serial domain (the root workspace): an unhandled `store.exclusive` is
+      // SERVED here — its task runs as a critical section of the project-wide durable FIFO — never surfaced
+      // as an operator question. Reown the carried task closure onto the RUN instance first (the raiser
+      // released it on send and now suspends across an arbitrary FIFO wait — the same landing a user-facing
+      // question's resources get), so its captured scopes have a durable owner whatever branch runs below.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, event.run);
+      const raisingTask = this.exclusiveTaskDelegations.get(event.delegation);
+      if (raisingTask !== undefined) {
+        // A critical section performed a NESTED exclusive: it would queue behind its own raiser and
+        // deadlock the whole domain, so fail the raising task (which fails its run) instead of enqueueing.
+        const outer = this.exclusiveTasks.get(raisingTask);
+        if (outer !== undefined) {
+          this.failExclusiveTask(
+            outer,
+            "a critical section performed a nested exclusive — the task's row is fixed to the store operations",
+            escalateValue(ask),
+          );
+        }
+        return;
+      }
+      // A dead leg: the run (or an abandoned task) reached its terminal while this escalate was in flight,
+      // so nothing waits for the answer — do not enqueue (the reowned resources reclaim with the run).
+      if (!this.hasLiveDelegation(event.delegation)) return;
+      const task = ask.argument?.kind === "record" ? ask.argument.fields.task : undefined;
+      if (task === undefined) {
+        this.failRunForStore(
+          {
+            delegation: event.delegation,
+            run: event.run,
+            escalation: event.escalation,
+            argument: ask.argument,
+          },
+          "exclusive: the task is missing (compiler/runtime drift — a bug)",
+        );
+        return;
+      }
+      this.enqueueExclusiveTask({
+        escalation: event.escalation,
+        run: event.run,
+        escalationDelegation: event.delegation,
+        task,
+        taskDelegation: null,
+      });
+      return;
+    }
     if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
       // Reown the question's resources onto the run's instance: the raiser released them on send, and the
       // run now holds the open escalation across an arbitrary wait for the user's answer.
@@ -531,6 +863,17 @@ export class ApiReactor extends Reactor {
         request: ask.request,
         argument: ask.argument,
       };
+      return;
+    }
+    // A failure raised by a serial-domain TASK (its panic / throw escalates under the TASK delegation, not the
+    // run's): fail the task's OWN run through the run delegation its exclusive escalated on — never suspend or
+    // touch any other run's world — and let the next queued section proceed.
+    const failingTask = this.exclusiveTaskDelegations.get(event.delegation);
+    if (failingTask !== undefined) {
+      const task = this.exclusiveTasks.get(failingTask);
+      if (task !== undefined) {
+        this.failExclusiveTask(task, escalationErrorMessage(event), escalateValue(ask));
+      }
       return;
     }
     // Fail the run: retire its delegation (the policy retirement the base exposes). A second escalate reaching
@@ -560,18 +903,25 @@ export class ApiReactor extends Reactor {
         to: "core",
         run: event.run,
       });
+      // The failing run's serial-domain tasks (queued or running) die with it; the next run's head proceeds.
+      this.cleanupExclusiveTasksForRun(event.run);
     }
   }
 
   /** Settle the in-process result promise (the non-SoT notification hook) strictly after the turn is durably
    *  committed — a finished run resolves, a cancelled run rejects with `RunCancelledError`, a failed run
-   *  rejects with its error. An open escalation's `escalate` settles nothing (the run stays suspended). */
+   *  rejects with its error. An open escalation's `escalate` settles nothing (the run stays suspended), and a
+   *  serial-domain TASK's ack settles nothing either (the hooks marked it — its run is alive under the
+   *  exclusive, or already settled by its own terminal event): without that guard a task's result would
+   *  resolve a live run's promise with the wrong value. */
   afterCommit(event: ExternalEvent): void {
     switch (event.kind) {
       case "delegateAck":
+        if (this.settledTaskAcks.delete(event.delegation)) break;
         this.settleRun(event.run, { value: event.value });
         break;
       case "terminateAck":
+        if (this.settledTaskAcks.delete(event.delegation)) break;
         this.settleRun(event.run, {
           error: new RunCancelledError(this.cancelReasons[event.run]),
         });
@@ -599,10 +949,13 @@ export class ApiReactor extends Reactor {
   }
 }
 
-/** Whether an escalation reaching the run root *fails* the run (rather than opening a user-facing request):
- *  a control escape (next / break / return crossing the root) or a panic. */
+/** Whether an escalation reaching the run root *fails* the run: a control escape (next / break / return
+ *  crossing the root) or a failure channel (panic / throw / replay-interrupted). NOT the complement of
+ *  user-facing: a runtime-SERVED request (a machine-answered `prelude.store.*` read / write, a root-served
+ *  `store.exclusive`) is neither user-facing nor a failure — the run continues under it, so it must never
+ *  settle the in-process result promise. */
 function isRunFailure(event: Extract<ExternalEvent, { kind: "escalate" }>): boolean {
-  return !(event.ask.kind === "request" && isUserFacingRequest(event.ask.request));
+  return event.ask.kind !== "request" || isFailureRequest(event.ask.request);
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic reports

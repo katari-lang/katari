@@ -117,6 +117,20 @@ export interface PersistedRunEscalationAudit {
   answer: Value | null;
 }
 
+/** One queued / running `store.exclusive` task (`run_exclusive_tasks` row) — the project's durable serial-
+ *  domain FIFO, keyed by the exclusive escalation. `escalationDelegation` is the leg the answering
+ *  `escalateAck` descends (the run's delegation), `task` the critical-section closure to spawn, and
+ *  `taskDelegation` the `core` delegate once spawned (`null` while queued — its presence ⟺ running). The `seq`
+ *  bigserial (the FIFO order) is assigned by the store on insert and never travels in this write shape; the
+ *  loader returns the rows already ordered by it. */
+export interface PersistedExclusiveTask {
+  escalation: EscalationId;
+  run: InstanceId;
+  escalationDelegation: DelegationId;
+  task: Value;
+  taskDelegation: DelegationId | null;
+}
+
 /** The envelope half every reloaded in-flight call shares (the join key + routing): `delegation` keys the
  *  reactor's warm call, `instance` is the call's own id (the issuer on its replies), `caller` is the
  *  reactor to reply to, and `run` is the run the call belongs to (its trace context). */
@@ -190,6 +204,16 @@ export interface ApiTx {
   setRunOutcome(outcome: PersistedRunOutcome): Promise<void>;
   /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
   putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
+  /** Enqueue a `store.exclusive` task on the project's serial-domain FIFO — in the same commit as consuming the
+   *  escalate that raised it (and, when the FIFO was empty, its spawning `delegate`). Idempotent on replay (the
+   *  escalation is the key). */
+  putExclusiveTask(task: PersistedExclusiveTask): Promise<void>;
+  /** Mark a queued task RUNNING by stamping the `core` delegate that now runs it — in the same commit as that
+   *  `delegate` (the queued → running transition). */
+  setExclusiveTaskDelegation(escalation: EscalationId, taskDelegation: DelegationId): Promise<void>;
+  /** Drop a task from the FIFO — in the same commit as answering it (its `escalateAck`) or tearing it down with
+   *  its run. Idempotent. */
+  deleteExclusiveTask(escalation: EscalationId): Promise<void>;
 }
 
 /** Every call reactor's *own-data* write surface — the one `external_call_instances` extension row per
@@ -283,6 +307,10 @@ export interface ApiLoader {
    *  last-write-wins), so the run resumes. Disjoint from `answerableEscalations` (the user-facing filter
    *  excludes store), so the two together cover every open `to = api` row exactly once. */
   machineAnswerableEscalations(): Promise<PersistedOpenEscalation[]>;
+  /** The project's serial-domain FIFO, in arrival (`seq`) order — the api reactor rebuilds its exclusive queue
+   *  from these on reactivation. A running task (its `taskDelegation` set) is re-registered but never re-spawned
+   *  (it resumes from its durable `core` frame); a still-queued head is spawned once the running one settles. */
+  exclusiveTasks(): Promise<PersistedExclusiveTask[]>;
 }
 
 /** Every call reactor's own-data read surface: its in-flight calls (envelope ⋈ `external_call_instances`,
@@ -357,6 +385,9 @@ export const NO_OP_TX: PersistenceTx = {
     async putRun() {},
     async setRunOutcome() {},
     async putRunEscalationAudit() {},
+    async putExclusiveTask() {},
+    async setExclusiveTaskDelegation() {},
+    async deleteExclusiveTask() {},
   },
   external: {
     async putCall() {},
@@ -401,6 +432,9 @@ const EMPTY_LOADER: Loader = {
       return [];
     },
     async machineAnswerableEscalations() {
+      return [];
+    },
+    async exclusiveTasks() {
       return [];
     },
   },
