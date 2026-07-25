@@ -7,7 +7,8 @@ This project is under development phase, so you can change anything; architectur
 CURRENT Phase:
 
 - branch main: prototyping (completed)
-- ★ branch scrap-and-build: refactoring and redesigning the codebase based on the prototype, and implementing the core features of Katari runtime and compiler (in progress)
+- branch scrap-and-build: the refactor/redesign rebuild of the runtime and compiler (completed, merged into main)
+- ★ branch main: preparing the v0.1.0 release — working through the publish-audit follow-ups across language, stdlib, runtime, tooling, and docs (see `docs/2026-07-25-v0.1.0-milestones.md`)
 
 ## Overview
 
