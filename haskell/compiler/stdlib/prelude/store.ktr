@@ -21,7 +21,9 @@
 //     CALLING workspace's decision, which is the whole inversion.
 //   - SERIAL DOMAIN (`serialize` / `exclusive` / `modify`): a FIFO for read-modify-writes, installed
 //     for the extent of one dispatch (a turn), so the concurrently dispatched tools of one turn
-//     cannot interleave their critical sections.
+//     cannot interleave their critical sections. The OUTERMOST domain is the runtime itself: an
+//     `exclusive` no program handler catches is served at the PROJECT ROOT — one durable,
+//     project-wide FIFO across every run, exactly as the outermost bare `get` is project-root access.
 //
 // SHARED knowledge — data several workspaces must read — never travels by path escape: there is
 // deliberately no `..`. It is a NAMED request (a `read_digest`, a `read_layer`) served by a handler
@@ -183,8 +185,9 @@ first move; a scope around the perform site does not travel with the task, but t
 own enclosing workspaces do apply). And an `exclusive` binds to the NEAREST enclosing `serialize`:
 an inner domain shadows an outer one BY DESIGN — the nearest domain is the semantics, exactly as
 the nearest workspace is. The task's answer crosses the handler as `unknown`; narrow it back with a
-`match` (or `json.validate[T]`). Only a `serialize` (or `workspace`) handler installed inside the program
-can answer it: the runtime never machine-answers `exclusive`, so install a domain around the perform."
+`match` (or `json.validate[T]`). A `serialize` (or `workspace`) in the program is the nearest domain;
+with NONE installed above the perform, the RUNTIME serves it as the outermost domain — the task runs
+at the PROJECT ROOT (project-root keys) in one durable, project-wide FIFO across every run."
 request exclusive(
   @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
 ) -> unknown
@@ -200,7 +203,8 @@ turns themselves already serialize at the desk's own sequential handler; tasks r
 store operations from THIS install site, so installing under the workspace is what routes a
 critical section's keys into it. An `exclusive` performed below a nested install binds to the
 NEAREST domain (inner shadows outer, by design); one performed with no install above it rides to
-the run root, where nothing serves it — keep the per-dispatch install discipline."
+the run root, where the RUNTIME serves it as the project-wide root domain — project-root keys, every
+run's sections in ONE durable FIFO — so install a domain when a narrower extent is the semantics."
 agent serialize[R, effect E](
   @"Runs with `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, exclusive},
 ) -> R with E | get | set | delete | list {
