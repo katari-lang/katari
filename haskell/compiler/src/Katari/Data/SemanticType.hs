@@ -1,5 +1,6 @@
 module Katari.Data.SemanticType where
 
+import Data.List (nub)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set (Set)
@@ -8,6 +9,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.Id (GenericId (..))
+import Katari.Data.ModuleName (lastSegment)
 import Katari.Data.QualifiedName (QualifiedName (..))
 
 -- $setup
@@ -94,7 +96,40 @@ data SemanticGenericArgument where
 --   * an agent whose argument is not an object (e.g. a generic) has no surface form and renders
 --     its argument as @...T@.
 renderSemanticType :: SemanticType -> Text
-renderSemanticType = render False
+renderSemanticType = renderSemanticTypeWith BareName
+
+-- | How a data-type / request name is spelled when rendered. Every surface renders in exactly the same
+-- surface syntax; only the leaf name differs.
+data NameStyle
+  = -- | Bare (@credential@) — the type printer's long-standing default, used by every error message,
+    -- hover, doc, and completion surface. Kept so those surfaces render byte-for-byte as before.
+    BareName
+  | -- | Module-qualified by the module's LAST SEGMENT (@gmail.credential@) — the escalation report's
+    -- convention, matching the prefix-import alias users write in source. Two modules' same-named
+    -- requests / data types stay distinguishable (so a union of them no longer reads as a bare
+    -- @credential | credential@), which is also what makes deduplicating a rendered union sound.
+    QualifiedByLastSegment
+  deriving stock (Eq, Show)
+
+-- | Spell a data-type / request name in the given 'NameStyle'.
+renderStyledName :: NameStyle -> QualifiedName -> Text
+renderStyledName style qualifiedName = case style of
+  BareName -> qualifiedName.name
+  QualifiedByLastSegment -> lastSegment qualifiedName.moduleName <> "." <> qualifiedName.name
+
+-- | Drop duplicate rendered union leaves — but only once names carry their module qualifier. Bare
+-- rendering leaves the list untouched so error messages stay byte-stable and two same-named leaves from
+-- different modules are never conflated; with the qualifier present, equal strings genuinely denote the
+-- same request / data type, so collapsing them is sound (order-preserving).
+dedupUnionLeaves :: NameStyle -> List Text -> List Text
+dedupUnionLeaves style = case style of
+  BareName -> id
+  QualifiedByLastSegment -> nub
+
+-- | 'renderSemanticType' with an explicit 'NameStyle'; the escalation report renders nested names
+-- 'QualifiedByLastSegment' so they read like the source.
+renderSemanticTypeWith :: NameStyle -> SemanticType -> Text
+renderSemanticTypeWith style = render False
   where
     render parenthesise semanticType = case semanticType of
       SemanticTypeNever -> "never"
@@ -110,7 +145,7 @@ renderSemanticType = render False
       SemanticTypeRecord SemanticTypeUnknown -> "record"
       SemanticTypeRecord valueType -> "record[" <> render False valueType <> "]"
       SemanticTypeTuple itemTypes -> "[" <> Text.intercalate ", " (render False <$> itemTypes) <> "]"
-      SemanticTypeData qualifiedName arguments -> qualifiedName.name <> renderSemanticGenericArguments arguments
+      SemanticTypeData qualifiedName arguments -> renderStyledName style qualifiedName <> renderSemanticGenericArgumentsWith style arguments
       SemanticTypeGeneric genericId -> "T" <> renderGenericId genericId
       SemanticTypeObject fields ->
         "{" <> Text.intercalate ", " [fieldName <> renderField field | (fieldName, field) <- Map.toAscList fields] <> "}"
@@ -119,12 +154,12 @@ renderSemanticType = render False
               SemanticTypeObject parameters ->
                 Text.intercalate ", " [parameterName <> renderField parameter | (parameterName, parameter) <- Map.toAscList parameters]
               other -> "..." <> render False other
-            withText = case renderSemanticEffectLeaves effect of
+            withText = case dedupUnionLeaves style (renderSemanticEffectLeavesWith style effect) of
               [] -> "" -- NOTE: a pure agent elides the `with` clause
               effectLeaves -> " with " <> Text.intercalate " | " effectLeaves
          in parenthesiseIf parenthesise $ "agent(" <> parameterText <> ") -> " <> render True returnType <> withText
       SemanticTypeUnion branches ->
-        parenthesiseIf parenthesise $ Text.intercalate " | " (render True <$> branches)
+        parenthesiseIf parenthesise $ Text.intercalate " | " (dedupUnionLeaves style (render True <$> branches))
       SemanticTypeAttribute baseType attribute ->
         let attributeText = case attribute of
               SemanticAttributeUnion _ -> "(" <> renderSemanticAttribute attribute <> ")"
@@ -158,25 +193,35 @@ renderStringLiteralType value = "\"" <> Text.concatMap escape value <> "\""
 -- | Render an effect in the surface @with@ syntax: @pure@, @all@, @req[T]@, @a | b@,
 -- @{...base, req[T]}@.
 renderSemanticEffect :: SemanticEffect -> Text
-renderSemanticEffect effect = case renderSemanticEffectLeaves effect of
+renderSemanticEffect = renderSemanticEffectWith BareName
+
+-- | 'renderSemanticEffect' with an explicit 'NameStyle'. The leaves are deduplicated at the join (a
+-- no-op under 'BareName'), so a qualified union of two modules' same-named requests reads once.
+renderSemanticEffectWith :: NameStyle -> SemanticEffect -> Text
+renderSemanticEffectWith style effect = case dedupUnionLeaves style (renderSemanticEffectLeavesWith style effect) of
   [] -> "pure"
   effectLeaves -> Text.intercalate " | " effectLeaves
 
 -- | The effect rendered as union leaves; empty means pure (the caller decides whether to spell it
--- @pure@ or elide a @with@ clause).
+-- @pure@ or elide a @with@ clause). Leaves are NOT deduplicated here — a caller that joins them applies
+-- 'dedupUnionLeaves' at the join, keeping this a faithful flattening.
 renderSemanticEffectLeaves :: SemanticEffect -> List Text
-renderSemanticEffectLeaves = \case
+renderSemanticEffectLeaves = renderSemanticEffectLeavesWith BareName
+
+-- | 'renderSemanticEffectLeaves' with an explicit 'NameStyle'.
+renderSemanticEffectLeavesWith :: NameStyle -> SemanticEffect -> List Text
+renderSemanticEffectLeavesWith style = \case
   SemanticEffectPure -> []
   SemanticEffectAny -> ["all"]
   SemanticEffectIo -> ["io"]
-  SemanticEffectRequest qualifiedName arguments -> [qualifiedName.name <> renderSemanticGenericArguments arguments]
+  SemanticEffectRequest qualifiedName arguments -> [renderStyledName style qualifiedName <> renderSemanticGenericArgumentsWith style arguments]
   SemanticEffectGeneric genericId -> ["E" <> renderGenericId genericId]
-  SemanticEffectUnion effects -> concatMap renderSemanticEffectLeaves effects
+  SemanticEffectUnion effects -> concatMap (renderSemanticEffectLeavesWith style) effects
   SemanticEffectOverwrite baseEffect lacksNames overwrites ->
     [ "{..."
-        <> renderSemanticEffect baseEffect
+        <> renderSemanticEffectWith style baseEffect
         <> (if Set.null lacksNames then "" else " lacks " <> Text.intercalate " | " ((.name) <$> Set.toList lacksNames))
-        <> Text.concat [", " <> qualifiedName.name <> renderSemanticGenericArguments arguments | (qualifiedName, arguments) <- overwrites]
+        <> Text.concat [", " <> renderStyledName style qualifiedName <> renderSemanticGenericArgumentsWith style arguments | (qualifiedName, arguments) <- overwrites]
         <> "}"
     ]
 
@@ -188,19 +233,27 @@ renderSemanticAttribute = \case
   SemanticAttributeUnion attributes -> Text.intercalate " | " (renderSemanticAttribute <$> attributes)
 
 renderSemanticGenericArgument :: SemanticGenericArgument -> Text
-renderSemanticGenericArgument = \case
-  SemanticGenericArgumentType semanticType -> renderSemanticType semanticType
-  SemanticGenericArgumentEffect effect -> renderSemanticEffect effect
+renderSemanticGenericArgument = renderSemanticGenericArgumentWith BareName
+
+-- | 'renderSemanticGenericArgument' with an explicit 'NameStyle'.
+renderSemanticGenericArgumentWith :: NameStyle -> SemanticGenericArgument -> Text
+renderSemanticGenericArgumentWith style = \case
+  SemanticGenericArgumentType semanticType -> renderSemanticTypeWith style semanticType
+  SemanticGenericArgumentEffect effect -> renderSemanticEffectWith style effect
   SemanticGenericArgumentAttribute attribute -> renderSemanticAttribute attribute
 
 -- | The bracketed argument list of a data type or request; empty renders to nothing. A single
 -- argument renders positionally (@foo[integer]@); several are labelled by parameter name
 -- (@foo[A: integer, B: string]@) since the map carries no declaration order.
 renderSemanticGenericArguments :: Map Text SemanticGenericArgument -> Text
-renderSemanticGenericArguments arguments = case Map.toAscList arguments of
+renderSemanticGenericArguments = renderSemanticGenericArgumentsWith BareName
+
+-- | 'renderSemanticGenericArguments' with an explicit 'NameStyle'.
+renderSemanticGenericArgumentsWith :: NameStyle -> Map Text SemanticGenericArgument -> Text
+renderSemanticGenericArgumentsWith style arguments = case Map.toAscList arguments of
   [] -> ""
-  [(_, argument)] -> "[" <> renderSemanticGenericArgument argument <> "]"
-  manyArguments -> "[" <> Text.intercalate ", " [argumentName <> ": " <> renderSemanticGenericArgument argument | (argumentName, argument) <- manyArguments] <> "]"
+  [(_, argument)] -> "[" <> renderSemanticGenericArgumentWith style argument <> "]"
+  manyArguments -> "[" <> Text.intercalate ", " [argumentName <> ": " <> renderSemanticGenericArgumentWith style argument | (argumentName, argument) <- manyArguments] <> "]"
 
 renderGenericId :: GenericId -> Text
 renderGenericId (GenericId _ index) = Text.pack (show index)

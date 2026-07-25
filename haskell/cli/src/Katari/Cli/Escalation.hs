@@ -15,7 +15,7 @@ module Katari.Cli.Escalation
   )
 where
 
-import Data.List (sort)
+import Data.List (nub, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -25,16 +25,18 @@ import Katari.Data.AST (AgentDeclaration (..), Declaration (..), Module (..), Ph
 import Katari.Data.ModuleName (ModuleName, lastSegment, renderModuleName)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SemanticType
-  ( SemanticEffect (..),
+  ( NameStyle (..),
+    SemanticEffect (..),
     SemanticType (..),
-    renderSemanticEffectLeaves,
-    renderSemanticGenericArguments,
+    renderSemanticEffectLeavesWith,
+    renderSemanticGenericArgumentsWith,
   )
 
 -- | One entry point's residual effect row, split for the report into the requests that escalate (the
 -- interesting part — @prelude.throw[...]@, store ops, oauth, region requests, app-defined requests, …)
--- and whether plain @io@ rides along. @requests@ is module-prefixed (@store.get@, not a bare @get@) and
--- sorted, so the report reads in the same names as the source and does so deterministically.
+-- and whether plain @io@ rides along. @requests@ is module-prefixed (@store.get@, not a bare @get@),
+-- sorted, and deduplicated, so the report reads in the same names as the source and does so
+-- deterministically.
 data EntryPointReport = EntryPointReport
   { qualifiedName :: Text,
     requests :: List Text,
@@ -59,7 +61,7 @@ reportFor :: ModuleName -> AgentDeclaration Typed -> EntryPointReport
 reportFor moduleName agentDeclaration =
   EntryPointReport
     { qualifiedName = renderModuleName moduleName <> "." <> agentDeclaration.name,
-      requests = sort escalatingRequests,
+      requests = nub (sort escalatingRequests),
       io = escalatesIo
     }
   where
@@ -79,19 +81,22 @@ agentResidualEffect = \case
 -- | Split an effect row into (rendered escalating requests, has io). A request renders module-prefixed
 -- by its module's LAST SEGMENT — @store.get@, @prelude.throw@ — which is exactly the prefix-import
 -- alias users write in source (@prelude.store@ is imported as @store@), so the report reads in the same
--- names as the code and the docs; its generic arguments reuse the shared renderer so @[fatal_error]@
--- etc. match. A generic tail, @all@, or a @{...}@ overwrite falls back to the shared leaf renderer and
--- counts as a request (it is not plain io); only 'SemanticEffectIo' sets the io flag.
+-- names as the code and the docs. Its generic arguments render in the SAME 'QualifiedByLastSegment'
+-- style, so a nested request / data type carries its module too — @approve_async[gmail.credential |
+-- google_calendar.credential]@, not a conflated @credential | credential@ — and the shared renderer
+-- deduplicates the qualified union. A generic tail, @all@, or a @{...}@ overwrite falls back to the
+-- shared leaf renderer and counts as a request (it is not plain io); only 'SemanticEffectIo' sets the
+-- io flag.
 splitEscalations :: SemanticEffect -> (List Text, Bool)
 splitEscalations = \case
   SemanticEffectPure -> ([], False)
   SemanticEffectIo -> ([], True)
   SemanticEffectRequest requestName arguments ->
-    ([lastSegment requestName.moduleName <> "." <> requestName.name <> renderSemanticGenericArguments arguments], False)
+    ([lastSegment requestName.moduleName <> "." <> requestName.name <> renderSemanticGenericArgumentsWith QualifiedByLastSegment arguments], False)
   SemanticEffectUnion effects ->
     let parts = splitEscalations <$> effects
      in (concatMap fst parts, any snd parts)
-  other -> (renderSemanticEffectLeaves other, False)
+  other -> (renderSemanticEffectLeavesWith QualifiedByLastSegment other, False)
 
 -- | Render the whole section printed beneath @check@'s @OK@ line. Every entry point prints its
 -- qualified name and an @escalates:@ line; a row with no requests and no io reads @(nothing)@, a

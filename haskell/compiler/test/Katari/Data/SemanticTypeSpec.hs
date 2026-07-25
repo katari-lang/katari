@@ -47,6 +47,42 @@ spec = do
       renderSemanticType (SemanticTypeStringLiteral "a\n\"b\\")
         `shouldBe` "\"a\\n\\\"b\\\\\""
 
+  -- The escalation report renders nested names 'QualifiedByLastSegment' so two modules' same-named
+  -- requests / data types stay distinguishable, and deduplicates the resulting qualified union. The
+  -- 'BareName' surfaces (error messages, hover, docs) must stay byte-for-byte unchanged.
+  describe "renderSemanticType/Effect (NameStyle)" $ do
+    it "qualifies a union of two modules' same-named requests by last segment" $
+      renderSemanticEffectWith
+        QualifiedByLastSegment
+        (SemanticEffectUnion [SemanticEffectRequest gmailCredential mempty, SemanticEffectRequest calendarCredential mempty])
+        `shouldBe` "gmail.credential | google_calendar.credential"
+    it "leaves the same union bare (and hence conflated) under BareName — error messages are unchanged" $
+      renderSemanticEffect
+        (SemanticEffectUnion [SemanticEffectRequest gmailCredential mempty, SemanticEffectRequest calendarCredential mempty])
+        `shouldBe` "credential | credential"
+    it "deduplicates a genuinely repeated request in a qualified union" $
+      renderSemanticEffectWith
+        QualifiedByLastSegment
+        (SemanticEffectUnion [SemanticEffectRequest gmailCredential mempty, SemanticEffectRequest gmailCredential mempty])
+        `shouldBe` "gmail.credential"
+    it "does NOT deduplicate a repeated leaf under BareName — the bare surface stays byte-stable" $
+      renderSemanticEffect
+        (SemanticEffectUnion [SemanticEffectRequest gmailCredential mempty, SemanticEffectRequest gmailCredential mempty])
+        `shouldBe` "credential | credential"
+    it "qualifies and deduplicates a data-type union (a throw payload) too" $
+      renderSemanticTypeWith
+        QualifiedByLastSegment
+        (SemanticTypeUnion [SemanticTypeData gmailApiError mempty, SemanticTypeData calendarApiError mempty, SemanticTypeData gmailApiError mempty])
+        `shouldBe` "gmail.api_error | google_calendar.api_error"
+    it "carries the qualifier into a request's nested generic effect argument (the approve_async[E] shape)" $
+      renderSemanticEffectLeavesWith
+        QualifiedByLastSegment
+        ( SemanticEffectRequest
+            holdApprove
+            (Map.singleton "E" (SemanticGenericArgumentEffect (SemanticEffectUnion [SemanticEffectRequest gmailCredential mempty, SemanticEffectRequest calendarCredential mempty])))
+        )
+        `shouldBe` ["hold.approve_async[gmail.credential | google_calendar.credential]"]
+
   describe "renderTypeError" $ do
     it "includes the code and the rendered types" $
       renderTypeError
@@ -68,3 +104,20 @@ spec = do
 
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}
+
+-- Same short name (@credential@ / @api_error@) under different modules — the case the escalation report
+-- must keep distinguishable; the module names are multi-segment so the last-segment qualifier is exercised.
+gmailCredential :: QualifiedName
+gmailCredential = QualifiedName {moduleName = ModuleName "acme.gmail", name = "credential"}
+
+calendarCredential :: QualifiedName
+calendarCredential = QualifiedName {moduleName = ModuleName "acme.google_calendar", name = "credential"}
+
+gmailApiError :: QualifiedName
+gmailApiError = QualifiedName {moduleName = ModuleName "acme.gmail", name = "api_error"}
+
+calendarApiError :: QualifiedName
+calendarApiError = QualifiedName {moduleName = ModuleName "acme.google_calendar", name = "api_error"}
+
+holdApprove :: QualifiedName
+holdApprove = QualifiedName {moduleName = ModuleName "acme.hold", name = "approve_async"}
