@@ -1,6 +1,6 @@
 import { Play, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router";
 import { useRuns } from "../api/queries";
 import type { RunState } from "../api/types";
 import { RunsTable } from "../components/runs/RunsTable";

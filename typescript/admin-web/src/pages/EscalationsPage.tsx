@@ -2,7 +2,7 @@
 // escalations leave the inbox (their Q&A lives on in the run's escalation history).
 
 import { Bell } from "lucide-react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { useEscalations } from "../api/queries";
 import { EscalationCard } from "../components/escalations/EscalationCard";
 import { EmptyState } from "../components/ui/EmptyState";

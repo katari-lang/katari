@@ -6,7 +6,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Database, Eye, Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useStore } from "../api/queries";
 import type { Json, StoreEntrySummary } from "../api/types";

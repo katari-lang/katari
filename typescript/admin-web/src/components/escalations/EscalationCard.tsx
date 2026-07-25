@@ -6,7 +6,7 @@
 
 import { KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { useAnswerEscalation, useStartOauthFlow } from "../../api/queries";
 import type { Escalation, Json, JsonSchema } from "../../api/types";
 import { formatDateTime, relativeTime } from "../../lib/format";

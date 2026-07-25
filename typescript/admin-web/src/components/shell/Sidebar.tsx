@@ -9,7 +9,7 @@ import {
   Play,
   ShieldCheck,
 } from "lucide-react";
-import { NavLink, useParams } from "react-router-dom";
+import { NavLink, useParams } from "react-router";
 import { useEscalations } from "../../api/queries";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/Badge";

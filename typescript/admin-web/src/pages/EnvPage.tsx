@@ -4,7 +4,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Eye, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useEnv } from "../api/queries";
 import { Badge } from "../components/ui/Badge";

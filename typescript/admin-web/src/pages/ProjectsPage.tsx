@@ -1,6 +1,6 @@
 import { FolderGit2, Plus } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useProjects } from "../api/queries";
 import { Button } from "../components/ui/Button";

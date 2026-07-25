@@ -5,7 +5,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Camera } from "lucide-react";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useHeadSnapshot, useSnapshots } from "../api/queries";
 import { Badge } from "../components/ui/Badge";

@@ -241,15 +241,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A rerun after a partial publish must not trip over the packages that already made it:
+          # verify-versions pins the tree to the tag, so a version already on the registry IS this
+          # tag's build and skipping it is sound.
+          skip_published() {
+            local name version
+            name=$(node -p "require('./package.json').name")
+            version=$(node -p "require('./package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "skip ${name}@${version} — already on the registry"
+              return 0
+            fi
+            return 1
+          }
           # Library packages first, then the platform binaries, then the shim that ties them
           # together — so a partially failed publish never leaves the shim pointing at nothing.
           for dir in typescript/types typescript/port typescript/runtime typescript/bundle typescript/mcp; do
-            (cd "$dir" && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
+            (cd "$dir" && { skip_published || pnpm publish --access public --no-git-checks --tag "$DIST_TAG"; })
           done
           for dir in .staged/*/; do
-            (cd "$dir" && npm publish --access public --tag "$DIST_TAG")
+            (cd "$dir" && { skip_published || npm publish --access public --tag "$DIST_TAG"; })
           done
-          (cd typescript/cli && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
+          (cd typescript/cli && { skip_published || pnpm publish --access public --no-git-checks --tag "$DIST_TAG"; })
         env:
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
 

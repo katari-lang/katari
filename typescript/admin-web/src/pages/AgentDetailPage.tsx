@@ -2,7 +2,7 @@
 
 import { ChevronLeft, ClipboardPaste, Play } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { useAgent, useStartRun } from "../api/queries";
 import type { Json } from "../api/types";
 import { SchemaViewer } from "../components/schema/SchemaViewer";

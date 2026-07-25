@@ -5,7 +5,7 @@
 
 import { ChevronDown, ChevronRight, FileCode, Folder, FolderOpen } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { AgentEntry } from "../../api/types";
 import { cn } from "../../lib/cn";
 

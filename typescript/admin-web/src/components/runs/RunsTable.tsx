@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import type { Run } from "../../api/types";
 import { formatDateTime, relativeTime } from "../../lib/format";
 import { CopyableId } from "../ui/Copy";

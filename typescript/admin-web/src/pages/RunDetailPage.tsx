@@ -4,7 +4,7 @@
 import { REDACTED_KEY } from "@katari-lang/types";
 import { ChevronLeft, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router";
 import {
   isLiveRun,
   useCancelRun,

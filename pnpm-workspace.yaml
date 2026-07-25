@@ -8,3 +8,10 @@ allowBuilds:
   esbuild: true
   keytar: true
   lefthook: true
+
+# Security floors: the advisory-patched releases sit outside the ranges our dependents declare,
+# so pin the floor here (same-major, patch-level bumps only).
+overrides:
+  "brace-expansion@>=2.0.0 <3.0.0": 2.1.2
+  "brace-expansion@>=5.0.0 <6.0.0": 5.0.8
+  "fast-uri@>=3.0.0 <4.0.0": 3.1.4

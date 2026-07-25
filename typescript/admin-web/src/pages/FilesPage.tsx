@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Download, FileIcon, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useFiles } from "../api/queries";
 import { Button } from "../components/ui/Button";

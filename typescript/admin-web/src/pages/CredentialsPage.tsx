@@ -14,7 +14,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, LogIn, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { ApiError, api } from "../api/client";
 import { useCredentials, useOauthClients } from "../api/queries";
 import type { OauthClient } from "../api/types";

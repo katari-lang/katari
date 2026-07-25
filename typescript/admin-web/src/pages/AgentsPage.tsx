@@ -1,5 +1,5 @@
 import { FunctionSquare } from "lucide-react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router";
 import { useAgents, useProject, useSnapshots } from "../api/queries";
 import type { AgentEntry } from "../api/types";
 import { AgentsTree } from "../components/agents/AgentsTree";
