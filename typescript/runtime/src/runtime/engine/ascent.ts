@@ -23,6 +23,15 @@ import type { ProjectStore, Scope } from "./types.js";
 export interface ReachableResources {
   scopes: Set<ScopeId>;
   blobs: Set<BlobId>;
+  /**
+   * The subset of `scopes` that is some reachable closure's OWN captured scope — where a closure ENTERS a
+   * chain, as opposed to the ancestors it merely reads through. The distinction matters to a transfer that has
+   * to move whole captured ENVIRONMENTS off their creators (the region fork's park onto the provide): the owner
+   * of an entry scope built a closure this value carries, so it is one of the environments to hand over, while a
+   * chain ancestor owned by somebody ELSE is only borrowed — it belongs to a scope the borrower reads through
+   * and must stay with its own owner (an outer nursery's provide, say, whose other fibers still read it).
+   */
+  closureScopes: Set<ScopeId>;
 }
 
 /**
@@ -41,11 +50,13 @@ export interface ReachableResources {
 export function reachableResources(store: ProjectStore, value: Value): ReachableResources {
   const scopes = new Set<ScopeId>();
   const blobs = new Set<BlobId>();
+  const closureScopes = new Set<ScopeId>();
   /** Scopes added but whose own bindings have not been walked yet. */
   const pending: ScopeId[] = [];
   const visit = (current: Value): void => {
     switch (current.kind) {
       case "closure":
+        closureScopes.add(current.scopeId);
         addScopeChain(store, current.scopeId, scopes, pending);
         return;
       case "ref":
@@ -73,7 +84,7 @@ export function reachableResources(store: ProjectStore, value: Value): Reachable
     if (scope === undefined) continue;
     for (const bound of Object.values(scope.values)) visit(bound);
   }
-  return { scopes, blobs };
+  return { scopes, blobs, closureScopes };
 }
 
 /** Walk a scope's parent chain to the root, adding every id (stopping at an already-seen id, whose ancestors

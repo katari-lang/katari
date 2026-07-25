@@ -680,32 +680,48 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       });
       return;
     }
-    // Transfer the task closure's captured lexical scopes OFF the forking instance onto the PROVIDE instance,
-    // before the fiber is spawned. A forked closure captures the FORKER's scope, but the fiber is DETACHED —
-    // `fork` returns a handle at once and the forker runs on (and, in the common case, returns), so its
-    // intra-instance GC and its teardown reclaim that scope out from under the still-running fiber (the GC
-    // soundness invariant — "a borrowed scope keeps its borrower suspended" — does not hold for a fiber). The
-    // provide structurally OUTLIVES every fiber (the nursery cancels them all at drop) and every forker (the
-    // phantom `Scope` marker confines a live nursery to the provide's dynamic extent), so parking the captured
-    // environment on it keeps it alive exactly as long as any fiber can read through it, and its own drop
-    // reclaims it. Mirrors how a fiber's RETURNED resources reown onto the provide (`onDelegateAck`) — the
-    // inbound twin of that outbound.
+    // Transfer the captured lexical scopes the fork's PAYLOAD reaches OFF the instances holding them onto the
+    // PROVIDE instance, before the fiber is spawned. What the payload captures belongs to instances that are
+    // still running, but the fiber is DETACHED — `fork` returns a handle at once and the forker runs on (and, in
+    // the common case, returns), so their intra-instance GC and their teardown reclaim those scopes out from
+    // under the still-running fiber (the GC soundness invariant — "a borrowed scope keeps its borrower
+    // suspended" — does not hold for a fiber). The provide structurally OUTLIVES every fiber (the nursery
+    // cancels them all at drop) and every forker (the phantom `Scope` marker confines a live nursery to the
+    // provide's dynamic extent), so parking the captured environment on it keeps it alive exactly as long as any
+    // fiber can read through it, and its own drop reclaims it. Mirrors how a fiber's RETURNED resources reown
+    // onto the provide (`onDelegateAck`) — the inbound twin of that outbound.
     //
-    // The forker is the OWNER of the closure's own captured scope, NOT the fork delegate's issuer: `region.fork`
+    // BOTH halves of the payload are transferred, and the owners to transfer them off are read from BOTH: the
+    // task and the argument cross into the fiber together, so the fiber runs on whatever either one captures.
+    // The task alone is not enough to identify the owners — fork a NAMED agent and the task value captures
+    // nothing at all, while its argument carries the closures the fiber will call (an approval handing its
+    // callback to a generic runner is exactly that shape). Asking the payload itself which environments it
+    // reaches (`capturedEnvironmentOwners`) covers a closure task, a closure-carrying argument, and a payload
+    // whose closures came from SEVERAL instances — each with a chain that has to move — under one rule.
+    //
+    // The owners are the ones holding the captured environments, NOT the fork delegate's issuer: `region.fork`
     // is an external agent, so the delegate reaching this reactor was issued by its wrapper instance, one hop
-    // removed from the user code that built the closure. `release` then moves only the forker's OWN scopes (a
-    // borrowed ancestor owned by another still-live instance stays put, kept alive by its own owner — no
-    // regression for a closure capturing above the nursery); a named-agent task owns no captured scope, so this
-    // is a no-op for it. The argument crosses into the fiber too and can capture the same forker's scopes.
+    // removed from the user code that built the closure. `release` per owner then moves only that owner's OWN
+    // scopes, so a borrowed ancestor owned by a third party stays put, kept alive by its own owner (an outer
+    // nursery's provide keeps the environment its own fibers read through).
     const provideInstance = this.callInstance(scopeState.provide);
-    const forker =
-      payload.task.kind === "closure" ? this.pool.ownerOfScope(payload.task.scopeId) : null;
-    if (provideInstance !== undefined && forker !== null && forker !== provideInstance) {
-      this.pool.release(payload.task, forker);
-      this.reownIncoming(payload.task, provideInstance);
-      if (payload.argument !== null) {
-        this.pool.release(payload.argument, forker);
-        this.reownIncoming(payload.argument, provideInstance);
+    if (provideInstance !== undefined) {
+      const argument = payload.argument;
+      const owners = this.pool.capturedEnvironmentOwners(payload.task, provideInstance);
+      if (argument !== null) {
+        for (const owner of this.pool.capturedEnvironmentOwners(argument, provideInstance)) {
+          owners.add(owner);
+        }
+      }
+      for (const owner of owners) {
+        this.pool.release(payload.task, owner);
+        if (argument !== null) this.pool.release(argument, owner);
+      }
+      // Reown once ALL the releases are in: a scope two owners' walks both reach must not be claimed by the
+      // provide while a later release could put it back in transit.
+      if (owners.size > 0) {
+        this.reownIncoming(payload.task, provideInstance);
+        if (argument !== null) this.reownIncoming(argument, provideInstance);
       }
     }
     // `task` is `agent (input: A) -> T`, so it receives `{ input: <argument> }` (the same parameter-record

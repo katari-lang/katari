@@ -216,12 +216,28 @@ export class ResourcePool {
     }
   }
 
-  /** The instance that currently owns `scopeId`, or `null` when it is in transit (`owner = null`) or unknown.
-   *  The region nursery reads it to find a forked closure's CREATING instance — the owner of the closure's own
-   *  captured scope, which is the forker the fiber's captured environment must be transferred off (a wrapper /
-   *  reactor hop means the fork's delegate issuer is NOT that instance, but the scope's owner always is). */
-  ownerOfScope(scopeId: ScopeId): InstanceId | null {
-    return this.store.scopes[scopeId]?.owner ?? null;
+  /**
+   * The instances holding the captured ENVIRONMENTS `value` carries: for every closure the value reaches —
+   * directly, nested in a record / array, or bound inside another closure's captured scope — the owner of that
+   * closure's OWN captured scope (`closureScopes`). Those are the owners a detached consumer has to take the
+   * environments off (the region nursery's fork park); `except` — the receiving owner — is skipped, as is an
+   * in-transit or unknown scope.
+   *
+   * Why an owner set rather than one "forker" instance: the value's closures need not come from one place. A
+   * task closure the calling instance just built and a callback it was HANDED (whose environment rose to it, or
+   * to some other ancestor, on the escalation that delivered it) are two different owners in one payload, and
+   * leaving either behind strands exactly the environment the consumer will read through. And why the ENTRY
+   * scopes rather than every reachable scope's owner: a chain ancestor owned by a third party is borrowed, not
+   * captured — moving it would rip a scope out from under that owner's own readers (nested nurseries: an inner
+   * fork must not steal the outer provide's parked environment).
+   */
+  capturedEnvironmentOwners(value: Value, except: InstanceId): Set<InstanceId> {
+    const owners = new Set<InstanceId>();
+    for (const scopeId of reachableResources(this.store, value).closureScopes) {
+      const owner = this.store.scopes[scopeId]?.owner;
+      if (owner !== undefined && owner !== null && owner !== except) owners.add(owner);
+    }
+    return owners;
   }
 
   /** Mark every scope `owner` still holds as touched this turn — the engine mutates the running instance's
