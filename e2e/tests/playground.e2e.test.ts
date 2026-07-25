@@ -337,6 +337,27 @@ test("playground.region.main: fan-out fork/join, parallel contrast, and the whit
   expect(stdout).toContain("subscription saw four messages across two emitters");
 });
 
+test("playground.deferred_callback.main: a callback payload survives being answered, and runs later from a fiber", async () => {
+  // Scenario 20 — the approval shape, over the real wire. A closure riding an escalation moves its captured
+  // environment to whoever answers, so two things have to hold that no other scenario exercises: the raiser
+  // must keep running in that environment after the handler answers and DROPS the payload (`tool_b`), and a
+  // parked callback must still be callable from a fiber long after the agent that built it returned (`tool`'s
+  // `on_decide`, forked into the nursery and only invoked once `main` reaches its `region.watch`). Both are
+  // scope-lifetime bugs the engine's unit suites pin structurally; this is the end-to-end net, because both
+  // failures are silent in the worst way — a dropped turn that fails the run, or a hung run.
+  const { stdout } = await katari([
+    "run",
+    "playground.deferred_callback.main",
+    "--project",
+    "playground",
+  ]);
+  // The raiser carried on past its answered ask (its captured scope was not reclaimed under it) …
+  expect(stdout).toContain("note dropped, rollback carried on");
+  expect(stdout).toContain("gate answered, deploy carried on");
+  // … and the fiber's late callback read the secret its (long-returned) creator had bound.
+  expect(stdout).toContain("deploy-secret approved by deploy");
+});
+
 test("playground.replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
   // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
   // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);

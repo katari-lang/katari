@@ -1,0 +1,99 @@
+// A request whose PAYLOAD is a callback — the approval shape, and the one that stresses how the runtime
+// tracks a closure's captured environment across instance boundaries. Two moves are pinned here, because
+// each one broke a different half of the ownership machinery:
+//
+//   1. The raiser CARRIES ON after its callback-carrying request is answered. A closure riding an
+//      escalation moves its captured environment up to whoever answers — but the raiser is still running
+//      in that very environment, so the answerer must not treat "I own it and cannot see it" as "it is
+//      dead". `tool_b` performs `note` with a callback the handler simply drops, then keeps going.
+//   2. The answerer PARKS the callback and runs it LATER, from a fiber, after the raiser is gone. That is
+//      the whole point of an async approval: `gate`'s handler forks a fiber holding `on_decide` and
+//      answers at once, so `tool` returns immediately; the decision only arrives once the enclosing
+//      program reaches its `region.watch`, and the fiber then calls back into an environment whose
+//      creating agent finished long ago.
+//
+// Everything here is in-program (inline handlers plus the built-in `region` reactor), so the whole thing
+// runs deterministically end to end: `katari run playground.deferred_callback.main`.
+
+@"Hand a memo-builder up to whoever is listening. The handler is free to ignore it — the point is that
+the caller keeps running afterwards, in the very scope the callback captured."
+request note(hint: agent (value: null) -> string) -> null
+
+@"Ask for a decision, handing up the callback that renders it. The decider may answer immediately and
+call back much later — `on_decide` closes over the asker's own state, so it stays callable after the
+asker has returned."
+request gate(label: string, on_decide: agent (value: string) -> string) -> null
+
+@"A fiber's first act: announce itself and wait. Nothing surfaces until the enclosing program watches
+the nursery, so answering this is what proves the fiber ran AFTER its forker moved on."
+request ready() -> null
+
+@"A fiber's last act: deliver the rendered decision. A fiber carries no result, so the text leaves
+through this escalation."
+request decided(text: string) -> null
+
+@"The decision, carried out of the region as a typed throw — `region.watch` returns `never`, so the
+region ends by throwing, exactly as the region tour does."
+data approved(text: string)
+
+@"Performs `note` with a callback nobody keeps, then CARRIES ON. Its `memo` binding — the callback's
+captured environment — has to survive the handler answering and dropping the payload."
+agent tool_b(label: string) -> string with note {
+  let memo = f"${label} memo"
+  agent hint(value: null) -> string { memo }
+  note(hint = hint)
+  f"note dropped, ${label} carried on"
+}
+
+@"Performs `gate` with a callback the decider parks, then CARRIES ON. `secret` is bound before the ask
+and read only by `on_decide`, so the callback the fiber runs later reaches back into this agent's scope."
+agent tool(label: string) -> string with gate {
+  let secret = f"${label}-secret"
+  agent on_decide(value: string) -> string { f"${secret} approved by ${value}" }
+  gate(label = label, on_decide = on_decide)
+  f"gate answered, ${label} carried on"
+}
+
+@"Entry: drop one callback, park another, and let a fiber run the parked one after both tools have
+returned — `katari run playground.deferred_callback.main`."
+agent main() -> string {
+  // The outer catch: the fiber's decision leaves the region as a typed throw and becomes the result.
+  use handler {
+    request prelude.throw(error: approved) -> never { break error.text }
+  }
+
+  // Move 1: answer and DROP the callback while `tool_b` is still running inside the scope it captured.
+  use handler {
+    request note(hint: agent (value: null) -> string) -> null { next null }
+  }
+  let noted = tool_b(label = "rollback")
+
+  // Move 2: park the callback on a fiber and answer at once, so `tool` returns before the decision.
+  let nursery : region.nursery[region.scope, ready | decided] = use region.provide[region.scope, ready | decided]
+  use handler {
+    request gate(label: string, on_decide: agent (value: string) -> string) -> null {
+      // The fiber's task closes over `on_decide` — a closure captured inside a closure, which is what
+      // makes the fork transfer carry the ASKER's environment onto the nursery and not just this one.
+      agent decide(input: string) -> null with ready | decided {
+        ready()
+        let text = on_decide(value = input)
+        decided(text = text)
+      }
+      region.fork(nursery = nursery, task = decide, argument = label)
+      next null
+    }
+  }
+  let carried = tool(label = "deploy")
+
+  // Both tools are done and gone. Only now does the nursery get watched, so the fiber's `ready` is
+  // answered — and its callback runs — strictly after the agent that built the callback returned.
+  use handler {
+    request ready() -> null { next null }
+  }
+  use handler {
+    request decided(text: string) -> null {
+      prelude.throw(error = approved(text = f"${noted} | ${carried} | ${text}"))
+    }
+  }
+  region.watch(nursery = nursery)
+}
