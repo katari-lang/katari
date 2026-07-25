@@ -1089,13 +1089,20 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
             -- NOTE: when both fail, report the nominal errors; they refer to the type as written
             unless (null constructorErrors) $ tell nominalErrors
         Nothing -> do
+          -- The constructor check is an escape hatch, not a second obligation: a data type absent from
+          -- the supertype still fits if its structural expansion does. When THAT also fails we report
+          -- only the nominal mismatch — matching the 'Just' branch above, which discards its own
+          -- constructorErrors for the same reason. The captured constructorErrors are a byproduct of the
+          -- probe (e.g. "Object layers are incompatible … actual: record", the expanded record vs. the
+          -- supertype), and emitting them cascades a confusing second diagnostic — a match left
+          -- non-exhaustive by one constructor would print both "… not a subtype either: blue" and a
+          -- record-layer mismatch at the same span.
           ((), constructorErrors) <- constructorCheck dataInfo leftArguments
-          unless (null constructorErrors) $ do
+          unless (null constructorErrors) $
             tellSubtypeMismatch
               ("Data type is not present in the supertype, and its constructor is not a subtype either: " <> renderQualifiedName qualifiedName)
               (layeredAsType neverLayer {dataLayer = Map.singleton qualifiedName leftArguments})
               right
-            tell constructorErrors
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
       constructorInstance <- substituteObject (reKeyByGenericId dataInfo.genericParameters leftArguments) dataInfo.constructor
       subtype (objectAsType constructorInstance) right

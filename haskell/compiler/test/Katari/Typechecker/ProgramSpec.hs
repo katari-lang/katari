@@ -310,6 +310,18 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "narrows a data-or-null scrutinee to the data type after a null arm" $
     typeErrorCodes [("test", "data box(x: integer)\nagent f(v: box | null) -> box { match (v) { case null -> box(x = 0)\ncase rest -> rest } }")] `shouldBe` []
 
+  -- A match left non-exhaustive by one constructor reports exactly ONE diagnostic — the uncovered
+  -- constructor — and does not cascade the byproduct of the constructor-subtype escape hatch (the
+  -- expanded record vs. the supertype: "Object layers are incompatible … actual: record"). Regression
+  -- for the double diagnostic the coverage check used to emit at a single span.
+  it "reports one diagnostic for a non-exhaustive data-union match (no cascaded record-layer noise)" $ do
+    let messages =
+          typeErrorMessages
+            [("test", "data red()\ndata green()\ndata blue()\nagent f(c: red | green | blue) -> integer { match (c) { case red() -> 1\ncase green() -> 2 } }")]
+    length messages `shouldBe` 1
+    messages `shouldSatisfy` any (Text.isInfixOf "not a subtype either: test.blue")
+    messages `shouldSatisfy` (not . any (Text.isInfixOf "Object layers are incompatible"))
+
   -- Narrowing is residual, not unconditional: a first-arm variable still sees the full scrutinee, so a
   -- lone `case rest` over `integer | null` binds `rest` nullable (K3001 on the non-null return).
   it "does not narrow a first-arm variable binder (still sees the full scrutinee, K3001)" $
