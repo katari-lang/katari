@@ -37,3 +37,30 @@ the toolbox entry type."
 agent main() -> string {
   mcp.serve(tools = { double = double }, subscriber = self_subscriber)
 }
+
+// The external-client face. Above, `self_subscriber` closes the whole loop in-process; here the URL is
+// handed OUT so a real MCP client that is NOT this run drives the served tool over HTTP. The subscriber's
+// effects flow to the caller (see `mcp.serve`), so an unhandled request escalates to the run root as an
+// open question — the shape a real deployment uses to hand the URL to an AI session or a teammate's MCP
+// client and stay alive until serving should stop.
+
+@"The subscriber raises this to publish its minted capability URL and then BLOCK on it: the run suspends
+(and the served endpoint stays live) until it is answered. The URL rides the open escalation, so whoever
+holds it — here the e2e's own MCP SDK client — can list and call `double` before the answer winds serving
+down."
+request serving_at(url: string) -> null
+
+@"A subscriber that publishes its minted URL as an open escalation and waits, so an EXTERNAL MCP client
+drives the served tool over real HTTP (unlike `self_subscriber`, which calls back in-process). Answering
+the escalation ends the serving; this summary becomes the run's result."
+agent external_subscriber(url: string) -> string with serving_at {
+  serving_at(url = url)
+  f"served double at ${url}"
+}
+
+@"Serve `double` for the extent of `external_subscriber`, which publishes the URL and blocks. Answer the
+`serving_at` escalation to end serving. Drives the runtime-as-MCP-server surface from an external client:
+mint -> (external) list -> call -> respond -> answer -> deactivate."
+agent serve_over_http() -> string with serving_at | io {
+  mcp.serve(tools = { double = double }, subscriber = external_subscriber)
+}

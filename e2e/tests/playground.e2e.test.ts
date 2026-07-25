@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterAll, beforeAll, expect, test } from "vitest";
@@ -412,6 +414,115 @@ test("a suspended run survives a server restart (boot reactivation), then comple
   expect([...seqs].sort((left, right) => left - right)).toEqual(seqs);
   for (const event of trace.events) expect(event.summary.length).toBeGreaterThan(0);
 });
+
+test("playground.mcp_serve_demo.serve_over_http: the runtime is the MCP server, an external client calls in", async () => {
+  // The SERVE direction — the runtime AS an MCP server (scenario 14 was the client direction, against an
+  // EXTERNAL server). `serve_over_http` mints a fresh capability URL, serves `double` there, and its
+  // subscriber publishes the URL as an open escalation and BLOCKS on it, so the endpoint stays live. This
+  // suite's own MCP SDK client — the very client the runtime's own wire-contract test uses — connects to
+  // the minted URL over real HTTP, lists the tool, and calls it: the runtime-as-server wire pinned from
+  // OUTSIDE the process, not by the built-in client the self-contained `main` uses. Answering the
+  // escalation lets the subscriber return, which deactivates the URL and completes the run.
+  const projectId = await playgroundId();
+  const { stdout } = await katari([
+    "run",
+    "playground.mcp_serve_demo.serve_over_http",
+    "--project",
+    "playground",
+    "--detach",
+  ]);
+  const runId = stdout.trim();
+  expect(runId).toMatch(UUID);
+
+  // The subscriber's `serving_at` escalation carries the minted URL as its argument.
+  const escalation = await waitFor("the serving_at escalation carrying the URL", async () => {
+    const open = await apiGet<{ id: string; runId: string; argument: { url?: string } | null }[]>(
+      `/projects/${projectId}/escalations`,
+    );
+    return open.find((row) => row.runId === runId);
+  });
+  const mintedUrl = escalation.argument?.url ?? "";
+  expect(mintedUrl).toMatch(new RegExp(`^http://localhost:${PORT}/mcp/[A-Za-z0-9_-]+$`));
+  // The runtime binds 0.0.0.0 (IPv4-only), so dial the loopback address explicitly — `localhost` can
+  // resolve to ::1 first and miss the listener.
+  const dialUrl = mintedUrl.replace("http://localhost:", "http://127.0.0.1:");
+
+  const client = new Client({ name: "katari-e2e-serve", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(dialUrl)));
+  try {
+    const listing = await client.listTools();
+    expect(listing.tools.map((tool) => tool.name)).toContain("double");
+    // `double` returns an integer, so the result is bare text content (no output schema is advertised for
+    // a non-object return, so the SDK client requires no structuredContent).
+    const called = await client.callTool({ name: "double", arguments: { value: 21 } });
+    expect(called.content).toEqual([{ type: "text", text: "42" }]);
+  } finally {
+    await client.close();
+  }
+
+  // Answer the (`-> null`) escalation: the subscriber returns, the URL deactivates, and the run completes.
+  await katari(["answer", "--project", "playground", escalation.id, "--value", "null"]);
+  const run = await waitFor("the serve run to complete", async () => {
+    const row = await apiGet<{ state: string; result?: unknown }>(
+      `/projects/${projectId}/runs/${runId}`,
+    );
+    return row.state === "done" ? row : undefined;
+  });
+  expect(JSON.stringify(run.result)).toContain("served double at");
+}, 20_000);
+
+test("playground.finalizers.run: arming and draining `finally` blocks completes the run", async () => {
+  // `finally` blocks (Go-`defer`-like) arm finalizers that drain in reverse arming order right before the
+  // instance acknowledges its terminal. The demo arms two: a pure one and one that raises `cleanup`
+  // discharged by its OWN local handler, so nothing escapes to a parent that may be awaiting cancellation.
+  // A finalizer's effect is internally discharged and by design produces no external signal (a finalizer
+  // that tried to escalate out would not compile — K3021 — and richer, log-writing finalizers await the
+  // runtime's io prims), so what this pins over the real wire is that the whole arm -> drain ->
+  // local-discharge path runs in the engine and the run settles cleanly; the deploy alone never ran it.
+  const { stdout } = await katari(["run", "playground.finalizers.run", "--project", "playground"]);
+  expect(stdout).toContain("work complete");
+});
+
+test("playground.time.every_second: the built-in time reactor fires a schedule once per occurrence", async () => {
+  // `time.watch` fires the delivered agent once per schedule occurrence — here a one-second interval.
+  // A stateful handler counts the deliveries and, on the third, throws `enough`, which propagates out of
+  // the watched agent, tears the watch down, and ends with a summary. Scenario 7 covered only now/sleep;
+  // this exercises the WATCH surface of the same built-in time reactor end to end — three real one-second
+  // ticks, so give it headroom.
+  const { stdout } = await katari(["run", "playground.time.every_second", "--project", "playground"]);
+  expect(stdout).toContain("watched three occurrences");
+}, 20_000);
+
+test("katari cancel winds a running run down and closes its open escalations", async () => {
+  const projectId = await playgroundId();
+  // A run that blocks indefinitely on two escalations (the parallel `consult` children) — it never
+  // completes on its own, so cancellation is the only terminal, and a clean target for `katari cancel`.
+  const { stdout } = await katari([
+    "run",
+    "playground.interactive.main",
+    "--project",
+    "playground",
+    "--detach",
+  ]);
+  const runId = stdout.trim();
+  expect(runId).toMatch(UUID);
+  await waitFor("the run's two escalations to open", async () => {
+    const open = await apiGet<{ runId: string }[]>(`/projects/${projectId}/escalations`);
+    return open.filter((row) => row.runId === runId).length === 2 ? true : undefined;
+  });
+
+  await katari(["cancel", runId, "--project", "playground", "--reason", "e2e cancel"]);
+
+  // Cancellation is asynchronous (running -> cancelling -> cancelled); wait for the terminal state.
+  const run = await waitFor("the run to reach cancelled", async () => {
+    const row = await apiGet<{ state: string }>(`/projects/${projectId}/runs/${runId}`);
+    return row.state === "cancelled" ? row : undefined;
+  });
+  expect(run.state).toBe("cancelled");
+  // Its questions are no longer open — a cancelled run's escalations do not linger in the inbox.
+  const stillOpen = await apiGet<{ runId: string }[]>(`/projects/${projectId}/escalations`);
+  expect(stillOpen.filter((row) => row.runId === runId)).toHaveLength(0);
+}, 20_000);
 
 test("file upload / download / delete roundtrip", async () => {
   const source = join(scratch, "upload.txt");
