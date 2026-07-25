@@ -31,8 +31,8 @@ Run `katari --help` for the full command list.
 ## Supported platforms
 
 - `linux-x64`
-- `darwin-arm64` (Intel macOS runs via Rosetta 2)
+- `darwin-arm64` (Apple Silicon Macs)
 
-On other platforms, download a release tarball from
-<https://github.com/katari-lang/katari/releases> or build from source
-with stack.
+On other platforms — including Intel Macs (`darwin-x64`) — download a release
+tarball from <https://github.com/katari-lang/katari/releases> or build from
+source with stack.

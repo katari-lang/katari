@@ -1,7 +1,9 @@
 # A self-hosted Katari stack: the runtime (API + web console on one port), Postgres, and a
-# durable S3-compatible blob store (SeaweedFS). Copy `.env.example` to `.env` and set a key first:
+# durable S3-compatible blob store (SeaweedFS). Copy `.env.example` to `.env` and set the two required
+# keys first (KATARI_API_KEY authenticates callers; KATARI_SECRET_KEY encrypts secrets at rest):
 #
 #   cp .env.example .env
+#   echo "KATARI_API_KEY=$(openssl rand -hex 32)"    >> .env
 #   echo "KATARI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 #   docker compose up -d
 #

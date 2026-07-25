@@ -38,8 +38,12 @@ optionsParser =
     <$> globalOptionsParser
     <*> optional (strArgument (metavar "NAME" <> help "Package name (default: the target directory's name)"))
     <*> optional
+      -- @-C@ / @--directory@ match the offline commands' shared directory flag (see
+      -- 'Katari.Cli.Options.directoryOption'); @--dir@ stays as a non-breaking alias for the same option.
       ( strOption
           ( long "dir"
+              <> long "directory"
+              <> short 'C'
               <> metavar "DIR"
               <> help "Scaffold into DIR instead of the current directory (created if absent)"
           )
