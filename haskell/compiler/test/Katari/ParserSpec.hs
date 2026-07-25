@@ -86,27 +86,7 @@ spec = do
         [DeclarationRequest request] -> do
           request.name `shouldBe` "bump"
           length request.parameters `shouldBe` 1
-          request.local `shouldBe` False
         _ -> expectationFailure "expected one request"
-
-    it "parses a `local request` and records its local flag" $ do
-      module' <- parseClean "local request exclusive(task: agent () -> unknown with pure) -> unknown"
-      case module'.declarations of
-        [DeclarationRequest request] -> do
-          request.name `shouldBe` "exclusive"
-          request.local `shouldBe` True
-        _ -> expectationFailure "expected one request"
-
-    it "keeps `local` an ordinary identifier away from a request head (a value binding and a request name)" $ do
-      -- `local` is a positional word (like `private` / `effect`), not reserved, so it stays usable as
-      -- an identifier: as a `let` binding and even as a request's own name.
-      module' <- parseClean "agent f() -> integer {\n  let local = 1\n  local\n}\nrequest local(n: integer) -> integer"
-      case module'.declarations of
-        [DeclarationAgent agent, DeclarationRequest request] -> do
-          agent.name `shouldBe` "f"
-          request.name `shouldBe` "local"
-          request.local `shouldBe` False
-        _ -> expectationFailure "expected an agent and a request"
 
     it "parses an external agent with a function-typed parameter" $ do
       module' <- parseClean "external agent cron(callback: agent () -> null with scheduled) -> null"

@@ -221,14 +221,9 @@ data AgentDeclaration (phase :: Phase) = AgentDeclaration
 instance HasSourceSpan (AgentDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
--- | @[local] request name[generics](label : type ?= default, ...) -> T@
+-- | @request name[generics](label : type ?= default, ...) -> T@
 data RequestDeclaration (phase :: Phase) = RequestDeclaration
   { annotation :: Maybe Text,
-    -- | @local request@ — a request only a handler INSIDE the program can answer (nothing outside the
-    -- run, not even the runtime, machine-answers it). If it reaches an INFERRED top-level agent's
-    -- residual row it is a stall waiting to happen, so the root-row pass rejects that as K3027. An
-    -- explicit @with@ row is exempt: the obligation is being handed to the caller on purpose.
-    local :: Bool,
     name :: Text,
     -- | As callable
     variableReference :: Reference phase VariableReference,
@@ -1487,7 +1482,6 @@ retagRequestDeclaration ::
 retagRequestDeclaration declaration =
   RequestDeclaration
     { annotation = declaration.annotation,
-      local = declaration.local,
       name = declaration.name,
       variableReference = retagReference declaration.variableReference,
       typeReference = retagReference declaration.typeReference,

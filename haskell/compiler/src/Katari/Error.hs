@@ -168,21 +168,6 @@ renderTypeError typeError =
       "A `lacks` entry must be a bare request name. The constraint is name-level — it excludes every"
         <> " instantiation of the named request, whatever its arguments — so an applied form"
         <> " (`lacks throw[t]`) or anything that is not a request has no reading here."
-    TypeErrorLocalRequestEscalates info ->
-      "`"
-        <> info.request
-        <> "` is local to the program — nothing outside the run can answer it, so it must be served by"
-        <> " a handler below the run root. Agent `"
-        <> info.agent
-        <> "`'s effect row is inferred, and `"
-        <> info.request
-        <> "` escalates out of it: a run started here would stall at the first perform, as a question"
-        <> " nobody can answer. Either serve it — install the provider around the perform (see the"
-        <> " request's declaration at "
-        <> info.declaration
-        <> " for its install discipline) — or declare the row explicitly (`with "
-        <> info.request
-        <> "`) to hand the obligation to this agent's callers on purpose."
   where
     renderBackticked name = "`" <> name <> "`"
 
@@ -266,12 +251,6 @@ data TypeError where
   -- name-level (it excludes every instantiation of the request, whatever its arguments), so an
   -- applied form or anything that is not a request has no reading.
   TypeErrorLacksEntry :: TypeError
-  -- | A @local request@ (one only a handler INSIDE the program can answer — nothing outside the run
-  -- machine-answers it) reaches the INFERRED residual row of a top-level agent. A run started at that
-  -- agent would stall at the first perform, on a question nobody can answer, so it is rejected here
-  -- rather than at runtime. An explicit @with@ row is exempt: writing the request out is the
-  -- intentional hand-off of the serving obligation to the agent's callers.
-  TypeErrorLocalRequestEscalates :: LocalRequestEscalatesErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -299,7 +278,6 @@ typeErrorCode = \case
   TypeErrorParallelForVarBinding _ -> "K3024"
   TypeErrorParallelHandlerVarBinding _ -> "K3025"
   TypeErrorLacksEntry -> "K3026"
-  TypeErrorLocalRequestEscalates _ -> "K3027"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -328,7 +306,6 @@ typeErrorSeverity = \case
   TypeErrorParallelForVarBinding _ -> SeverityError
   TypeErrorParallelHandlerVarBinding _ -> SeverityError
   TypeErrorLacksEntry -> SeverityError
-  TypeErrorLocalRequestEscalates _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -493,17 +470,6 @@ newtype ParallelForVarBindingErrorInfo = ParallelForVarBindingErrorInfo
 -- the message can name the state whose updates would race across concurrent request dispatches.
 newtype ParallelHandlerVarBindingErrorInfo = ParallelHandlerVarBindingErrorInfo
   { variableNames :: List Text
-  }
-  deriving (Eq, Ord, Show)
-
--- | @agent@ is the (surface) name of the top-level agent whose inferred residual row the local
--- request escapes through; @request@ is the local request's display name (e.g. @store.exclusive@);
--- @declaration@ is the rendered @path:line:column@ of the request's declaration (so the message can
--- point at where its install discipline is documented).
-data LocalRequestEscalatesErrorInfo = LocalRequestEscalatesErrorInfo
-  { agent :: Text,
-    request :: Text,
-    declaration :: Text
   }
   deriving (Eq, Ord, Show)
 

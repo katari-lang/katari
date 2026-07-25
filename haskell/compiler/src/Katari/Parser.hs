@@ -13,7 +13,6 @@ import Control.Monad (guard, void)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Writer.CPS (runWriter)
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Void (Void)
@@ -96,7 +95,7 @@ declarationStart = do
   void (char '@') <|> void (choice (map keyword declarationKeywords))
 
 declarationKeywords :: List Text
-declarationKeywords = ["agent", "private", "local", "request", "effect", "external", "primitive", "data", "type", "import"]
+declarationKeywords = ["agent", "private", "request", "effect", "external", "primitive", "data", "type", "import"]
 
 -- | A module standing in for a non-recovered parse failure: one 'DeclarationError' at the error.
 errorModule :: ParseErrorBundle Text Void -> Module Parsed
@@ -148,12 +147,9 @@ documentedDeclaration = do
       DeclarationData <$> dataDeclarationWith annotation
     ]
 
--- | @[local] request name[generics](label : T ?= default, ...) -> T@. @local@ is a positional word
--- (like @private@ / @effect@), not reserved, so a value or generic parameter named @local@ keeps
--- working; the optional keyword sits before @request@ and starts the declaration span when present.
+-- | @request name[generics](label : T ?= default, ...) -> T@.
 requestDeclarationWith :: Maybe (Located Text) -> Parser (RequestDeclaration Parsed)
 requestDeclarationWith annotation = do
-  localSpan <- optional (keyword "local")
   requestSpan <- keyword "request"
   name <- identifier
   generics <- genericParameters
@@ -163,14 +159,13 @@ requestDeclarationWith annotation = do
   pure
     RequestDeclaration
       { annotation = (.value) <$> annotation,
-        local = isJust localSpan,
         name = name.value,
         variableReference = parsedReference name.sourceSpan,
         typeReference = parsedReference name.sourceSpan,
         genericParameters = generics,
         parameters = parameters,
         returnType = returnType,
-        sourceSpan = mergeSpans (declarationStartSpan annotation (fromMaybe requestSpan localSpan)) (sourceSpanOf returnType)
+        sourceSpan = mergeSpans (declarationStartSpan annotation requestSpan) (sourceSpanOf returnType)
       }
 
 -- | @effect name[generics]@ — a marker effect declaration: no parameters, no return type, no

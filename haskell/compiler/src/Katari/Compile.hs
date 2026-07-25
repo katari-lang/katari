@@ -31,7 +31,6 @@ import Katari.Parser (parseModule)
 import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker (checkProgram)
 import Katari.Typechecker.Environment (buildEnvironment)
-import Katari.Typechecker.RootRow (checkRootRows)
 import Katari.Typechecker.ValueGraph (valueSCCs)
 
 -- | What to compile: the user's module sources. The wired-in stdlib is added automatically by
@@ -136,16 +135,10 @@ compile input =
     -- SCCs ('valueSCCs') to grow the value environment dependency-first; it cannot run per module.
     (typedModules, valueEnvironment, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs identifiedAsts) identifiedAsts
 
-    -- The root-row pass runs after the check (which filled every top-level agent's residual row): it
-    -- rejects a @local request@ that escalates out of an inferred top-level row (K3027), a stall the
-    -- runtime would otherwise hit at the first perform. Run over every typed module (stdlib included),
-    -- so the same discipline is a self-check on the stdlib's own @local@ requests.
-    rootRowDiagnostics = checkRootRows typedModules
-
     -- Everything emitted before lowering; lowering (and its diagnostics) is skipped when this has any
     -- error, so a failed compile yields no IR rather than IR built from an ill-typed AST.
     preLoweringDiagnostics =
-      reservedDiagnostics <> parseDiagnostics <> identifyDiagnostics <> environmentDiagnostics <> checkDiagnostics <> rootRowDiagnostics
+      reservedDiagnostics <> parseDiagnostics <> identifyDiagnostics <> environmentDiagnostics <> checkDiagnostics
     lowerable = not (hasErrors preLoweringDiagnostics)
 
     -- Lower (per module). No link step — modules are uploaded individually; schemas travel in the IR.
