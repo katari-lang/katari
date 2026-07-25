@@ -29,6 +29,18 @@ agent bump(value: null) -> integer with store.exclusive {
   }
 }
 
+@"Entry (the ROOT-SERVED domain): bump the counter with NO workspace or serialize installed — the
+`store.exclusive` under `store.modify` rides to the run root, where the RUNTIME itself serves it as
+the outermost serial domain. The task runs at the PROJECT ROOT (the key is un-prefixed) in the
+project-wide durable FIFO, so concurrent runs' sections still never interleave."
+agent main_root() -> string with store.exclusive {
+  let visits = match (store.modify(key = "playground/root_visits", transform = increment)) {
+    case integer(count) -> count
+    case _ -> 0
+  }
+  f"root visits=${string.to_string(value = visits)}"
+}
+
 @"Entry: open a workspace, bump a durable counter twice, write and read a memo, and list the
 workspace. The declared row lists all four store operations because `store.workspace` re-performs
 every one outward (prefixed) to the runtime — even the ones this body does not use."

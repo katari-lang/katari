@@ -221,6 +221,18 @@ test("playground.basics.main: data/match, for, parallel for, handlers, prelude",
   expect(stderr).toContain("delegateAck core→api");
 });
 
+test("playground.store.main_root: an uninstalled store.exclusive is served by the runtime as the project-wide root domain", async () => {
+  // Scenario 19 — the root-served serial domain. `main_root` performs `store.modify` (which rides
+  // `store.exclusive`) with NO workspace / serialize installed, so the escalation reaches the run root
+  // and the runtime runs the critical section itself, against project-root keys, in the project-wide
+  // durable FIFO. Two consecutive runs see the counter advance — the section really ran, atomically,
+  // and its answer crossed back into the program.
+  const first = await katari(["run", "playground.store.main_root", "--project", "playground"]);
+  expect(first.stdout).toContain("root visits=1");
+  const second = await katari(["run", "playground.store.main_root", "--project", "playground"]);
+  expect(second.stdout).toContain("root visits=2");
+});
+
 test("playground.tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
   const { stdout } = await katari(["run", "playground.tools.main", "--project", "playground"]);
   expect(stdout).toContain("result=5");
