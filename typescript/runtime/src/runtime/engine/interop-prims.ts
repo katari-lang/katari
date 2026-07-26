@@ -43,6 +43,7 @@ import {
   compareScalarKeys,
   field,
   integerOf,
+  numberOf,
   recordOf,
   type ScalarKey,
   scalarKeyOfNumber,
@@ -140,6 +141,62 @@ function decodeBase64OrThrow(content: string): Buffer {
     );
   }
   return Buffer.from(content, "base64");
+}
+
+/** What ICU's `longOffset` zone name renders as: bare `GMT` at a zero offset, else `GMT±HH:MM` — with a
+ *  trailing `:SS` for the pre-1900 local-mean-time offsets tzdata records to the second. */
+const LONG_OFFSET_PATTERN = /^GMT(?:([+-])(\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+
+/** An IANA zone's offset at an instant, in minutes east of UTC, or `null` for a zone the database does not
+ *  know (`prelude.time.zone_offset`'s whole contract).
+ *
+ *  The zone database is Node's own: `Intl`'s ICU tables ARE the full IANA set, and they are the same data
+ *  `time.watch`'s cron schedules already resolve their timezone against (cron-parser reads them through
+ *  luxon), so the value plane reaches the offsets the runtime could already compute without a new
+ *  dependency or a hand-rolled table that would rot at the next rule change. The locale is pinned to
+ *  `en-US` because `timeZoneName` is locale-sensitive: another locale may render the pattern with its own
+ *  digits or prefix, and this is a parse, not a presentation. */
+function zoneOffsetMinutes(zone: string, epochMilliseconds: number): number | null {
+  // Floor the instant like `to_civil` does (a `Date` would truncate toward zero, disagreeing for a
+  // fractional pre-epoch instant), then reject what no zone table can answer for at all: a non-finite or
+  // out-of-`Date`-range instant is a broken input, not an unknown zone, so it must not fold into the
+  // `null` that means exactly "no such zone" — it panics, as a non-finite `sleep` deadline does.
+  const instant = new Date(Math.floor(epochMilliseconds));
+  if (Number.isNaN(instant.getTime())) {
+    throw new Error(
+      `time.zone_offset: the instant must be a finite epoch-ms number within the representable range (got ${epochMilliseconds})`,
+    );
+  }
+  let rendered: string | undefined;
+  try {
+    rendered = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" })
+      .formatToParts(instant)
+      .find((part) => part.type === "timeZoneName")?.value;
+  } catch (thrown) {
+    // A RangeError is ICU's only signal for a name it does not know, and it is the whole `null` answer
+    // (the instant was validated above, so it cannot be the cause). Anything else is not a program's
+    // problem — let it panic rather than reporting a broken runtime as an unknown zone.
+    if (thrown instanceof RangeError) return null;
+    throw thrown;
+  }
+  const parts = rendered === undefined ? null : LONG_OFFSET_PATTERN.exec(rendered);
+  if (parts === null) {
+    // The zone resolved but its offset did not render as documented, which means ICU changed its format
+    // out from under us — an engine defect, never a program's problem, so it panics instead of answering
+    // `null` and letting a wrong-but-plausible offset pass as "unknown zone".
+    throw new Error(
+      `time.zone_offset: could not read the offset ICU rendered for ${zone} (got ${rendered ?? "no zone name part"})`,
+    );
+  }
+  const sign = parts[1];
+  if (sign === undefined) return 0;
+  const hours = Number(parts[2]);
+  const minutes = Number(parts[3]);
+  const seconds = Number(parts[4] ?? "0");
+  // The surface unit is whole minutes, so a sub-minute offset (only the pre-1900 local mean times) rounds
+  // to the nearest one rather than dropping up to 59 seconds.
+  const magnitude = Math.round(hours * 60 + minutes + seconds / 60);
+  return sign === "-" ? -magnitude : magnitude;
 }
 
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
@@ -490,6 +547,17 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const key = await readStringField(argument, "key", context);
     const text = await readStringField(argument, "text", context);
     return { kind: "string", value: createHmac("sha256", key).update(text, "utf8").digest("hex") };
+  },
+
+  // ─── prelude.time ───────────────────────────────────────────────────────────────────────────
+  "prelude.time.zone_offset": async (argument, context) => {
+    // A pure function of its two arguments — no clock read — so a replayed turn recomputes the same
+    // offset. That is why the zone lookup is a prim while `time.now` is a reactor call: only the
+    // latter is nondeterministic.
+    const epochMilliseconds = numberOf(field(argument, "epoch_milliseconds"));
+    const zone = await readStringField(argument, "zone", context);
+    const minutes = zoneOffsetMinutes(zone, epochMilliseconds);
+    return minutes === null ? NULL_VALUE : { kind: "integer", value: minutes };
   },
 
   // ─── prelude.files ──────────────────────────────────────────────────────────────────────────

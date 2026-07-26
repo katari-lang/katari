@@ -114,16 +114,20 @@ agent with_deadline[T, effect E lacks race_settled](
   deadline_passed()
 }
 
-// ── the civil (wall-clock) calendar: pure arithmetic, no clock, no timezone database ─────────────
+// ── the civil (wall-clock) calendar: pure arithmetic over an offset, no clock ─────────────────────
 //
 // Howard Hinnant's closed-form civil-calendar algorithms (`civil_from_days` / `days_from_civil`) over
 // the proleptic Gregorian calendar, as plain Katari — exact for any instant, past or future, with no
 // month-length tables. The scope is deliberately honest: an instant is epoch milliseconds (what `now`
-// returns), a wall clock is `civil` fields at a FIXED offset passed explicitly (`offset_minutes`,
-// default 0 = UTC), and named timezones are NOT handled here — resolving "Asia/Tokyo" to an offset
-// takes the IANA database, which lives runtime-side (a `cron` schedule names its zone for exactly that
-// reason). A DST-correct wall clock for a named zone is out of scope on purpose: pass the offset that
-// is true for the instants you are converting.
+// returns), and a wall clock is `civil` fields at a FIXED offset passed explicitly (`offset_minutes`,
+// default 0 = UTC). Resolving a NAMED zone ("Asia/Tokyo") to an offset is not arithmetic at all — the
+// IANA database is political and revised — so it is the one primitive at the end of this module,
+// `zone_offset`, whose answer is exactly the `offset_minutes` every agent here takes. Composing the two
+// is what makes a named-zone wall clock DST-correct: the offset is resolved AT the instant being
+// rendered, so `to_civil(epoch_milliseconds = t, offset_minutes = zone_offset(...))` reads the offset
+// that was actually in force. The reverse direction stays the program's own composition (resolve an
+// offset near the intended instant, then `from_civil`) because a wall clock in a zone is genuinely
+// ambiguous across a DST transition — one local time can name two instants, or none.
 
 @"A wall-clock date-time split into its calendar fields (proleptic Gregorian). Produced by `to_civil`
 and folded back by `from_civil`; a plain value carrying NO zone of its own — it means whatever offset
@@ -337,3 +341,38 @@ agent from_rfc3339(value: string) -> number | null {
     }
   }
 }
+
+// ── the zone database: the one offset arithmetic cannot derive ────────────────────────────────────
+//
+// A named zone's offset is a lookup, not a computation: the IANA rules are political, revised several
+// times a year, and differ per instant within one zone (every DST boundary). No Katari composition can
+// express that table, so the capability lands as the smallest general primitive — one zone in, one
+// offset out — and everything else (a civil wall clock, an RFC3339 render, a day-of-week) composes from
+// it with the agents above. The runtime already carries the database `cron`'s timezone is read against,
+// so this asks the same tables rather than shipping a copy.
+
+@"The offset of the IANA @zone@ in effect at @epoch_milliseconds@, in MINUTES EAST of UTC — exactly the
+`offset_minutes` this module's agents take. Per-instant, so it is DST-correct by construction:
+\"America/New_York\" answers -300 in January and -240 in July, and an instant one minute either side of
+a transition gets the offset that was actually in force. \"UTC\" answers 0, and a zone whose offset is
+not a whole hour answers it faithfully (\"Asia/Kathmandu\" is 345).
+
+`null` when the runtime's zone database does not know @zone@ — a misspelling (\"Asia/Tokio\"), an
+invented name, the empty string. The names it DOES know are exactly the ones a `cron` schedule's
+timezone accepts, being the same database: canonical IANA names, their historical aliases (\"Japan\",
+\"Asia/Calcutta\"), any letter case, and the legacy abbreviation spellings — but prefer a canonical
+name, because an abbreviation names a whole zone WITH its DST rules rather than the standard offset it
+looks like (\"PST\" answers -420 in July, not -480). The failure is a NULL rather than a throw for the
+same reason `string.to_integer`'s is: the argument is the whole explanation, so there is nothing a
+payload could add. Matching it is not optional, which is the point — a mistyped zone cannot silently
+degrade to UTC and render wrong civil times.
+
+Deterministic in its arguments: it reads no clock, so the answer for a given (@zone@,
+@epoch_milliseconds@) never changes within a runtime and a replay recomputes the same offset. The only
+drift possible is a zone database update between executions (a country changing its rules) — the same
+drift a `cron` schedule already lives with. Pre-1900 instants, whose zones ran on local mean time
+recorded to the second, round to the nearest minute."
+primitive agent zone_offset(
+  @"The instant to read the offset AT, in epoch milliseconds; fractions floor, like `to_civil`." epoch_milliseconds: number,
+  @"An IANA zone name (e.g. \"Asia/Tokyo\", \"America/New_York\", \"UTC\"); an unknown name answers null." zone: string,
+) -> integer | null

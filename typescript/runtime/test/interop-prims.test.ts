@@ -471,6 +471,79 @@ describe("prelude.math", () => {
   });
 });
 
+describe("prelude.time.zone_offset", () => {
+  const num = (value: number): Value => ({ kind: "number", value });
+
+  function offsetAt(zone: string, epochMilliseconds: number): Promise<Value> {
+    return run("prelude.time.zone_offset", {
+      epoch_milliseconds: num(epochMilliseconds),
+      zone: str(zone),
+    });
+  }
+
+  test("a zone with no DST answers the same offset at every instant", async () => {
+    await expect(offsetAt("Asia/Tokyo", 0)).resolves.toEqual(int(540));
+    await expect(offsetAt("Asia/Tokyo", Date.UTC(2026, 0, 15))).resolves.toEqual(int(540));
+    await expect(offsetAt("Asia/Tokyo", Date.UTC(2026, 6, 15))).resolves.toEqual(int(540));
+  });
+
+  test("a DST zone answers the offset in force on EACH side of a transition", async () => {
+    // The whole reason this primitive exists: a fixed offset from configuration is wrong for half the
+    // year in any zone with DST, and wrong by an hour within one minute of a transition. US DST 2026
+    // starts 08 March 02:00 EST (07:00Z) and ends 01 November 02:00 EDT (06:00Z).
+    await expect(offsetAt("America/New_York", Date.UTC(2026, 2, 8, 6, 59))).resolves.toEqual(
+      int(-300),
+    );
+    await expect(offsetAt("America/New_York", Date.UTC(2026, 2, 8, 7, 0))).resolves.toEqual(
+      int(-240),
+    );
+    await expect(offsetAt("America/New_York", Date.UTC(2026, 10, 1, 5, 59))).resolves.toEqual(
+      int(-240),
+    );
+    await expect(offsetAt("America/New_York", Date.UTC(2026, 10, 1, 6, 0))).resolves.toEqual(
+      int(-300),
+    );
+    // A half-hour DST shift is answered as faithfully as a whole-hour one (Lord Howe moves 30 minutes).
+    await expect(offsetAt("Australia/Lord_Howe", Date.UTC(2026, 0, 15))).resolves.toEqual(int(660));
+    await expect(offsetAt("Australia/Lord_Howe", Date.UTC(2026, 6, 15))).resolves.toEqual(int(630));
+  });
+
+  test("UTC is 0, and a zone off the hour grid answers its true minutes", async () => {
+    await expect(offsetAt("UTC", 0)).resolves.toEqual(int(0));
+    await expect(offsetAt("UTC", Date.UTC(2026, 6, 15))).resolves.toEqual(int(0));
+    await expect(offsetAt("Etc/UTC", Date.UTC(2026, 6, 15))).resolves.toEqual(int(0));
+    await expect(offsetAt("Asia/Kathmandu", Date.UTC(2026, 6, 15))).resolves.toEqual(int(345));
+    // Pre-1900 zones ran on local mean time, which tzdata records to the second (+09:18:59 here); the
+    // surface unit is whole minutes, so it rounds to the nearest rather than dropping the seconds.
+    await expect(offsetAt("Asia/Tokyo", Date.UTC(1880, 0, 1))).resolves.toEqual(int(559));
+  });
+
+  test("a zone the database does not know answers null, never a silent 0", async () => {
+    await expect(offsetAt("Mars/Phobos", 0)).resolves.toEqual({ kind: "null" });
+    await expect(offsetAt("Asia/Tokio", 0)).resolves.toEqual({ kind: "null" });
+    await expect(offsetAt("", 0)).resolves.toEqual({ kind: "null" });
+  });
+
+  test("the names it accepts are the ones a cron timezone accepts (one database, one answer)", async () => {
+    // The acceptance set is not this prim's invention — it is what the runtime's zone tables know, which
+    // `time.watch`'s cron timezone is already resolved against: aliases and letter case included.
+    await expect(offsetAt("Japan", Date.UTC(2026, 6, 15))).resolves.toEqual(int(540));
+    await expect(offsetAt("asia/tokyo", Date.UTC(2026, 6, 15))).resolves.toEqual(int(540));
+    await expect(offsetAt("Asia/Calcutta", Date.UTC(2026, 6, 15))).resolves.toEqual(int(330));
+    // An abbreviation resolves too, to the whole zone WITH its DST rules — "PST" in July is -420, not
+    // -480. Documented rather than rejected: rejecting it would fork the acceptance set away from cron's.
+    await expect(offsetAt("PST", Date.UTC(2026, 6, 15))).resolves.toEqual(int(-420));
+  });
+
+  test("an instant no zone table can answer for panics rather than reading as an unknown zone", async () => {
+    // A broken instant is not a missing zone: conflating them would let `null` mean two things and hide
+    // an arithmetic bug as a zone typo.
+    await expect(offsetAt("UTC", Number.POSITIVE_INFINITY)).rejects.toThrow(/finite/);
+    await expect(offsetAt("UTC", Number.NaN)).rejects.toThrow(/finite/);
+    await expect(offsetAt("UTC", 8.64e15 + 1)).rejects.toThrow(/range/);
+  });
+});
+
 describe("prelude.reflection.get_metadata", () => {
   const GREETER_SCHEMA: SchemaInfo = {
     input: {
