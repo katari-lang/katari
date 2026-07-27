@@ -1,12 +1,18 @@
--- | @katari apply@ — resolve, compile, and deploy the project to the runtime as a new snapshot.
+-- | @katari apply@ — compile the locked closure and deploy it to the runtime as a new snapshot.
 --
 -- The flow follows the per-module deploy protocol (@docs\/2026-06-19-per-module-snapshot.md@ §3):
 --
---   1. Resolve the dependency closure over the network and (re)write @katari.lock@.
+--   1. Load the closure @katari.lock@ pins, offline, refusing if it disagrees with @katari.toml@.
 --   2. Compile the assembled sources to one 'IRModule' per module.
 --   3. Hash each module and read the runtime's current snapshot head to diff against.
 --   4. Send the /complete/ desired manifest: every module's hash, inlining the IR only for the ones
 --      the runtime does not already hold. Modules absent from the manifest are dropped from head.
+--
+-- Step 1 deliberately does not resolve. Shipping is the worst possible moment to discover a new
+-- closure: it is the one step whose surprises land on a running system, and the one place the code
+-- being deployed must be the code that was checked. A pin may also name the mutable @staging@ set, so
+-- a re-resolving deploy could ship two different closures from the same commit. @katari lock@ freezes
+-- that, and @apply@ ships what was frozen.
 module Katari.Cli.Command.Apply
   ( Options (..),
     optionsParser,
@@ -38,15 +44,15 @@ import Katari.Cli.Api
     updateProject,
     withTrace,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveNodeHelperInvocation, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveNodeHelperInvocation, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch)
 import Katari.Cli.Options (GlobalOptions (..), directoryOption, globalOptionsParser)
 import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), SidecarSection (..))
+import Katari.Project.Discovery (emptyOverlay)
 import Katari.Project.Error (renderProjectError)
-import Katari.Project.Lockfile (lockfileFilename, writeLockfile)
-import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockfileFromResolved, resolveProject)
+import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), loadProjectOffline)
 import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, planUpload)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
@@ -89,15 +95,13 @@ run options = do
   context <- newOutputContext options.global
   root <- resolveProjectRoot "apply" options.projectRoot
 
-  -- 1. Resolve the closure over the network and persist the lockfile.
-  manager <- newTlsManager
+  -- 1. Load the locked closure. Offline: what ships is what `katari lock` froze and `katari check`
+  -- checked, and a lock that no longer matches katari.toml stops the deploy here.
   resolved <-
-    resolveProject manager root >>= \case
+    loadProjectOffline emptyOverlay root >>= \case
       Left projectError -> dieIn "apply" (renderProjectError projectError)
       Right loaded -> pure loaded
-  writeOrExit "apply" "could not write lockfile" $
-    writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
-  warnCompilerMismatch context resolved
+  warnCompilerMismatch context resolved.snapshotCompilerVersion
 
   -- 2. Compile.
   sources <- assembleSourcesOrExit "apply" resolved
@@ -108,7 +112,7 @@ run options = do
   let config = resolved.rootPackage.config :: ProjectConfig
   url <- resolveRuntimeUrl options.global.url config.runtime.url
   token <- requireRuntimeAuth "apply"
-  -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
+  manager <- newTlsManager
   let client = withTrace (verboseLog context) (newRuntimeClient manager url (Just token))
   let name = fromMaybe config.package.name options.projectName
   readme <- readProjectReadme root

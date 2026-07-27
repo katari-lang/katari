@@ -106,9 +106,9 @@ isShaMismatch projectError = case projectError of
   ResolveShaMismatch _ -> True
   _ -> False
 
-isLockfileOutOfDate :: ProjectError -> Bool
-isLockfileOutOfDate projectError = case projectError of
-  ResolveLockfileOutOfDate _ -> True
+isLockOutOfSync :: ProjectError -> Bool
+isLockOutOfSync projectError = case projectError of
+  ResolveLockOutOfSync _ -> True
   _ -> False
 
 -- | A minimal @katari.toml@ for an on-disk fixture: a package name, its declared dependencies, and
@@ -198,6 +198,10 @@ spec = do
       lockfile.snapshot `shouldBe` Just "v0.1.0"
       Map.lookup "lib" lockfile.packages `shouldBe` Just provenance
 
+    it "freezes the snapshot's compiler pin alongside its packages" $ do
+      let project = (projectWith (rootPackageWith ["app"]) []) {snapshotCompilerVersion = Just "0.2.0"}
+      (lockfileFromResolved project).katariCompiler `shouldBe` Just "0.2.0"
+
   describe "checkPinnedSha" $ do
     it "accepts a fetched hash that matches its pin" $
       checkPinnedSha "lib" (Just "deadbeef") "deadbeef" `shouldBe` Right ()
@@ -223,18 +227,49 @@ spec = do
         result <- resolveProject manager (tmp </> "app")
         result `shouldSatisfy` either isCycle (const False)
 
-  describe "loadProjectOffline" $
+  describe "loadProjectOffline" $ do
     it "reports a lock that omits a transitive dependency as out of date" $
       withSystemTempDirectory "katari-offline" $ \tmp -> do
-        let writeProject dir name deps = do
+        let writeProject dir name deps overrides = do
               createDirectoryIfMissing True dir
-              TextIO.writeFile (dir </> "katari.toml") (projectToml name deps [])
+              TextIO.writeFile (dir </> "katari.toml") (projectToml name deps overrides)
         -- The root locks its path dependency 'a' (offline load reads the lock, not overrides), but
         -- 'a' itself declares 'b', which the lock omits — so the lock is an incomplete closure.
-        writeProject (tmp </> "app") "app" ["a"]
-        writeProject (tmp </> "a") "a" ["b"]
+        -- The root's override for 'a' has to be there: a path entry in the lock with no override
+        -- behind it is itself a mismatch, and it would be reported before the closure is walked.
+        writeProject (tmp </> "app") "app" ["a"] [("a", "../a")]
+        writeProject (tmp </> "a") "a" ["b"] []
         TextIO.writeFile
           (tmp </> "app" </> "katari.lock")
           (Text.unlines ["[lock]", "version = 1", "", "[packages.a]", "source = \"path\"", "path = \"../a\""])
         result <- loadProjectOffline emptyOverlay (tmp </> "app")
-        result `shouldSatisfy` either isLockfileOutOfDate (const False)
+        result `shouldSatisfy` either isLockOutOfSync (const False)
+
+    -- The snapshot lives on the network, so an offline load can only learn the compiler it targets
+    -- from where the lock froze it. Without this the warning would simply vanish from every offline
+    -- command, which is the whole reason the field exists.
+    it "reads the snapshot's compiler pin back out of the lock" $
+      withSystemTempDirectory "katari-offline" $ \tmp -> do
+        let writeProject dir name deps overrides = do
+              createDirectoryIfMissing True dir
+              TextIO.writeFile (dir </> "katari.toml") (projectToml name deps overrides)
+        writeProject (tmp </> "app") "app" ["a"] [("a", "../a")]
+        writeProject (tmp </> "a") "a" [] []
+        createDirectoryIfMissing True (tmp </> "a" </> "src")
+        TextIO.writeFile (tmp </> "a" </> "src" </> "a.ktr") "agent noop() -> null { null }"
+        TextIO.writeFile
+          (tmp </> "app" </> "katari.lock")
+          ( Text.unlines
+              [ "[lock]",
+                "version = 1",
+                "katari_compiler = \"9.9.9\"",
+                "",
+                "[packages.a]",
+                "source = \"path\"",
+                "path = \"../a\""
+              ]
+          )
+        result <- loadProjectOffline emptyOverlay (tmp </> "app")
+        case result of
+          Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+          Right resolved -> resolved.snapshotCompilerVersion `shouldBe` Just "9.9.9"

@@ -17,11 +17,13 @@ import Katari.Cli.Command.Docs qualified as Docs
 import Katari.Cli.Command.Env qualified as Env
 import Katari.Cli.Command.File qualified as File
 import Katari.Cli.Command.Init qualified as Init
+import Katari.Cli.Command.Lock qualified as Lock
 import Katari.Cli.Command.Ls qualified as Ls
 import Katari.Cli.Command.Mcp qualified as Mcp
 import Katari.Cli.Command.Project qualified as Project
 import Katari.Cli.Command.Run qualified as Run
 import Katari.Cli.Command.Status qualified as Status
+import Katari.Cli.Command.Update qualified as Update
 import Katari.Cli.Common (cliVersion, dieIn, exitInterrupted)
 import Options.Applicative
 
@@ -31,8 +33,10 @@ data Command
   | CommandBuild Build.Options
   | CommandDocs Docs.Options
   | CommandApply Apply.Options
+  | CommandLock Lock.Options
   | CommandAdd Add.Options
   | CommandRemove Add.Options
+  | CommandUpdate Update.Options
   | CommandRun Run.Options
   | CommandStatus Status.Options
   | CommandCancel Cancel.Options
@@ -50,9 +54,11 @@ commandParser =
         <> command "check" (info (CommandCheck <$> Check.optionsParser) (progDesc "Compile the project and report diagnostics"))
         <> command "build" (info (CommandBuild <$> Build.optionsParser) (progDesc "Compile the project to IR JSON"))
         <> command "docs" (info (CommandDocs <$> Docs.optionsParser) (progDesc "Emit the package's library API reference as JSON (--stdlib for the prelude)"))
-        <> command "apply" (info (CommandApply <$> Apply.optionsParser) (progDesc "Compile and deploy the project to the runtime as a new snapshot"))
-        <> command "add" (info (CommandAdd <$> Add.optionsParser) (progDesc "Add dependencies to katari.toml and refresh katari.lock"))
-        <> command "remove" (info (CommandRemove <$> Add.optionsParser) (progDesc "Remove dependencies from katari.toml and refresh katari.lock"))
+        <> command "apply" (info (CommandApply <$> Apply.optionsParser) (progDesc "Compile the locked closure and deploy it to the runtime as a new snapshot"))
+        <> command "lock" (info (CommandLock <$> Lock.optionsParser) (progDesc "Resolve the closure katari.toml declares and write katari.lock (no compile, no deploy)"))
+        <> command "add" (info (CommandAdd <$> Add.optionsParser) (progDesc "Add dependencies to katari.toml and re-lock"))
+        <> command "remove" (info (CommandRemove <$> Add.optionsParser) (progDesc "Remove dependencies from katari.toml and re-lock"))
+        <> command "update" (info (CommandUpdate <$> Update.optionsParser) (progDesc "Re-pin [dependencies].snapshot to the registry's newest cut (or a named one) and re-lock"))
         <> command "run" (info (CommandRun <$> Run.optionsParser) (progDesc "Start an agent and wait for its result (Ctrl-C detaches)"))
         <> command "status" (info (CommandStatus <$> Status.optionsParser) (progDesc "Show one run's state, outcome and open questions"))
         <> command "cancel" (info (CommandCancel <$> Cancel.optionsParser) (progDesc "Cancel a running run"))
@@ -104,8 +110,10 @@ dispatch = \case
   CommandBuild options -> ("build", Build.run options)
   CommandDocs options -> ("docs", Docs.run options)
   CommandApply options -> ("apply", Apply.run options)
+  CommandLock options -> ("lock", Lock.run options)
   CommandAdd options -> ("add", Add.run Add.ModeAdd options)
   CommandRemove options -> ("remove", Add.run Add.ModeRemove options)
+  CommandUpdate options -> ("update", Update.run options)
   CommandRun options -> ("run", Run.run options)
   CommandStatus options -> ("status", Status.run options)
   CommandCancel options -> ("cancel", Cancel.run options)

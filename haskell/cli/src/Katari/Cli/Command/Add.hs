@@ -10,7 +10,9 @@
 --   2. Rewrite only the @packages@ array via "Katari.Project.Edit" (format-preserving).
 --   3. Re-parse the rewritten text and require the decoded list to match — the final gate that turns
 --      any editor blind spot into an abort instead of a corrupted @katari.toml@.
---   4. Write, then re-resolve over the network and refresh @katari.lock@.
+--   4. Write, then re-lock ('Katari.Cli.Common.writeLockOrExit'). These two commands change what the
+--      closure is, so reconciling the lock in the same breath is the coherent thing to do — and it is
+--      why they, alongside @lock@ and @update@, are the only commands allowed to write it.
 module Katari.Cli.Command.Add
   ( Mode (..),
     Options (..),
@@ -26,15 +28,13 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
-import Katari.Cli.Common (dieIn, dieInternal, resolveProjectRoot, warnCompilerMismatch, writeOrExit)
+import Katari.Cli.Common (dieIn, dieInternal, resolveProjectRoot, writeLockOrExit, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
 import Katari.Project.Config (DependenciesSection (..), ProjectConfig (..), loadKatariTomlLenient, parseKatariToml)
 import Katari.Project.Discovery (configFilename)
 import Katari.Project.Edit (renderEditError, rewritePackages)
 import Katari.Project.Error (renderProjectError)
-import Katari.Project.Lockfile (lockfileFilename, writeLockfile)
-import Katari.Project.Resolve (lockfileFromResolved, resolveProject)
 import Katari.Project.Snapshot (Snapshot (..), loadSnapshotFromUrl)
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
@@ -111,15 +111,9 @@ run mode options = do
             dieInternal subcommand "the rewritten katari.toml decodes to a different package list"
       writeOrExit subcommand "could not write katari.toml" (TextIO.writeFile configPath rewritten)
 
-      -- Re-resolve the new closure and refresh the lock, so `check` and `build` see the new set
-      -- immediately.
-      resolved <-
-        resolveProject manager root >>= \case
-          Left projectError -> dieIn subcommand (renderProjectError projectError)
-          Right loaded -> pure loaded
-      writeOrExit subcommand "could not write lockfile" $
-        writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
-      warnCompilerMismatch context resolved
+      -- Re-lock in the same breath as the edit: `add` and `remove` change what the closure IS, so
+      -- leaving the lock behind would put the project in exactly the state `check` now refuses.
+      _ <- writeLockOrExit subcommand context manager root
       case mode of
         ModeAdd -> progress context ("Added: " <> renderNames requested)
         ModeRemove -> progress context ("Removed: " <> renderNames requested)

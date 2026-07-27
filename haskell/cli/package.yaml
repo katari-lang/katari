@@ -69,7 +69,9 @@ library:
     - Katari.Cli.Command.Build
     - Katari.Cli.Command.Docs
     - Katari.Cli.Command.Apply
+    - Katari.Cli.Command.Lock
     - Katari.Cli.Command.Add
+    - Katari.Cli.Command.Update
     - Katari.Cli.Command.Run
     - Katari.Cli.Command.Status
     - Katari.Cli.Command.Cancel

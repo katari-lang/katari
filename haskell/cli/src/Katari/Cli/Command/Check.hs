@@ -1,8 +1,10 @@
 -- | @katari check@ — compile the project and report diagnostics, writing nothing.
 --
 -- Resolution is offline (disk + cache only), like @build@: a diagnostics command must be
--- deterministic and never block on the network. A project whose dependencies are not locked yet gets
--- a specific remedy instead of a bare failure.
+-- deterministic and never block on the network. That makes @katari.lock@ the thing being checked, so
+-- the load refuses outright when the lock no longer matches @katari.toml@ — an "OK" earned against a
+-- closure the manifest no longer asks for is a wrong answer, and the remedy (@katari lock@) comes
+-- with the refusal.
 module Katari.Cli.Command.Check
   ( Options (..),
     optionsParser,
@@ -21,7 +23,7 @@ import Katari.Compile (CompileResult (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..))
 import Katari.Project.Discovery (emptyOverlay)
-import Katari.Project.Error (ProjectError (..), renderProjectError)
+import Katari.Project.Error (renderProjectError)
 import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), loadProjectOffline)
 import Options.Applicative
 
@@ -43,7 +45,7 @@ run options = do
   root <- resolveProjectRoot "check" options.projectRoot
   resolved <-
     loadProjectOffline emptyOverlay root >>= \case
-      Left projectError -> dieIn "check" (withLockHint projectError)
+      Left projectError -> dieIn "check" (renderProjectError projectError)
       Right loaded -> pure loaded
   sources <- assembleSourcesOrExit "check" resolved
   compileResult <- compileResultOrExit sources
@@ -61,8 +63,3 @@ run options = do
       let rootModule = ModuleName resolved.rootPackage.config.package.name
           projectModuleNames = sort (Map.keys resolved.rootPackage.sources)
        in filter (== rootModule) projectModuleNames <> filter (/= rootModule) projectModuleNames
-    -- The common first-run stumble: dependencies declared but never resolved. Point at the fix.
-    withLockHint projectError = case projectError of
-      ResolveLockfileOutOfDate _ ->
-        renderProjectError projectError <> " (run `katari apply` or `katari add` to write katari.lock)"
-      _ -> renderProjectError projectError

@@ -42,11 +42,16 @@ questions to their operator, and the runtime keeps every run durable.
 | Command | What it does |
 | --- | --- |
 | `katari check` | Compile and report diagnostics |
-| `katari apply` | Deploy a new snapshot |
+| `katari apply` | Deploy a new snapshot (compiles what `katari.lock` pins) |
 | `katari run [AGENT]` | Start a run and wait (Ctrl-C detaches) |
 | `katari ls` | Recent runs (`ls agents`, `ls escalations`, ... for the rest) |
 | `katari status <run>` | One run's state, outcome and open questions |
 | `katari answer <escalation>` | Answer a question a run escalated |
 | `katari cancel <run>` | Cancel a running run |
 | `katari env set KEY --secret` | Store a secret programs read via `env.get_secret` |
-| `katari add PKG` | Add a dependency from the registry |
+| `katari add PKG` | Add a dependency from the registry, and re-lock |
+| `katari update` | Re-pin to the registry's newest snapshot, and re-lock |
+| `katari lock` | Re-lock what `katari.toml` declares (no compile, no deploy) |
+
+`check`, `build` and `apply` all compile the closure `katari.lock` pins, and refuse if you have
+edited `katari.toml` since — run `katari lock` and they will tell you what changed.

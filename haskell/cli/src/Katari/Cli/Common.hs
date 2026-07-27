@@ -29,6 +29,7 @@ module Katari.Cli.Common
     requireRuntimeAuth,
     tryLoadNearestConfig,
     warnCompilerMismatch,
+    writeLockOrExit,
     assembleSourcesOrExit,
     compileResultOrExit,
     compileSourcesOrExit,
@@ -43,13 +44,14 @@ import Control.Monad (unless, when)
 import Data.FileEmbed (embedStringFile, makeRelativeToProject)
 import Data.List (isSuffixOf)
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Cli.Api (ProjectRow (..), RuntimeClient, listProjects, newRuntimeClient, runtimeAuthFromEnvironment, withTrace)
 import Katari.Cli.Options (GlobalOptions (..))
-import Katari.Cli.Output (OutputContext (..), newOutputContext, verboseLog, warn)
+import Katari.Cli.Output (OutputContext (..), newOutputContext, progress, verboseLog, warn)
 import Katari.Compile qualified as Compile
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName)
@@ -57,7 +59,9 @@ import Katari.Diagnostics (hasErrors, renderDiagnostics)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), loadKatariToml)
 import Katari.Project.Discovery (configFilename, findProjectRoot)
 import Katari.Project.Error (renderProjectError)
-import Katari.Project.Resolve (ResolvedProject (..), assembleProject, compileInputSources)
+import Katari.Project.Lockfile (LockedSource, Lockfile (..), loadLockfile, lockfileFilename, writeLockfile)
+import Katari.Project.Resolve (ResolvedProject (..), assembleProject, compileInputSources, lockfileFromResolved, resolveProject)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import System.Directory (canonicalizePath, doesFileExist, findExecutable, getCurrentDirectory)
 import System.Environment (lookupEnv)
@@ -219,11 +223,13 @@ tryLoadNearestConfig subcommand = do
         Left projectError -> dieIn subcommand (renderProjectError projectError)
         Right config -> pure (Just config)
 
--- | Warn (never fail) when the registry snapshot declares a @katari_compiler@ that disagrees with
--- this CLI's compiler. Versions compare on their first three dotted components, so the CLI's
--- four-component Cabal version matches the registry's three-component pin.
-warnCompilerMismatch :: OutputContext -> ResolvedProject -> IO ()
-warnCompilerMismatch output resolved = case resolved.snapshotCompilerVersion of
+-- | Warn (never fail) when a registry snapshot declares a @katari_compiler@ that disagrees with this
+-- CLI's compiler. Versions compare on their first three dotted components, so the CLI's
+-- four-component Cabal version matches the registry's three-component pin. Takes the pinned version
+-- rather than a resolved project so the offline commands (which read it back from @katari.lock@) and
+-- @update@ (which reads it from the registry index) can warn on the same footing as a fresh resolve.
+warnCompilerMismatch :: OutputContext -> Maybe Text -> IO ()
+warnCompilerMismatch output pinnedVersion = case pinnedVersion of
   Just pinned
     | releaseComponents pinned /= releaseComponents cliVersion ->
         warn
@@ -239,6 +245,65 @@ warnCompilerMismatch output resolved = case resolved.snapshotCompilerVersion of
     -- Compare on the release triple only: strip a pre-release suffix (@0.1.0-rc6@ -> @0.1.0@)
     -- before splitting, so an rc build still matches the registry's three-component pin.
     releaseComponents version = take 3 (Text.splitOn "." (Text.takeWhile (/= '-') version))
+
+-- | Resolve the declared closure over the network, write @katari.lock@, and report what moved.
+--
+-- The CLI's only lockfile writer: @lock@ is this and nothing else, and @add@ / @remove@ / @update@
+-- call it immediately after their manifest edit so the file they wrote and the closure they froze are
+-- one operation. Nothing else may write the lock — @check@, @build@ and @apply@ read it and refuse
+-- when it disagrees with @katari.toml@. Reporting lives here rather than in each caller so every path
+-- that changes the closure says so in the same words.
+writeLockOrExit :: Text -> OutputContext -> Manager -> FilePath -> IO Lockfile
+writeLockOrExit subcommand output manager root = do
+  -- Read the outgoing lock first: it is the only chance to say what this run changed, which is most
+  -- of why locking is worth doing as its own step.
+  previous <- loadPreviousLock (root </> lockfileFilename)
+  resolved <-
+    resolveProject manager root >>= \case
+      Left projectError -> dieIn subcommand (renderProjectError projectError)
+      Right loaded -> pure loaded
+  let lockfile = lockfileFromResolved resolved
+  writeOrExit subcommand "could not write lockfile" $
+    writeLockfile (root </> lockfileFilename) lockfile
+  warnCompilerMismatch output resolved.snapshotCompilerVersion
+  reportLockChanges output previous lockfile
+  pure lockfile
+
+-- | The lock as it stands, or an empty package set when there is none. A lock that cannot be parsed
+-- counts as absent rather than fatal: rewriting it is exactly the operation in progress.
+loadPreviousLock :: FilePath -> IO (Map Text LockedSource)
+loadPreviousLock path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure Map.empty
+    else
+      loadLockfile path >>= \case
+        Left _ -> pure Map.empty
+        Right lockfile -> pure lockfile.packages
+
+-- | Say what moved. A package that changed source (a new snapshot pinning a new revision, an added
+-- override) is the interesting case, so it is called out separately from arrivals and departures.
+reportLockChanges :: OutputContext -> Map Text LockedSource -> Lockfile -> IO ()
+reportLockChanges output previous lockfile = do
+  progress output (headline <> against)
+  mapM_ (\name -> progress output ("  + " <> name)) added
+  mapM_ (\name -> progress output ("  - " <> name)) removed
+  mapM_ (\name -> progress output ("  ~ " <> name)) changed
+  where
+    current = lockfile.packages
+    added = Map.keys (Map.difference current previous)
+    removed = Map.keys (Map.difference previous current)
+    changed =
+      [ name
+        | (name, source) <- Map.toAscList (Map.intersection current previous),
+          Map.lookup name previous /= Just source
+      ]
+    total = Text.pack (show (Map.size current))
+    headline
+      | null added && null removed && null changed =
+          "katari.lock is already up to date — " <> total <> " package(s)"
+      | otherwise = "Locked " <> total <> " package(s)"
+    against = maybe "" (" against " <>) lockfile.snapshot
 
 -- | Flatten a resolved project into the compiler's @module name -> source@ map, exiting with code 2
 -- on any assembly error (a cross-package module collision, an out-of-namespace module, …).

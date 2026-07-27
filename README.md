@@ -156,7 +156,7 @@ Deploying and running a program needs a live runtime. Bring one up locally, then
 pnpm run dev
 
 # In your project directory:
-katari apply               # compile, bundle, and deploy a snapshot
+katari apply               # compile the locked closure, bundle, and deploy a snapshot
 katari run main.main       # start the entry agent and wait for its result
 ```
 
@@ -165,6 +165,28 @@ setting `KATARI_API_KEY` (how the CLI authenticates with the runtime), and
 [`examples/playground/README.md`](examples/playground/README.md) is a fully worked end-to-end
 session. Run `katari --help` for the full command list (`apply`, `run`, `status`, `cancel`,
 `answer`, `ls`, `env`, `file`, `mcp`, `project`, …).
+
+### Dependencies and the lockfile
+
+`katari.lock` records the exact closure your project compiles against, and it is the only thing
+`check`, `build` and `apply` read — none of them touches the registry. Four commands write it:
+
+```sh
+katari add PKG             # declare a dependency in katari.toml, and re-lock
+katari remove PKG          # undeclare it, and re-lock
+katari update              # re-pin [dependencies].snapshot to the registry's newest cut, and re-lock
+katari update SNAPSHOT     # ... or to a named cut ("staging" for the mutable candidate set)
+katari lock                # re-lock what katari.toml already declares, and nothing else
+```
+
+Everything else reads. If you hand-edit `katari.toml` — moving the snapshot pin, adding an
+`[overrides]` entry — `check`, `build` and `apply` **refuse** until you run `katari lock`, naming
+what disagrees. A green check earned against a closure the manifest no longer asks for would be a
+wrong answer, not a warning worth printing.
+
+Because the lock is frozen at lock time, `snapshot = "staging"` is safe to pin even though the
+staging set itself is mutable: two `apply`s from the same commit deploy the same closure, and you
+take a newer staging only when you ask for one.
 
 ## Documentation and examples
 

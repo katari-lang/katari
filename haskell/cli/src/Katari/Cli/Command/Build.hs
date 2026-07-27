@@ -1,7 +1,8 @@
 -- | @katari build@ — compile the project to IR and write it to disk.
 --
 -- Resolution is offline (disk + cache only): the dependency closure must already be locked, which
--- @katari apply@ does. The output is one JSON object mapping each module name to its lowered IR — the
+-- @katari lock@ does, and the load refuses when that lock no longer matches @katari.toml@ rather than
+-- emitting IR for a closure nobody asked for. The output is one JSON object mapping each module name to its lowered IR — the
 -- same per-module 'IRModule' shape the runtime stores — so the artifact can be inspected or fed to a
 -- runtime out of band. Default output is @\<root>\/.katari\/dist\/ir.json@.
 module Katari.Cli.Command.Build

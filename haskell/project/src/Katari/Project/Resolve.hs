@@ -22,18 +22,21 @@
 --
 -- Two entry points, mirroring @npm install@ vs @npm ci@:
 --
---   * 'resolveProject' — network-capable, run by @katari apply@ / @katari resolve@. Re-resolves from
---     @katari.toml@ + the registry and writes a fresh lockfile (via 'lockfileFromResolved'); the
---     caller owns the 'Manager'. An existing @katari.lock@ is consulted only as a cache hint, so an
---     unchanged dependency is not re-downloaded.
+--   * 'resolveProject' — network-capable, run by @katari lock@ (and by the manifest editors @add@ /
+--     @remove@ / @update@, which re-lock right after their edit). Re-resolves from @katari.toml@ +
+--     the registry and produces a fresh lockfile (via 'lockfileFromResolved'); the caller owns the
+--     'Manager'. An existing @katari.lock@ is consulted only as a cache hint, so an unchanged
+--     dependency is not re-downloaded.
 --
 --   * 'loadProjectOffline' — pure disk + cache, never the network. @katari.lock@ is authoritative:
 --     its packages are the full, already-flattened closure, so this neither re-walks the graph nor
---     needs the registry. A declared dependency missing from the lock is
---     'Katari.Project.Error.ResolveLockfileOutOfDate'; a locked package whose source tree is absent
---     from the cache is 'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP and
---     @katari build@ use, so neither blocks on the network. It takes a 'SourceOverlay' that feeds the
---     LSP's unsaved buffers into the root package.
+--     needs the registry. Because it is authoritative, it is first checked against @katari.toml@
+--     ("Katari.Project.Reconcile"): any disagreement is a 'Katari.Project.Error.ResolveLockOutOfSync'
+--     and the load stops there, since compiling a closure the manifest no longer asks for would
+--     report success about the wrong package set. A locked package whose source tree is absent from
+--     the cache is 'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP, @katari
+--     check@, @katari build@ and @katari apply@ use, so none of them blocks on the network. It takes
+--     a 'SourceOverlay' that feeds the LSP's unsaved buffers into the root package.
 module Katari.Project.Resolve
   ( ResolvedProject (..),
     ResolvedPackage (..),
@@ -77,6 +80,8 @@ import Katari.Project.Error
   ( DependencyCycleInfo (..),
     DependencyInfo (..),
     DependencyNameMismatchInfo (..),
+    LockDriftInfo (..),
+    LockMismatch (..),
     MissingConfigInfo (..),
     ModuleCollisionInfo (..),
     NotCachedInfo (..),
@@ -95,6 +100,7 @@ import Katari.Project.Lockfile
     lockfileFilename,
     lockfileFormatVersion,
   )
+import Katari.Project.Reconcile (closureMismatches, manifestMismatches)
 import Katari.Project.Snapshot (Snapshot (..), loadSnapshotFromUrl)
 import Katari.Stdlib (isReservedModuleName)
 import Network.HTTP.Client (Manager)
@@ -205,7 +211,8 @@ data ResolveContext = ResolveContext
   }
 
 -- | Load a project rooted at @rootDir@ and recursively resolve every dependency, fetching as needed
--- over @manager@. Used by @katari apply@ / @katari resolve@ to (re)generate the lockfile.
+-- over @manager@. Used by @katari lock@ (and the manifest editors that re-lock) to regenerate the
+-- lockfile.
 resolveProject :: Manager -> FilePath -> IO (Either ProjectError ResolvedProject)
 resolveProject manager rootDir = runResolveM (resolveProjectM manager rootDir)
 
@@ -290,7 +297,7 @@ requireSnapshot context name = do
         pure snapshot
 
 -- | The prior lockfile's git pins, keyed by dependency name, for cache reuse. Absent or unreadable
--- lock → no hints (a regenerating @apply@ must not be blocked by a stale lock).
+-- lock → no hints (the command that regenerates the lock must not be blocked by a stale one).
 loadPriorPins :: FilePath -> IO (Map Text GitSource)
 loadPriorPins path = do
   exists <- doesFileExist path
@@ -322,35 +329,42 @@ loadProjectOfflineM overlay rootDir = do
   rootSources <- liftE (scanSources overlay canonicalRoot rootConfig)
   let cache = projectCachePaths canonicalRoot
   lockfile <- loadLockfileOrEmpty (canonicalRoot </> lockfileFilename)
-  -- A root-declared dependency missing from the lock means the lock is stale; check before loading so
-  -- the remedy is reported against the lock rather than as a downstream cache miss.
-  forM_ rootConfig.dependencies.packages (requireLocked lockfile)
+  -- Everything the manifest and the lock can settle between themselves, before a single package is
+  -- touched: a drifted lock is then reported as a lock problem rather than as the cache miss it
+  -- would otherwise surface as further down.
+  requireInSync (manifestMismatches rootConfig lockfile)
   dependencyPackages <- forM (Map.toList lockfile.packages) $ \(name, lockedSource) ->
     (name,) <$> loadLockedPackage canonicalRoot cache name lockedSource
-  -- The lock must be the full, already-flattened closure: any dependency a locked package itself
-  -- declares must also be locked, or assembly would later see a dangling import for a silently
-  -- dropped transitive package.
-  forM_ dependencyPackages $ \(_, package) ->
-    forM_ package.config.dependencies.packages (requireLocked lockfile)
+  -- The lock must be the full, already-flattened closure, and nothing more: a transitive dependency
+  -- left out would surface later as a dangling import, and one left behind by a removed dependency
+  -- would keep compiling against a package the manifest no longer asks for. The edges live in each
+  -- locked package's own katari.toml, which is why this half waits until they are loaded.
+  let lockedGraph =
+        Map.fromList [(name, package.config.dependencies.packages) | (name, package) <- dependencyPackages]
+  requireInSync (closureMismatches rootConfig.dependencies.packages lockedGraph)
   pure
     ResolvedProject
       { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
         depPackages = Map.fromList dependencyPackages,
-        snapshotCompilerVersion = Nothing
+        -- The compiler pin the snapshot declared, read back from where the lock froze it: an offline
+        -- load must not fetch the snapshot again to learn it.
+        snapshotCompilerVersion = lockfile.katariCompiler
       }
   where
-    requireLocked lockfile name =
-      unless (Map.member name lockfile.packages) $
-        throwError (ResolveLockfileOutOfDate DependencyInfo {dependency = name})
+    requireInSync :: List LockMismatch -> ResolveM ()
+    requireInSync mismatches =
+      unless (null mismatches) $
+        throwError (ResolveLockOutOfSync LockDriftInfo {mismatches = mismatches})
 
--- | Read @katari.lock@, or an empty lockfile when the file is absent (a project with no dependencies
--- needs no lock; the per-dependency check above turns a real omission into 'ResolveLockfileOutOfDate').
+-- | Read @katari.lock@, or an empty lockfile when the file is absent. A project with no dependencies
+-- needs no lock; a real omission is caught by the reconciliation above, which sees an empty package
+-- set beside a manifest that declares one.
 loadLockfileOrEmpty :: FilePath -> ResolveM Lockfile
 loadLockfileOrEmpty path = do
   exists <- liftIO (doesFileExist path)
   if exists
     then liftE (loadLockfile path)
-    else pure Lockfile {version = lockfileFormatVersion, snapshot = Nothing, packages = Map.empty}
+    else pure Lockfile {version = lockfileFormatVersion, snapshot = Nothing, katariCompiler = Nothing, packages = Map.empty}
 
 -- | Load one locked dependency from where its 'LockedSource' says it lives, all from disk/cache.
 loadLockedPackage :: FilePath -> CachePaths -> Text -> LockedSource -> ResolveM ResolvedPackage
@@ -424,6 +438,7 @@ lockfileFromResolved project =
   Lockfile
     { version = lockfileFormatVersion,
       snapshot = project.rootPackage.config.dependencies.snapshot,
+      katariCompiler = project.snapshotCompilerVersion,
       packages = Map.mapMaybe (\package -> package.provenance) project.depPackages
     }
 

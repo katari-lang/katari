@@ -30,6 +30,7 @@ sampleLockfile =
   Lockfile
     { version = 1,
       snapshot = Just "v0.1.0",
+      katariCompiler = Just "0.1.0",
       packages =
         Map.fromList
           [ ("list_utils", LockedGit GitSource {url = "https://github.com/katari-lang/list_utils", rev = "v0.2.1", sha = shaListUtils}),
@@ -45,7 +46,7 @@ spec = do
       parseLockfile "katari.lock" (renderLockfile sampleLockfile) `shouldBe` Right sampleLockfile
 
     it "renders an empty path-only project deterministically (no [packages] when none)" $ do
-      let lockfile = Lockfile {version = 1, snapshot = Nothing, packages = Map.empty}
+      let lockfile = Lockfile {version = 1, snapshot = Nothing, katariCompiler = Nothing, packages = Map.empty}
       parseLockfile "katari.lock" (renderLockfile lockfile) `shouldBe` Right lockfile
 
     it "emits package tables in ascending key order (deterministic, reproducible bytes)" $ do
@@ -70,3 +71,10 @@ spec = do
     it "rejects an unsupported lockfile format version" $
       parseLockfile "katari.lock" "[lock]\nversion = 999\n"
         `shouldSatisfy` either isLockfileValidationError (const False)
+
+    -- katari_compiler was added after the first locks were written, so it has to stay optional: a
+    -- lock predating it must keep loading, reporting the pin as unknown rather than failing.
+    it "reads a lock written before katari_compiler existed, leaving the pin unknown" $
+      case parseLockfile "katari.lock" "[lock]\nversion = 1\nsnapshot = \"v0.1.0\"\n" of
+        Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+        Right lockfile -> lockfile.katariCompiler `shouldBe` Nothing

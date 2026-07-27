@@ -22,26 +22,44 @@
 --      candidate set lives at @\<root>/package-sets/staging.toml@, every immutable cut lives under
 --      @\<root>/package-sets/snapshots/\<name>.toml@.
 --
+--   3. Read the registry's /index/ at @\<root>/package-sets/index.toml@ — the list of every cut and
+--      when it was made. The CLI reaches a registry through a plain raw-file base URL, which has no
+--      directory listing, so "which snapshots exist" has to be published as a file; and the answer
+--      cannot be recovered from the filenames, whose @\<8-hex>@ tail is a content hash with no order
+--      (@a7cc1e51@ sorts before @bcc95cb3@ yet is the newer cut). The index therefore carries each
+--      cut's timestamp as data, and 'newestSnapshot' orders on that.
+--
 -- Downstream ("Katari.Project.Resolve") looks up each dep, fetches the tarball at the pinned
 -- @(repo, ref)@ via "Katari.Project.Fetch", and verifies the download against the @sha256@ pin.
 module Katari.Project.Snapshot
   ( Snapshot (..),
     parseSnapshot,
     loadSnapshotFromUrl,
+    SnapshotIndex (..),
+    SnapshotIndexEntry (..),
+    snapshotIndexFormatVersion,
+    parseSnapshotIndex,
+    loadSnapshotIndexFromUrl,
+    newestSnapshot,
   )
 where
 
+import Control.Monad (unless)
 import Data.ByteString.Lazy qualified as ByteStringLazy
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import GHC.List (List)
 import Katari.Project.Config (requireValidPackageName)
 import Katari.Project.Error
-  ( ProjectError (..),
+  ( FileErrorInfo,
+    ProjectError (..),
+    UrlErrorInfo,
     UrlInfo (..),
     loadAndParse,
     validationError,
@@ -64,12 +82,13 @@ data Snapshot = Snapshot
   deriving (Show, Eq)
 
 -- | URL scheme prefixes and the registry-root path convention.
-schemeFile, schemeHttps, packageSetsDir, snapshotsDir, stagingName, tomlSuffix :: Text
+schemeFile, schemeHttps, packageSetsDir, snapshotsDir, stagingName, indexName, tomlSuffix :: Text
 schemeFile = "file://"
 schemeHttps = "https://"
 packageSetsDir = "package-sets"
 snapshotsDir = "snapshots"
 stagingName = "staging"
+indexName = "index"
 tomlSuffix = ".toml"
 
 -- ===========================================================================
@@ -132,10 +151,7 @@ validateSnapshotPackage path (name, rawSource) = do
 loadSnapshotFromUrl :: Manager -> Text -> Maybe Text -> IO (Either ProjectError Snapshot)
 loadSnapshotFromUrl manager baseUrl maybeVersion = case snapshotUrl of
   Left projectError -> pure (Left projectError)
-  Right url
-    | Just localPath <- localFilePath url -> loadFromFile localPath
-    | schemeHttps `Text.isPrefixOf` url -> loadFromHttps url
-    | otherwise -> pure (Left (SnapshotUnsupportedUrl UrlInfo {url = url}))
+  Right url -> loadRegistryFile manager SnapshotIOError SnapshotHttpError parseSnapshot url
   where
     -- A direct @.toml@ URL is used as-is; a registry root is extended by the registry's layout
     -- convention, which requires the snapshot name.
@@ -161,15 +177,153 @@ loadSnapshotFromUrl manager baseUrl maybeVersion = case snapshotUrl of
 
     invalid = validationError SnapshotValidationError (Text.unpack baseUrl)
 
-    loadFromFile :: FilePath -> IO (Either ProjectError Snapshot)
-    loadFromFile = loadAndParse SnapshotIOError parseSnapshot
-
-    loadFromHttps :: Text -> IO (Either ProjectError Snapshot)
-    loadFromHttps url = do
-      result <- httpGetBytes manager url SnapshotHttpError
-      pure (result >>= \body -> parseSnapshot (Text.unpack url) (decodeBody body))
-
+-- | Read one registry file, whichever transport its URL names. The scheme dispatch is shared by the
+-- snapshot and index loaders so a registry stays reachable the same way for both, and each caller
+-- supplies the error constructors that say which file failed.
+loadRegistryFile ::
+  Manager ->
+  (FileErrorInfo -> ProjectError) ->
+  (UrlErrorInfo -> ProjectError) ->
+  (FilePath -> Text -> Either ProjectError a) ->
+  Text ->
+  IO (Either ProjectError a)
+loadRegistryFile manager toIOError toHttpError parse url
+  | Just localPath <- localFilePath url = loadAndParse toIOError parse localPath
+  | schemeHttps `Text.isPrefixOf` url = do
+      result <- httpGetBytes manager url toHttpError
+      pure (result >>= \body -> parse (Text.unpack url) (decodeBody body))
+  | otherwise = pure (Left (SnapshotUnsupportedUrl UrlInfo {url = url}))
+  where
     decodeBody = TextEncoding.decodeUtf8Lenient . ByteStringLazy.toStrict
+
+-- ===========================================================================
+-- The snapshot index
+-- ===========================================================================
+
+-- | The registry's list of immutable cuts, newest identifiable by 'newestSnapshot'.
+data SnapshotIndex = SnapshotIndex
+  { formatVersion :: Int,
+    snapshots :: List SnapshotIndexEntry
+  }
+  deriving (Show, Eq)
+
+-- | One cut: its name (the value that goes in @[dependencies].snapshot@), when it was cut, and the
+-- compiler that set targets.
+data SnapshotIndexEntry = SnapshotIndexEntry
+  { name :: Text,
+    cutTime :: Text,
+    compilerVersion :: Text
+  }
+  deriving (Show, Eq)
+
+-- | Current index schema version. Bumped only when the on-disk format changes incompatibly.
+snapshotIndexFormatVersion :: Int
+snapshotIndexFormatVersion = 1
+
+data RawSnapshotIndex = RawSnapshotIndex
+  { version :: Int,
+    snapshots :: List RawIndexEntry
+  }
+
+data RawIndexEntry = RawIndexEntry
+  { name :: Text,
+    cutTime :: Text,
+    katariCompiler :: Text
+  }
+
+instance DecodeTOML RawSnapshotIndex where
+  tomlDecoder =
+    RawSnapshotIndex
+      <$> getField "version"
+      <*> (fromMaybe [] <$> getFieldOpt "snapshots")
+
+instance DecodeTOML RawIndexEntry where
+  tomlDecoder =
+    RawIndexEntry
+      <$> getField "name"
+      <*> getField "cut_time"
+      <*> getField "katari_compiler"
+
+-- | Parse the textual contents of @package-sets/index.toml@.
+parseSnapshotIndex :: FilePath -> Text -> Either ProjectError SnapshotIndex
+parseSnapshotIndex path text = case decodeWith tomlDecoder text of
+  Left tomlError -> validationError IndexParseError path (renderTOMLError tomlError)
+  Right (raw :: RawSnapshotIndex) -> do
+    -- An unrecognised version must fail loudly rather than be misread as v1, which would silently
+    -- ignore whatever a newer registry added.
+    unless (raw.version == snapshotIndexFormatVersion) $
+      validationError
+        IndexValidationError
+        path
+        ( "unsupported index version "
+            <> Text.pack (show raw.version)
+            <> " (this tool understands version "
+            <> Text.pack (show snapshotIndexFormatVersion)
+            <> "); upgrade katari"
+        )
+    entries <- traverse (validateIndexEntry path) raw.snapshots
+    pure SnapshotIndex {formatVersion = raw.version, snapshots = entries}
+
+-- | Validate one entry: the name must be splice-safe (it becomes a path segment when the snapshot is
+-- fetched) and the timestamp must be the index's exact shape, since ordering compares those strings.
+validateIndexEntry :: FilePath -> RawIndexEntry -> Either ProjectError SnapshotIndexEntry
+validateIndexEntry path raw
+  | not (isSafeSnapshotVersion raw.name) =
+      validationError IndexValidationError path ("snapshot name '" <> raw.name <> "' must contain only [A-Za-z0-9._-]")
+  | not (isCutTime raw.cutTime) =
+      validationError
+        IndexValidationError
+        path
+        ("snapshot '" <> raw.name <> "' has a cut_time that is not YYYY-MM-DDTHH:MM:SSZ: " <> raw.cutTime)
+  | otherwise =
+      Right SnapshotIndexEntry {name = raw.name, cutTime = raw.cutTime, compilerVersion = raw.katariCompiler}
+
+-- | The most recently cut snapshot, or 'Nothing' for an empty index.
+--
+-- Ordering is by 'cutTime' and never by name: the name's @\<8-hex>@ tail is a hash of the staging
+-- file, so sorting names would order cuts by content and quietly hand back an older set. Comparing
+-- the timestamps as text is sound precisely because 'isCutTime' has already pinned them to one
+-- fixed-width UTC shape, where lexicographic order is chronological order.
+newestSnapshot :: SnapshotIndex -> Maybe SnapshotIndexEntry
+newestSnapshot index = foldl' pickNewer Nothing index.snapshots
+  where
+    pickNewer best entry = case best of
+      Just current | current.cutTime >= entry.cutTime -> best
+      _ -> Just entry
+
+-- | Load the registry's index. The base URL must be a registry root: a URL naming a single snapshot
+-- file says nothing about which other cuts exist, so there is no index to read beside it.
+loadSnapshotIndexFromUrl :: Manager -> Text -> IO (Either ProjectError SnapshotIndex)
+loadSnapshotIndexFromUrl manager baseUrl =
+  let trimmed = Text.dropWhileEnd (== '/') baseUrl
+   in if tomlSuffix `Text.isSuffixOf` trimmed
+        then
+          pure
+            ( validationError
+                IndexValidationError
+                (Text.unpack baseUrl)
+                "the registry URL names a single snapshot file, so it has no snapshot index; point [dependencies].registry at the registry root"
+            )
+        else
+          loadRegistryFile
+            manager
+            IndexIOError
+            IndexHttpError
+            parseSnapshotIndex
+            (Text.intercalate "/" [trimmed, packageSetsDir, indexName <> tomlSuffix])
+
+-- | The one timestamp shape the index speaks: @YYYY-MM-DDTHH:MM:SSZ@, UTC, no fractional seconds.
+-- Fixed width is the point — it is what makes a text comparison a chronological one, so an entry
+-- that strays from it is rejected rather than silently misordering the set.
+isCutTime :: Text -> Bool
+isCutTime value =
+  length characters == length shape && and (zipWith matches characters shape)
+  where
+    characters = Text.unpack value
+    -- A '0' stands for "any digit"; every other character must appear verbatim.
+    shape :: List Char
+    shape = "0000-00-00T00:00:00Z"
+    matches character expected = if expected == '0' then isDigit character else character == expected
 
 -- | A snapshot version is safe to splice into the registry path when it is a plain version token:
 -- non-empty and built only from @[A-Za-z0-9._-]@. Forbidding @/@ (and any other separator) is what

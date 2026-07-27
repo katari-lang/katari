@@ -33,6 +33,10 @@ module Katari.Project.Error
     ShaMismatchInfo (..),
     DependencyCycleInfo (..),
     NotCachedInfo (..),
+    LockDriftInfo (..),
+    LockMismatch (..),
+    SnapshotPinInfo (..),
+    SourceChangeInfo (..),
 
     -- * IO helpers
     readFileOrError,
@@ -76,6 +80,11 @@ data ProjectError
   | SnapshotValidationError FileErrorInfo
   | -- | The registry URL scheme is unsupported (only @file://@ and @https://@ are allowed).
     SnapshotUnsupportedUrl UrlInfo
+  | -- Snapshot index (the registry's list of cuts) ------------------------------------------------
+    IndexIOError FileErrorInfo
+  | IndexHttpError UrlErrorInfo
+  | IndexParseError FileErrorInfo
+  | IndexValidationError FileErrorInfo
   | -- Fetch (git tarball) -----------------------------------------------------------------------
     FetchHttpError UrlErrorInfo
   | FetchTarballError UrlErrorInfo
@@ -99,10 +108,12 @@ data ProjectError
     -- snapshot is authoritative for the whole closure, this also fires when a /transitive/ dep is
     -- absent from that snapshot.
     ResolveUnresolvedDependency DependencyInfo
-  | -- | A dep is in @katari.toml@ but missing from @katari.lock@; the lock must be refreshed.
-    ResolveLockfileOutOfDate DependencyInfo
+  | -- | @katari.lock@ no longer describes the closure @katari.toml@ asks for. Every offline load
+    -- refuses on this rather than compiling the stale closure, because a green result against the
+    -- wrong package set is a wrong answer, not a warning.
+    ResolveLockOutOfSync LockDriftInfo
   | -- | Offline load: a locked dependency's source tree is not present in the cache, so it cannot be
-    -- assembled without going to the network. The caller (CLI) should run @katari apply@.
+    -- assembled without going to the network. The caller (CLI) should run @katari lock@.
     ResolvePackageNotCached NotCachedInfo
   | -- | A fetched tarball's sha256 disagreed with its pin.
     ResolveShaMismatch ShaMismatchInfo
@@ -207,6 +218,44 @@ data NotCachedInfo = NotCachedInfo
   }
   deriving (Show, Eq)
 
+-- | Every way this lock disagrees with this manifest, reported together so one @katari lock@ fixes
+-- all of them instead of the user rediscovering them one at a time.
+newtype LockDriftInfo = LockDriftInfo
+  { mismatches :: List LockMismatch
+  }
+  deriving (Show, Eq)
+
+-- | One disagreement between @katari.lock@ and @katari.toml@. The closed set of ways the two can
+-- diverge; "Katari.Project.Reconcile" decides which apply and this module renders them.
+data LockMismatch
+  = -- | The lock was resolved against a different registry snapshot than the manifest now pins.
+    SnapshotPinChanged SnapshotPinInfo
+  | -- | A package the closure reaches has no entry in the lock (a dependency was added).
+    DependencyMissingFromLock DependencyInfo
+  | -- | The lock holds a package the closure no longer reaches (a dependency was removed).
+    DependencyOrphanedInLock DependencyInfo
+  | -- | The lock resolved a package from somewhere the manifest no longer sends it (an
+    -- @[overrides]@ entry was added, changed, or deleted).
+    DependencySourceChanged SourceChangeInfo
+  deriving (Show, Eq)
+
+-- | The two snapshot ids: what the lock was made against, and what the manifest pins now. Either
+-- side may be absent, since a project resolving only path/git overrides pins no snapshot at all.
+data SnapshotPinInfo = SnapshotPinInfo
+  { locked :: Maybe Text,
+    declared :: Maybe Text
+  }
+  deriving (Show, Eq)
+
+-- | Where a dependency is locked from versus where the manifest says it comes from, each already
+-- phrased for a human ("path ../fork", "git https://… @ abc123", "the registry snapshot").
+data SourceChangeInfo = SourceChangeInfo
+  { dependency :: Text,
+    locked :: Text,
+    declared :: Text
+  }
+  deriving (Show, Eq)
+
 -- ===========================================================================
 -- IO helpers
 -- ===========================================================================
@@ -279,6 +328,11 @@ renderProjectError projectError = case projectError of
   SnapshotValidationError info -> "Invalid registry snapshot: " <> renderFileError info
   SnapshotUnsupportedUrl info ->
     "Unsupported registry URL scheme (only file:// and https:// are allowed): " <> info.url
+  -- Snapshot index (the registry's list of cuts) --------------------------------------------------
+  IndexIOError info -> "Cannot read the registry snapshot index: " <> renderFileError info
+  IndexHttpError info -> "Cannot download the registry snapshot index: " <> renderUrlError info
+  IndexParseError info -> "Invalid registry snapshot index: " <> renderFileError info
+  IndexValidationError info -> "Invalid registry snapshot index: " <> renderFileError info
   -- Fetch (git tarball) ---------------------------------------------------------------------------
   FetchHttpError info -> "Cannot download dependency: " <> renderUrlError info
   FetchTarballError info -> "Cannot extract dependency tarball: " <> renderUrlError info
@@ -309,16 +363,17 @@ renderProjectError projectError = case projectError of
     "Dependency declared as " <> info.declaredKey <> " but its [package].name is " <> info.actualName
   ResolveUnresolvedDependency info ->
     "Dependency " <> info.dependency <> " has no override and no registry snapshot pin"
-  ResolveLockfileOutOfDate info ->
-    "Dependency "
-      <> info.dependency
-      <> " is in katari.toml but missing from katari.lock; run `katari apply`"
+  ResolveLockOutOfSync info ->
+    Text.intercalate "\n" $
+      ["katari.lock no longer matches katari.toml:"]
+        <> ["  - " <> renderLockMismatch mismatch | mismatch <- info.mismatches]
+        <> ["Run `katari lock` to resolve the declared closure and rewrite katari.lock."]
   ResolvePackageNotCached info ->
     "Dependency "
       <> info.dependency
       <> " is not in the cache ("
       <> Text.pack info.expectedPath
-      <> "); run `katari apply`"
+      <> "); run `katari lock`"
   ResolveShaMismatch info ->
     "Dependency "
       <> info.dependency
@@ -326,6 +381,18 @@ renderProjectError projectError = case projectError of
       <> info.expected
       <> "\n  actual   "
       <> info.actual
+
+-- | One disagreement as a single line of the @ResolveLockOutOfSync@ block.
+renderLockMismatch :: LockMismatch -> Text
+renderLockMismatch = \case
+  SnapshotPinChanged info ->
+    "the lock was resolved against " <> renderPin info.locked <> ", but katari.toml pins " <> renderPin info.declared
+  DependencyMissingFromLock info -> "dependency " <> info.dependency <> " is reachable but not locked"
+  DependencyOrphanedInLock info -> "dependency " <> info.dependency <> " is locked but nothing declares it"
+  DependencySourceChanged info ->
+    "dependency " <> info.dependency <> " is locked from " <> info.locked <> ", but katari.toml says " <> info.declared
+  where
+    renderPin = maybe "no snapshot" ("snapshot " <>)
 
 renderFileError :: FileErrorInfo -> Text
 renderFileError info = Text.pack info.path <> ": " <> info.message

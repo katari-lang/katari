@@ -57,6 +57,7 @@ library:
     - Katari.Project.Fetch
     - Katari.Project.Snapshot
     - Katari.Project.Lockfile
+    - Katari.Project.Reconcile
     - Katari.Project.Resolve
     - Katari.Project.Upload
 

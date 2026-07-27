@@ -42,7 +42,8 @@ globalOptionsParser =
           )
       )
 
--- | The offline commands' project-directory flag (@check@ / @build@ / @apply@ / @add@ / @remove@).
+-- | The project-directory flag of every command that works on a project on disk (@check@ / @build@ /
+-- @apply@ / @lock@ / @add@ / @remove@ / @update@).
 -- Deliberately distinct from the networked commands' @--project NAME@, which names a runtime project:
 -- this names a filesystem directory instead. Centralised here so every offline command spells it the
 -- same, keeping @--project@ a single concept across the whole CLI.
