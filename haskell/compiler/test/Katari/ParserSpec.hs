@@ -1,6 +1,7 @@
 module Katari.ParserSpec (spec) where
 
 import Data.Foldable (toList)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Katari.Data.AST
 import Katari.Data.ModuleName (ModuleName (..))
@@ -287,6 +288,41 @@ spec = do
       _ <- parseClean "agent main() -> integer { let r = { name = \"a\", age = 30 }\n r.age }"
       pure ()
 
+    it "parses a `...base` spread entry alongside written fields, in source order" $ do
+      body <- parseClean "agent main() -> integer { { ...base, a = 1 } }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionRecord record) -> case record.entries of
+          [RecordEntrySpread (ExpressionVariable base), RecordEntryField field] -> do
+            base.name `shouldBe` "base"
+            field.name `shouldBe` "a"
+          other -> expectationFailure ("expected a spread then a field, got " <> show other)
+        _ -> expectationFailure "expected a record literal"
+
+    it "rejects `...` outside a record literal (it starts no other expression form)" $
+      shouldFail "agent main() -> integer { ...x }"
+
+    it "accepts an `else` starting on the line AFTER the then-block's `}`" $ do
+      body <- parseClean "agent main() -> integer {\n  if (true) {\n    1\n  }\n  else {\n    2\n  }\n}" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionIf ifExpression) -> ifExpression.elseBlock `shouldSatisfy` isJust
+        _ -> expectationFailure "expected an if expression"
+
+    it "chains a next-line `else if`" $ do
+      body <- parseClean "agent main() -> integer {\n  if (true) {\n    1\n  }\n  else if (false) {\n    2\n  }\n  else {\n    3\n  }\n}" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionIf ifExpression) -> ifExpression.elseBlock `shouldSatisfy` isJust
+        _ -> expectationFailure "expected an if expression"
+
+    it "still ends an `else`-less `if` at its `}`, so the next line is a separate statement" $ do
+      -- The counterpart to the two above: the `else` lookahead backtracks, so eating the newline to
+      -- find an `else` must not swallow the statement separator when there is none.
+      body <- parseClean "agent main() -> integer {\n  if (true) {\n    1\n  }\n  2\n}" >>= soleAgentBody
+      case (body.statements, body.returnExpression) of
+        ([StatementExpression (ExpressionIf ifExpression)], Just (ExpressionLiteral literal)) -> do
+          ifExpression.elseBlock `shouldBe` Nothing
+          literal.value `shouldBe` LiteralValueInteger 2
+        other -> expectationFailure ("expected an `if` statement then a trailing literal, got " <> show other)
+
     it "keeps a doc annotation on a let statement (doc-on-let)" $ do
       body <- parseClean "agent main() -> integer {\n  @\"the herald's window\"\n  let herald_view = 1\n  herald_view\n}" >>= soleAgentBody
       case body.statements of
@@ -426,6 +462,102 @@ spec = do
       _ <- parseClean "agent main() -> integer { - -x }" >>= soleAgentBody
       _ <- parseClean "agent main() -> integer { -!x }" >>= soleAgentBody
       pure ()
+
+  describe "anonymous agent expressions" $ do
+    it "parses an anonymous agent as a call argument" $ do
+      body <- parseClean "agent main() -> integer { pick(keep = agent (value: integer) -> boolean { value > 3 }) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall call) -> case call.arguments of
+          [argument] -> case argument.value of
+            ArgumentExpression (ExpressionAgent anonymous) -> do
+              anonymous.name `shouldBe` anonymousAgentName
+              anonymous.private `shouldBe` False
+              anonymous.annotation `shouldBe` Nothing
+              length anonymous.parameters `shouldBe` 1
+              anonymous.returnType `shouldSatisfy` (/= Nothing)
+              anonymous.effects `shouldBe` Nothing
+            _ -> expectationFailure "expected an anonymous agent argument"
+          _ -> expectationFailure "expected one argument"
+        _ -> expectationFailure "expected a call"
+
+    it "parses an anonymous agent bound by a let, with an explicit effect row" $ do
+      body <- parseClean "agent main() -> integer {\n  let step = agent (value: integer) -> integer with tick { value }\n  step(value = 1)\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementLet letStatement] -> case letStatement.value of
+          ExpressionAgent anonymous -> anonymous.effects `shouldSatisfy` (/= Nothing)
+          _ -> expectationFailure "expected an anonymous agent value"
+        _ -> expectationFailure "expected one let statement"
+
+    it "parses an anonymous agent with neither a return type nor an effect row" $ do
+      body <- parseClean "agent main() -> integer { run(body = agent () { 1 }) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall call) -> case call.arguments of
+          [argument] -> case argument.value of
+            ArgumentExpression (ExpressionAgent anonymous) -> do
+              anonymous.returnType `shouldBe` Nothing
+              anonymous.effects `shouldBe` Nothing
+            _ -> expectationFailure "expected an anonymous agent argument"
+          _ -> expectationFailure "expected one argument"
+        _ -> expectationFailure "expected a call"
+
+    it "parses a private anonymous agent" $ do
+      body <- parseClean "agent main() -> integer {\n  let step = private agent (value: integer) -> integer { value }\n  step(value = 1)\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementLet letStatement] -> case letStatement.value of
+          ExpressionAgent anonymous -> anonymous.private `shouldBe` True
+          _ -> expectationFailure "expected an anonymous agent value"
+        _ -> expectationFailure "expected one let statement"
+
+    it "still parses a named local agent as a declaration statement" $ do
+      body <- parseClean "agent main() -> integer {\n  agent helper(value: integer) -> integer { value }\n  helper(value = 1)\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementAgent helper] -> helper.name `shouldBe` "helper"
+        _ -> expectationFailure "expected one local agent statement"
+
+    it "still parses a named private local agent as a declaration statement" $ do
+      body <- parseClean "agent main() -> integer {\n  private agent helper(value: integer) -> integer { value }\n  helper(value = 1)\n}" >>= soleAgentBody
+      case body.statements of
+        [StatementAgent helper] -> do
+          helper.name `shouldBe` "helper"
+          helper.private `shouldBe` True
+        _ -> expectationFailure "expected one local agent statement"
+
+    -- The block dispatcher must not commit to the declaration grammar on the keyword alone: an
+    -- anonymous agent at the head of a block element is an expression, and the rest of the expression
+    -- grammar (here an immediate application) has to keep parsing after it.
+    it "parses an anonymous agent at a block element's head as an expression" $ do
+      body <- parseClean "agent main() -> integer { agent (value: integer) -> integer { value }(value = 1) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall call) -> case call.callee of
+          ExpressionAgent _ -> pure ()
+          _ -> expectationFailure "expected an anonymous agent callee"
+        _ -> expectationFailure "expected an immediate application"
+
+    it "parses an anonymous agent as a block's trailing value" $ do
+      body <- parseClean "agent main() -> integer {\n  let seed = 1\n  agent (value: integer) -> integer { value + seed }\n}" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionAgent _) -> pure ()
+        _ -> expectationFailure "expected an anonymous agent trailing value"
+
+    it "keeps `private` usable as an ordinary identifier when no `agent` follows it" $ do
+      body <- parseClean "agent main(private: integer) -> integer { private + 1 }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionBinaryOperator _) -> pure ()
+        _ -> expectationFailure "expected an addition over the `private` variable"
+
+    it "rejects a name on an agent expression" $
+      shouldFail "agent main() -> integer {\n  let step = agent helper(value: integer) -> integer { value }\n  step(value = 1)\n}"
+
+    it "rejects an anonymous agent at the top level (a declaration must bind a name)" $
+      shouldFail "agent (value: integer) -> integer { value }"
+
+    -- A doc annotation stamps the value it documents with a NAME, and an anonymous agent has none;
+    -- documenting the `let` that binds it is the supported spelling.
+    it "rejects a doc annotation on an anonymous agent" $
+      shouldFail "agent main() -> integer {\n  @\"doc\"\n  agent (value: integer) -> integer { value }\n}"
+
+    it "rejects a newline before an anonymous agent's body brace (no Allman braces)" $
+      shouldFail "agent main() -> integer {\n  let step = agent (value: integer) -> integer\n  { value }\n  1\n}"
 
   describe "handlers, use, next/break" $ do
     it "parses a use of an inline handler with next/break" $ do

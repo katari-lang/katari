@@ -24,7 +24,8 @@
 // A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) throws
 // `fetch_error`, which bubbles from the call site to the nearest handler — so a caller can `use handler {
 // request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
-// control retry.
+// control retry. `auth_error` / `api_error` (at the foot of this module) are the CLASSIFIED reading of a
+// non-2xx that an authenticated API integration wants instead of the bare status.
 
 // `post_json` parses its reply back to a value. The `json` module qualifier is shadowed HERE by this
 // module's own `json` body variant (below), so import `parse` / `parse_error` by name to reach them.
@@ -160,3 +161,46 @@ agent get(
   // A GET drops its body at the transport, so the empty text body is a placeholder the reactor ignores.
   fetch(url = url, method = "GET", headers = headers, body = text(content = ""))
 }
+
+// ─── the classified failure of an AUTHENTICATED API call ──────────────────────────────────────────────
+//
+// `fetch_error` and `status_error` above are what the TRANSPORT can say: one for a request that never
+// completed, one for a reply that arrived carrying a non-2xx status. Neither answers the question a package
+// wrapping an authenticated API actually has to answer at that boundary — WHO HAS TO ACT. The two variants
+// below draw exactly that line, and nothing else: `auth_error` is the failure that may need a HUMAN before
+// any retry can succeed, `api_error` is every failure that cannot.
+//
+// It lives in the stdlib because it was already the same sum in every package that had one. `gmail` and
+// `google_calendar` each declared this pair, at the same statuses, with the same paragraph in each doc, and
+// so did every OAuth REST integration written after them — while an app composing two of those packages had
+// to write ONE `replay` converter per package to say the same thing twice. Shared, the vocabulary is one
+// vocabulary: a converter matches `http.auth_error` once and covers every API behind it, and the next
+// package inherits the classification instead of re-deciding where the line goes.
+//
+// (Packages whose failures are NOT an HTTP status — a gateway's own protocol, a websocket's login — keep
+// their own sums; this is the vocabulary of a REST call's status code, not a synonym for "an error".)
+
+@"An authenticated API call was rejected over WHO IS CALLING: the endpoint answered 401 or 403, so the
+CREDENTIAL is what failed — revoked, expired past what its holder believed, or scoped too narrowly for this
+call. Retrying with the SAME credential cannot succeed; the recovery is a fresh RESOLUTION of it, which is
+why the ordinary composition is a `replay` converter that signals `replay.interrupted`: the re-run resolves
+the credential again, and one the runtime cannot refresh parks the run on a `prelude.oauth.authorize`
+escalation — a human's re-authorization prompt — rather than failing. That is the whole line this variant
+draws: an `auth_error` may need a HUMAN before any retry can work, an `api_error` never does.
+
+(403 is read as auth even though some APIs also spend it on quota exhaustion. The access-rejection reading
+is the one worth composing a re-resolution around, and a quota 403 that is replayed simply fails again.)
+@message@ carries the status and the server's body."
+data auth_error(message: string)
+
+@"An authenticated API call failed for anything OTHER than the credential: a non-2xx status that is not
+401/403 — a malformed request, a resource that is not there, a rate limit, a server error. Nothing about the
+caller's identity is in question, so backing off and replaying the call AS IT STANDS is the whole recovery
+for the transient half, and the other half (a 400 the service is simply refusing) will keep failing until
+the ARGUMENT changes. Which is why @message@ carries the server's own body verbatim: it is the diagnosis,
+and a model handed this error reads it and adjusts. @message@ carries the status and the server's body."
+data api_error(message: string)
+
+// An authenticated API call's failure, classified: the credential's problem, or the call's. (Type synonyms
+// take no docs; a package classifies into it at the ONE boundary where its responses are read.)
+type api_failure = auth_error | api_error

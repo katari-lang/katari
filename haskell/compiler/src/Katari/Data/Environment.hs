@@ -98,7 +98,15 @@ data DataInformation = DataInformation
     genericParameters :: GenericParameters,
     -- | The constructor's read shape — always an object (@data foo(x: number)@ ~> @{x: number}@), so
     -- a field read needs no shape check.
-    constructor :: NormalizedObject
+    constructor :: NormalizedObject,
+    -- | The @\@"..."@ docstring written on the @data@ declaration itself; 'Nothing' when undocumented.
+    -- The environment carries it because a @data@ type is routinely used as an agent argument from a
+    -- different module than the one declaring it, and lowering is per-module: only the (global) type
+    -- environment can hand the schema builder a documentation string for a cross-module type.
+    annotation :: Maybe Text,
+    -- | Each documented constructor field's @\@"..."@ docstring, keyed by field name. An undocumented
+    -- field is absent rather than mapped to an empty string, so "documented" is a lookup.
+    fieldAnnotations :: Map Text Text
   }
   deriving (Eq, Show)
 

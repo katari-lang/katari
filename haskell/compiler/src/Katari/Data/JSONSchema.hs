@@ -22,6 +22,13 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.Id (GenericId)
 
+-- | The reserved keyword a 'SchemaGeneric' rides on the wire — not a JSON Schema keyword but a Katari
+-- extension, so it is named once here and read by both the encoder and the decoder below. The runtime
+-- reads the same name off its own @JSONSchema@ (@typescript\/types@'s @ir.ts@); the two are held together
+-- by the cross-language wire-key test.
+genericSentinelKey :: Text
+genericSentinelKey = "$generic"
+
 -- | A JSON Schema document. The shapes the compiler emits: the primitive @type@s, @const@, @array@,
 -- @object@, @anyOf@ unions, the empty schema (anything), the @{"not": {}}@ bottom, a generic
 -- reference slot ('SchemaGeneric') serialised as a sentinel for the runtime to fill, and a
@@ -109,7 +116,7 @@ instance ToJSON JSONSchema where
     -- A generic-reference sentinel preserved on the wire (the id must survive so the runtime can match
     -- it against 'SchemaInfo.genericBindings'); the runtime replaces it at get_metadata, so it must not
     -- survive into the final AI-facing schema.
-    SchemaGeneric genericId -> object ["$generic" .= genericId]
+    SchemaGeneric genericId -> object [Key.fromText genericSentinelKey .= genericId]
     SchemaDescribed described -> case toJSON described.schema of
       Object keyMap -> Object (KeyMap.insert "description" (String described.description) keyMap)
       -- Every shape above encodes as a JSON object, so this branch is unreachable today; keeping the
@@ -141,7 +148,7 @@ instance FromJSON JSONSchema where
 -- by design).
 parseShape :: KeyMap.KeyMap Value -> Parser JSONSchema
 parseShape schemaObject = do
-  generic <- schemaObject .:? "$generic"
+  generic <- schemaObject .:? Key.fromText genericSentinelKey
   -- Parse the @not@ body as a schema so its content is not discarded (a @{"not": X}@ is not
   -- unconditionally bottom).
   notSchema <- schemaObject .:? "not"

@@ -15,12 +15,13 @@
 --     enclosing state ('withStateVariables') so a @with@ modifier can target exactly those names.
 module Katari.Identifier.Expression where
 
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.Id (TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
-import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
+import Katari.Data.QualifiedName (renderQualifiedName)
 import Katari.Data.SourceSpan (SourceSpan (..))
 import Katari.Identifier.Monad
 import Katari.Identifier.Pattern (resolveParameterBinding, resolvePattern)
@@ -30,7 +31,7 @@ import Katari.Primitive
   ( binaryOperatorLeftLabel,
     binaryOperatorName,
     binaryOperatorRightLabel,
-    panicRequestName,
+    isPanicHandler,
     preludeModuleName,
     unaryOperatorName,
     unaryOperatorOperandLabel,
@@ -51,7 +52,7 @@ resolveExpression = \case
     elements <- traverse resolveExpression node.elements
     pure (ExpressionTuple TupleExpression {parallel = node.parallel, elements = elements, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionRecord node -> do
-    reportDuplicateLabels [(entry.name, entry.sourceSpan) | entry <- node.entries]
+    reportDuplicateLabels (mapMaybe writtenRecordLabel node.entries)
     entries <- traverse resolveRecordEntry node.entries
     pure (ExpressionRecord RecordExpression {entries = entries, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionCall node -> do
@@ -90,13 +91,31 @@ resolveExpression = \case
     elements <- traverse resolveTemplateElement node.elements
     pure (ExpressionTemplate TemplateExpression {elements = elements, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionHandler node -> resolveHandler node
+  ExpressionAgent node -> do
+    -- An anonymous agent binds no name, so nothing enters the scope — it cannot refer to itself, and
+    -- that is the whole difference from a local declaration. It still gets a fresh local id: every
+    -- later walker reads the resolution off the node (the checker to stamp its type, the query layer
+    -- to answer a hover on the `agent` keyword), and an unresolved 'Nothing' there is the shape those
+    -- walkers treat as a defect.
+    localVariableId <- freshLocalVariableId
+    ExpressionAgent <$> resolveAgentDeclaration (VariableResolutionLocalVariable localVariableId) node
   ExpressionQualifiedReference _ ->
     panic "Identifier.resolveExpression: the parser never produces ExpressionQualifiedReference"
 
 resolveRecordEntry :: RecordEntry Parsed -> Identifier (RecordEntry Identified)
-resolveRecordEntry entry = do
-  value <- resolveExpression entry.value
-  pure RecordEntry {name = entry.name, value = value, sourceSpan = entry.sourceSpan}
+resolveRecordEntry = \case
+  RecordEntryField field -> do
+    value <- resolveExpression field.value
+    pure (RecordEntryField RecordField {name = field.name, value = value, sourceSpan = field.sourceSpan})
+  RecordEntrySpread value -> RecordEntrySpread <$> resolveExpression value
+
+-- | The label a record entry WRITES. A spread names none — which keys it brings is a typing question,
+-- not a syntactic one — so it is exempt from the duplicate-label check; overriding a spread's key is
+-- the point of the form, and two spreads bringing the same key resolve by position at check time.
+writtenRecordLabel :: RecordEntry Parsed -> Maybe (Text, SourceSpan)
+writtenRecordLabel = \case
+  RecordEntryField field -> Just (field.name, field.sourceSpan)
+  RecordEntrySpread _ -> Nothing
 
 resolveCallArgument :: CallArgument Parsed -> Identifier (CallArgument Identified)
 resolveCallArgument argument = do
@@ -330,12 +349,12 @@ resolveRequestHandler stateScope handler = do
   -- The ambient @panic@ clause (bare @request panic(...)@) names the undeclared @prelude.panic@ on purpose,
   -- so it never resolves — leave its reference unresolved WITHOUT reporting an undefined name (K2001). The
   -- checker recognizes it structurally and types it from its synthetic signature; lowering maps it to
-  -- @prelude.panic@. A qualified or differently-named clause resolves normally.
-  (moduleQualifier, typeReference) <- case handler.moduleQualifier of
-    Nothing
-      | handler.name == panicRequestName.name ->
-          pure (Nothing, identifiedReference handler.typeReference.sourceSpan (Nothing :: Maybe TypeResolution))
-    _ -> resolveRequestReference handler.moduleQualifier handler.name handler.typeReference
+  -- @prelude.panic@. A qualified or differently-named clause resolves normally. The recognition itself is
+  -- 'isPanicHandler', shared with the checker and lowering so the three passes cannot drift.
+  (moduleQualifier, typeReference) <-
+    if isPanicHandler handler
+      then pure (Nothing, identifiedReference handler.typeReference.sourceSpan (Nothing :: Maybe TypeResolution))
+      else resolveRequestReference handler.moduleQualifier handler.name handler.typeReference
   genericArguments <- traverse resolveType handler.genericArguments
   (parameters, parameterBindings) <- resolveParameterBindings handler.parameters
   returnType <- traverse resolveType handler.returnType

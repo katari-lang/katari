@@ -10,10 +10,11 @@
 // object), which a program never authors — so a bare record needs no escaping, and the reserved keys are
 // disjoint from any document a program writes.
 //
-//   - `parse : string -> unknown`      text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
-//   - `validate[T] : unknown -> T`     check a value against T's schema (returns it unchanged, or throws)
-//   - `parse_as[T] : string -> T`      `parse` then `validate[T]` (the typed text boundary)
-//   - `stringify[T] : T -> string`     ANY value -> its (compact, canonical) JSON text
+//   - `parse : string -> unknown`              text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
+//   - `validate[T] : unknown -> T`             check a value against T's schema (returns it unchanged, or throws)
+//   - `try_validate[T] : unknown -> T | null`  the TOTAL twin of `validate` — `null` where it would throw
+//   - `parse_as[T] : string -> T`              `parse` then `validate[T]` (the typed text boundary)
+//   - `stringify[T] : T -> string`             ANY value -> its (compact, canonical) JSON text
 //
 // `parse` and `stringify` are inverses through that codec: a document (record / array / scalar) round-trips
 // verbatim, so `stringify(parse(s)) == s` (modulo whitespace / number normalisation). `parse` interprets the
@@ -25,7 +26,7 @@
 //
 // Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a value that does not conform to the
 // requested type's schema throws `validation_error` (`validate` / `parse_as`), naming the offending path.
-// `stringify` is TOTAL — it never throws.
+// `stringify` and `try_validate` are TOTAL — they never throw.
 
 @"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
 data parse_error(message: string)
@@ -44,6 +45,15 @@ primitive agent parse(@"The text of one complete JSON document." text: string) -
 path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only in the result,
 so it cannot be inferred)."
 primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
+
+@"The TOTAL twin of `validate`: check @value@ against T's schema and return it unchanged, or `null` when the
+shape does not fit — no throw, so the row stays PURE. This is the defensive read at a boundary where a
+wrong shape is an ordinary outcome and not an error to route: a store entry an older run wrote, an
+`unknown` an AI reply carried, a handler's answer. Instantiate T explicitly (it appears only in the result,
+so it cannot be inferred). Reach for `validate` when the FAILURE REASON matters — the offending path travels
+only on the thrown `validation_error`, and `null` here says nothing about WHY the value did not fit. A
+T that already admits `null` cannot tell a conforming `null` from a mismatch; validate such a T instead."
+primitive agent try_validate[T](@"The value to check against T." value: unknown) -> T | null
 
 @"Parse JSON text directly as a T — `parse` then `validate[T]`, the typed text boundary. Instantiate T
 explicitly (it appears only in the result, so it cannot be inferred). Malformed text throws `parse_error`;

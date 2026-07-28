@@ -23,6 +23,7 @@ module Katari.Cli.Common
     resolveIdPrefix,
     PrefixError (..),
     renderPrefixError,
+    isPreludeName,
     RuntimeContext (..),
     withRuntimeContext,
     makeRuntimeClient,
@@ -54,8 +55,9 @@ import Katari.Cli.Options (GlobalOptions (..))
 import Katari.Cli.Output (OutputContext (..), newOutputContext, progress, verboseLog, warn)
 import Katari.Compile qualified as Compile
 import Katari.Data.IR (IRModule)
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.ModuleName (ModuleName (..), covers)
 import Katari.Diagnostics (hasErrors, renderDiagnostics)
+import Katari.Primitive (preludeModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), loadKatariToml)
 import Katari.Project.Discovery (configFilename, findProjectRoot)
 import Katari.Project.Error (renderProjectError)
@@ -153,6 +155,19 @@ resolveIdPrefix prefix identifiers
       [only] -> Right only
       [] -> Left PrefixNotFound
       candidates -> Left (PrefixAmbiguous candidates)
+
+-- | Whether a runtime-reported qualified name (@module.name@) names a member of the wired-in @prelude@
+-- namespace — the stdlib callables the listings hide behind @--all@ (@ls agents@, @run@'s picker). The
+-- namespace question is about the MODULE half, so the name is split at its last @.@ and the module
+-- compared through the compiler's own 'covers': the CLI then inherits ONE definition of the prelude root
+-- and ONE definition of module ancestry, instead of a bare @"prelude."@ text prefix that re-spells both
+-- the root and the separator at every filter site.
+isPreludeName :: Text -> Bool
+isPreludeName qualifiedName = covers preludeModuleName (moduleNameOf qualifiedName)
+  where
+    -- Everything before the final @.@ — the qualified name's module. A name carrying no @.@ at all has
+    -- no module, which the empty name stands for and 'covers' rejects.
+    moduleNameOf = ModuleName . Text.dropEnd 1 . fst . Text.breakOnEnd "."
 
 -- | The wired-up state every management command starts from: the client, the resolved project, and
 -- the output contract.

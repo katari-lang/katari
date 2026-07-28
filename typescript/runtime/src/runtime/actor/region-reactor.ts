@@ -61,11 +61,19 @@
 // the provide's `names` map while the fiber runs; `roster` answers the RUNNING set as `fiber_info(id, name)`
 // data values in fork order, straight off the running map; `cancel_by_id` addresses a fiber by the
 // runtime-minted id (a live one runs the exact `cancel` teardown and answers `cancelled(id)`; a stale id — an
-// anticipated, often model-supplied miss — answers `unknown_fiber(id)`, never a panic); and a fiber's PANIC is
-// intercepted at `onEscalate` and re-emitted as the typed `crashed(id, name, message)` event — a SYNTHETIC
-// mailbox entry with no child leg (the fiber is dead; the runtime tears it down like a cancel, and the
-// handler's eventual answer is swallowed via the base's moot-answer guard). A `crashed` entry buffers in the
-// mailbox like any other, waiting for a watch to re-emit it — a watch-less nursery simply holds it.
+// anticipated, often model-supplied miss — answers `unknown_fiber(id)`, never a panic); and a fiber's two
+// ABRUPT ENDINGS are intercepted at `onEscalate` and re-emitted as typed events — a PANIC as
+// `crashed(id, name, message)`, an uncaught `prelude.throw` as `failed(id, name, error)`. Both are SYNTHETIC
+// mailbox entries with no child leg (the fiber is over; the runtime tears it down like a cancel, and the
+// handler's eventual answer is swallowed via the base's moot-answer guard), and both buffer in the mailbox
+// like any other entry, waiting for a watch to re-emit them — a watch-less nursery simply holds them.
+// Trapping the THROW is what makes a fiber's failure containable at the watch instead of at every `fork`:
+// without it a task's uncaught throw rode the ceiling `E` up past the watch, so every forking site had to
+// wrap its task in a throw guard (and widen the nursery ceiling with `prelude.throw`) to keep one fiber's
+// anticipated failure from unwinding the whole region. ONLY a throw raised INSIDE a fiber is trapped: the
+// escalating delegation must be a running fiber of a live scope, so the continuation's own throw (including
+// one raised by a handler above the watch while answering a fiber's request) still relays up past the
+// provide untouched, and a fiber's ordinary requests are mailboxed exactly as before.
 //
 // Durably a `provide` persists its endpoint payload (its scope id + the still-stored continuation + the
 // settled-fiber buffer + the inner-delegation bridges) and survives a restart COMPLETELY, re-registering the
@@ -79,8 +87,9 @@
 import { randomBytes } from "node:crypto";
 import { createAgentName, type Json, type QualifiedName } from "@katari-lang/types";
 import type { Logger } from "../../lib/logger.js";
-import { NURSERY_FIBER_FIELD, NURSERY_SCOPE_FIELD, PANIC_REQUEST } from "../engine/common.js";
+import { PANIC_REQUEST } from "../engine/common.js";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
+import { THROW_REQUEST } from "../engine/throw-signal.js";
 import type { AskKind, ExternalEvent, ReactorName } from "../event/types.js";
 import { escalateValue } from "../event/types.js";
 import {
@@ -91,7 +100,9 @@ import {
   newEscalationId,
   type SnapshotId,
 } from "../ids.js";
+import { NURSERY_FIBER_FIELD, NURSERY_SCOPE_FIELD } from "../region-abi.js";
 import { valueToJson } from "../value/codec.js";
+import { liftPrivacy } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import {
   asJson,
@@ -119,8 +130,8 @@ import type { ResourcePool } from "./resource-pool.js";
  *  at the payload boundary. Every nursery operation dispatches as its own payload variant; any other key
  *  (compiler / wire drift) folds into the defensive `operation` payload, a clear "unimplemented" completion.
  *  (The nursery / fiber handles those payloads read carry their identities under the namespaced marker fields
- *  `NURSERY_SCOPE_FIELD` / `NURSERY_FIBER_FIELD`, shared from `engine/common.ts` — the `fiber_id` prim reads
- *  the same fields on the engine side, which must not import actor code.) */
+ *  `NURSERY_SCOPE_FIELD` / `NURSERY_FIBER_FIELD`, whose one home is `runtime/region-abi.ts` — the `fiber_id`
+ *  prim reads the same fields on the engine side, which must not import actor code.) */
 const REGION_PROVIDE_KEY = "prelude.region.provide";
 const REGION_FORK_KEY = "prelude.region.fork";
 const REGION_CANCEL_KEY = "prelude.region.cancel";
@@ -132,6 +143,14 @@ const REGION_CANCEL_BY_ID_KEY = "prelude.region.cancel_by_id";
  *  runtime tears the dead fiber down and re-emits the ending as DATA — `{ id, name, message }` — instead of
  *  letting the raw panic unwind the watch context. The runtime is this request's one author. */
 const REGION_CRASHED_REQUEST = createAgentName("prelude.region.crashed");
+
+/** The typed event a fiber's uncaught `prelude.throw` becomes at the nursery (the stdlib's `region.failed`
+ *  request): the runtime tears the failed fiber down and re-emits the ending as DATA — `{ id, name, error }`,
+ *  where `error` is the thrown payload ITSELF — instead of letting the throw ride the ceiling `E` up past the
+ *  watch. Kept distinct from `crashed` because the two report different KINDS of ending (an anticipated
+ *  domain failure with a typed payload, versus a program defect with only a message), even though their
+ *  payload shape is deliberately parallel. The runtime is this request's one author. */
+const REGION_FAILED_REQUEST = createAgentName("prelude.region.failed");
 
 /** The data constructors the registry-facing operations answer with, matching the stdlib's `data`
  *  declarations exactly (a Katari `match` dispatches on these names). */
@@ -158,7 +177,8 @@ const FIBER_TOKEN_PREFIX = "fiber:";
 interface MailboxEntry {
   /** The fiber's own delegation — the leg an answer descends to (via the relay `relayAskUnder` opens), and the
    *  key a `cancel` drops a fiber's not-yet-emitted escalations by. `null` marks a SYNTHETIC entry — a
-   *  runtime-authored `crashed` event whose fiber is already dead, so there is no leg to answer: its
+   *  runtime-authored ending event (`crashed` / `failed`) whose fiber is already over, so there is no leg to
+   *  answer: its
    *  re-emission relays under fresh ids that name no live delegation, and the base's moot-answer guard
    *  swallows the handler's answer (see `emitEntry`). */
   child: DelegationId | null;
@@ -216,7 +236,8 @@ type RegionPayload =
        *  needs. Persisted on the provide's extension, so a restart restores the "溜まっていた" requests no watch
        *  had yet claimed. */
       mailbox: MailboxEntry[];
-      /** The RUNNING fibers' name tags, by fiber id — the `fork(name)` echo `roster` and `crashed` report.
+      /** The RUNNING fibers' name tags, by fiber id — the `fork(name)` echo `roster` and the ending events
+       *  (`crashed` / `failed`) report.
        *  Only named, still-running fibers have an entry (absence IS "unnamed"; `retireFiber` cleans it), and
        *  it persists with the provide so the roster facts survive a restart alongside the running set. */
       names: Record<string, string>;
@@ -245,7 +266,8 @@ type RegionPayload =
       task: Value | null;
       argument: Value | null;
       /** The opaque name tag the fork carried (the compiler fills the default, so absent / non-string reads
-       *  as "" — unnamed). Recorded on the provide's `names` at spawn, so `roster` / `crashed` echo it. */
+       *  as "" — unnamed). Recorded on the provide's `names` at spawn, so `roster` and the ending events
+       *  echo it. */
       name: string;
     }
   | {
@@ -265,8 +287,8 @@ export type RegionExtension =
       scopeId: string;
       continuation: Value | null;
       mailbox: MailboxEntry[];
-      /** The running fibers' name tags (see the payload's `names`) — durable so `roster` and `crashed` still
-       *  echo them after a restart. */
+      /** The running fibers' name tags (see the payload's `names`) — durable so `roster` and the ending
+       *  events still echo them after a restart. */
       names: Record<string, string>;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
@@ -440,9 +462,10 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
      *  delegation opens inside a turn and commits with it. */
     private readonly schedule: (work: () => void) => void,
     pool: ResourcePool,
-    /** Warns when a fiber crashes into a nursery with no watch installed: with the quiescence flush-up gone,
-     *  such a `crashed` event no longer auto-surfaces at the run root, so the one visible trace of the crash is
-     *  this line (the semantics are unchanged — the event waits, buffered, for a watch). */
+    /** Warns when a fiber ends abruptly into a nursery with no watch installed: with the quiescence flush-up
+     *  gone, such a `crashed` / `failed` event no longer auto-surfaces at the run root, so the one visible
+     *  trace of the ending is this line (the semantics are unchanged — the event waits, buffered, for a
+     *  watch). */
     private readonly logger: Logger,
   ) {
     super(pool);
@@ -758,8 +781,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       return;
     }
     scopeState.running.set(fiber, opened);
-    // Record the name tag on the PROVIDE — the durable owner of the roster facts (`roster` and `crashed`
-    // echo it, and it must survive a restart alongside the running set). An empty name is not stored:
+    // Record the name tag on the PROVIDE — the durable owner of the roster facts (`roster` and the ending
+    // events echo it, and it must survive a restart alongside the running set). An empty name is not stored:
     // absence IS "unnamed". `openInnerDelegation` already marked the provide dirty this turn, so the map
     // persists with the same commit that persists the fiber's bridge.
     if (payload.name !== "") {
@@ -978,7 +1001,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     if (payload === undefined || payload.kind !== "provide") return; // the provide resolved meanwhile
     // Retire the fiber from its scope's running set (a no-op for a fiber never re-registered after a reload).
     this.scopes.get(payload.scope)?.running.delete(fiber);
-    // A name tag is roster / crashed material for a RUNNING fiber only — clean it with the running entry,
+    // A name tag is roster / ending-event material for a RUNNING fiber only — clean it with the running entry,
     // so the durable map never accumulates settled fibers.
     if (payload.names[fiber] !== undefined) {
       delete payload.names[fiber];
@@ -1026,9 +1049,12 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  drop) and, when a watch is already registered, re-emit it there at once. An escalation that beats its
    *  watch's registration stays mailboxed until `startWatch` drains it; a nursery that never registers a watch
    *  keeps it buffered indefinitely (it is never surfaced above the provide — the fibers' `E` is not in the
-   *  provide's declared row). A fiber's PANIC is intercepted here instead of mailboxed: it becomes the typed
-   *  `crashed` event (`crashFiber`). Any non-fiber escalation (the continuation's own request) relays up
-   *  through the provide unchanged (the base path). */
+   *  provide's declared row). A fiber's two ABRUPT ENDINGS are intercepted here instead of mailboxed as
+   *  themselves: a PANIC becomes the typed `crashed` event (`crashFiber`) and an uncaught `prelude.throw`
+   *  becomes the typed `failed` event (`failFiber`). Any non-fiber escalation — the continuation's own
+   *  request, and equally the throw a handler ABOVE the watch raises while answering a fiber (that handler
+   *  runs in the continuation, not in the fiber, so its escalation arrives on the continuation's delegation)
+   *  — relays up through the provide unchanged (the base path). */
   protected override onEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
     context: { caller: InstanceId | undefined },
@@ -1050,6 +1076,10 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       this.crashFiber(located.fiber, provide, payload, event);
       return;
     }
+    if (event.ask.kind === "request" && event.ask.request === THROW_REQUEST) {
+      this.failFiber(located.fiber, provide, payload, event);
+      return;
+    }
     const carried = escalateValue(event.ask);
     const provideInstance = this.callInstance(provide);
     if (carried !== null && provideInstance !== undefined)
@@ -1067,16 +1097,35 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     if ((this.watchesByScope.get(scope)?.size ?? 0) > 0) this.pumpWatch(scope);
   }
 
-  /** A fiber PANICKED — the one ending a task cannot report itself. The fiber is dead at this instant (a
-   *  panic never resumes), so instead of mailboxing the raw panic: tear the fiber down exactly like a
-   *  `cancel` (drop its queued escalations, terminate its inner delegation — but with NO waiter, since
-   *  nobody asked), and report the ending as DATA — a SYNTHETIC `crashed` mailbox entry carrying the
-   *  fiber's id, its recorded name tag, and the panic's message. The entry rides the same FIFO as
-   *  ordinary entries, so it surfaces at the watch once one registers — a watch-less nursery simply holds it
-   *  buffered, so a crash with no watch installed is WARNED here (it no longer auto-surfaces at the run root).
-   *  Having no child leg, its eventual answer is discarded (see `emitEntry`). The panic escalation
-   *  itself is never answered — its durable row dies with the fiber's teardown, like a cancelled fiber's
-   *  moot escalation. */
+  /** A fiber ENDED ABRUPTLY in a way it cannot report itself — it panicked, or an uncaught `prelude.throw`
+   *  left it. The fiber is over at this instant (neither ending resumes), so instead of mailboxing the raw
+   *  failure ask: tear the fiber down exactly like a `cancel` (drop its queued escalations, terminate its
+   *  inner delegation — but with NO waiter, since nobody asked), and report the ending as DATA — the
+   *  SYNTHETIC mailbox entry `report`, which the two callers build as `crashed` / `failed`. The entry rides
+   *  the same FIFO as ordinary entries, so it surfaces at the watch once one registers; having no child leg,
+   *  its eventual answer is discarded (see `emitEntry`). The failure escalation itself is never answered —
+   *  its durable row dies with the fiber's teardown, like a cancelled fiber's moot escalation. Answers
+   *  whether a watch was there to take the report, so a watch-less nursery's caller can warn: the event is
+   *  then buffered, unread and possibly forever (there is no flush-up). */
+  private endFiber(
+    provide: DelegationId,
+    payload: Extract<RegionPayload, { kind: "provide" }>,
+    fiberDelegation: DelegationId,
+    report: AskKind,
+  ): boolean {
+    this.dropFiberMailbox(provide, fiberDelegation);
+    this.terminateFiber(provide, fiberDelegation);
+    payload.mailbox.push({ child: null, childEscalation: null, ask: report });
+    this.markCallDirty(provide);
+    if ((this.watchesByScope.get(payload.scope)?.size ?? 0) === 0) return false;
+    this.pumpWatch(payload.scope);
+    return true;
+  }
+
+  /** A fiber PANICKED — a defect in the program, the ending a task cannot report itself. Tear it down and
+   *  report it as the typed `crashed(id, name, message)` event carrying the fiber's id, its recorded name
+   *  tag, and the panic's message. A crash into a watch-less nursery is WARNED here (it no longer
+   *  auto-surfaces at the run root), so an operator has a trace of it while the typed event waits buffered. */
   private crashFiber(
     fiber: string,
     provide: DelegationId,
@@ -1085,36 +1134,64 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   ): void {
     const name = payload.names[fiber] ?? "";
     const message = panicMessageOf(event.ask);
-    this.dropFiberMailbox(provide, event.delegation);
-    this.terminateFiber(provide, event.delegation);
-    payload.mailbox.push({
-      child: null,
-      childEscalation: null,
-      ask: {
-        kind: "request",
-        request: REGION_CRASHED_REQUEST,
-        argument: {
-          kind: "record",
-          fields: {
-            id: { kind: "string", value: fiber },
-            name: { kind: "string", value: name },
-            message: { kind: "string", value: message },
-          },
+    const watched = this.endFiber(provide, payload, event.delegation, {
+      kind: "request",
+      request: REGION_CRASHED_REQUEST,
+      argument: {
+        kind: "record",
+        fields: {
+          id: { kind: "string", value: fiber },
+          name: { kind: "string", value: name },
+          message: { kind: "string", value: message },
         },
       },
     });
-    this.markCallDirty(provide);
-    if ((this.watchesByScope.get(payload.scope)?.size ?? 0) > 0) this.pumpWatch(payload.scope);
-    // No watch is installed, so this crash will not surface anywhere until one registers (and none may). Warn
-    // so an operator has a trace of the crash even while the typed `crashed` event waits, buffered, unread.
-    else
+    if (!watched)
       this.logger.warn(
         "region: a fiber crashed into a nursery with no watch; the crashed event is buffered",
-        {
-          fiber,
-          name,
-          message,
+        { fiber, name, message },
+      );
+  }
+
+  /** An uncaught `prelude.throw` LEFT a fiber — an anticipated domain failure that found no handler inside
+   *  the task. Tear the fiber down exactly like a crash and report it as the typed `failed(id, name, error)`
+   *  event carrying the THROWN VALUE itself, so a handler above the watch matches it just as a
+   *  `prelude.throw` handler would. Trapping it here is what frees every `fork` from wrapping its task in a
+   *  throw guard: the failure is contained at the ONE watch boundary instead of at each spawning site.
+   *
+   *  The payload is reowned onto the PROVIDE before it is parked, for the same reason an ordinary mailboxed
+   *  escalation's carried value is: the raising `send` released it to in-transit, the fiber that produced it
+   *  is being torn down this instant, and the event may wait in the mailbox arbitrarily long — so a
+   *  blob-backed error payload would otherwise dangle before a watch ever read it. The warn omits the payload
+   *  deliberately: unlike a panic's engine-authored message it is program data that may be private, and this
+   *  line goes to the operator log. */
+  private failFiber(
+    fiber: string,
+    provide: DelegationId,
+    payload: Extract<RegionPayload, { kind: "provide" }>,
+    event: Extract<ExternalEvent, { kind: "escalate" }>,
+  ): void {
+    const name = payload.names[fiber] ?? "";
+    const carried = escalateValue(event.ask);
+    const provideInstance = this.callInstance(provide);
+    if (carried !== null && provideInstance !== undefined)
+      this.reownIncoming(carried, provideInstance);
+    const watched = this.endFiber(provide, payload, event.delegation, {
+      kind: "request",
+      request: REGION_FAILED_REQUEST,
+      argument: {
+        kind: "record",
+        fields: {
+          id: { kind: "string", value: fiber },
+          name: { kind: "string", value: name },
+          error: thrownPayloadOf(event.ask),
         },
+      },
+    });
+    if (!watched)
+      this.logger.warn(
+        "region: a fiber failed into a nursery with no watch; the failed event is buffered",
+        { fiber, name },
       );
   }
 
@@ -1168,7 +1245,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** Re-raise one mailbox entry under `under` (always a watch — a fiber's escalation surfaces at a watch and
    *  nowhere else). An ordinary entry relays with its fiber's own leg, so the handler's answer descends to the
-   *  fiber. A SYNTHETIC entry (a runtime-authored `crashed` event — its fiber is already dead) relays under
+   *  fiber. A SYNTHETIC entry (a runtime-authored `crashed` / `failed` event — its fiber is already over) relays under
    *  FRESH ids that name no live delegation: the relay row bridges the answer like any other, but when it
    *  descends, the base's moot-answer guard (`issuedPeerOf` finds no peer for the fake child) swallows it — the
    *  exact behaviour a cancelled fiber's in-flight answer already gets, reused rather than re-invented. */
@@ -1185,7 +1262,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  escalating delegation is not a fiber (the provide's continuation, whose escalations relay up unchanged).
    *  A scan over the live scopes' running sets — each is small (a nursery's in-flight fibers), and a fiber
    *  escalation is far rarer than an ordinary event, so no reverse index is warranted. The fiber id rides
-   *  along because a panic's `crashed` report names it. */
+   *  along because an ending event (`crashed` / `failed`) names the fiber it reports. */
   private runningFiberOf(delegation: DelegationId): { scope: string; fiber: string } | undefined {
     for (const [scope, state] of this.scopes) {
       for (const [fiber, running] of state.running) {
@@ -1504,6 +1581,20 @@ function panicMessageOf(ask: AskKind): string {
   return message !== undefined && message.kind === "string"
     ? message.value
     : "(unrenderable panic message)";
+}
+
+/** The value a fiber threw, read from the `prelude.throw` ask's `{ error }` record for the `failed` report.
+ *  It is carried through UNTOUCHED — the whole point of `failed` over `crashed` is that the payload is the
+ *  program's own typed error, matchable exactly as a `prelude.throw` handler would match it. The container's
+ *  privacy LIFTS onto it (reading through a private handle yields a private value), so a tainted throw stays
+ *  tainted once it is re-parented onto the synthetic event. A throw with no payload — an engine / wire
+ *  malformation, since `throwArgument` always writes the field — degrades to `null` rather than dropping the
+ *  ending on the floor: a fiber that ended must still be reported as having ended. */
+function thrownPayloadOf(ask: AskKind): Value {
+  const argument = ask.kind === "request" ? ask.argument : null;
+  if (argument === null || argument.kind !== "record") return { kind: "null" };
+  const error = argument.fields.error;
+  return error === undefined ? { kind: "null" } : liftPrivacy(argument.private, error);
 }
 
 /** A fresh fiber id — the inner-call token the fiber's delegation is bridged under AND the id its handle

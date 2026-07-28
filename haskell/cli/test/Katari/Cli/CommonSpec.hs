@@ -1,6 +1,6 @@
 module Katari.Cli.CommonSpec (spec) where
 
-import Katari.Cli.Common (PrefixError (..), resolveIdPrefix, resolveNodeHelperInvocation)
+import Katari.Cli.Common (PrefixError (..), isPreludeName, resolveIdPrefix, resolveNodeHelperInvocation)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink)
 import System.Environment (setEnv, unsetEnv)
 import System.FilePath ((</>))
@@ -23,6 +23,23 @@ spec = do
 
     it "reports a prefix nothing starts with" $
       resolveIdPrefix "zz" identifiers `shouldBe` Left PrefixNotFound
+
+  describe "isPreludeName" $ do
+    it "recognises a member of the prelude root module" $
+      isPreludeName "prelude.concat" `shouldBe` True
+
+    it "recognises a member of a prelude sub-module" $
+      isPreludeName "prelude.store.get" `shouldBe` True
+
+    it "leaves an application agent visible" $
+      isPreludeName "main.main" `shouldBe` False
+
+    it "does not mistake a look-alike module for the prelude" $
+      -- The `.` guard `covers` applies: `prelude` covers its descendants, never a name-prefix sibling.
+      isPreludeName "preludex.helper" `shouldBe` False
+
+    it "treats a name with no module as an application name" $
+      isPreludeName "prelude" `shouldBe` False
 
   -- The helper-spawn resolution `katari apply` (katari-bundle) and `katari mcp pull` (katari-mcp)
   -- share. The helper name below is chosen to never exist on a real PATH, so the fallthrough cases

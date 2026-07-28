@@ -87,6 +87,7 @@ import { OAUTH_AUTHORIZE_REQUEST } from "../external/credentials.js";
 import { type HttpBlobResolver, materializeJsonTree } from "../external/http-body.js";
 import {
   descriptorKeyOf,
+  MCP_SERVER_ERROR,
   type McpCompletion,
   type McpToolListing,
   type McpTransport,
@@ -704,7 +705,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             kind: "throw",
             error: valueToJson(
               errorData(
-                SERVER_ERROR,
+                MCP_SERVER_ERROR,
                 `mcp: unknown external "${call.tool}" (no tool context) — this runtime predates the compiler that emitted it; rebuild/upgrade the runtime`,
               ),
               "reveal",
@@ -726,7 +727,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             kind: "throw",
             error: valueToJson(
               errorData(
-                SERVER_ERROR,
+                MCP_SERVER_ERROR,
                 `mcp: this tool's provide scope for ${url} has closed; a tool cannot be called after its mcp.provide returns`,
               ),
               "reveal",
@@ -854,7 +855,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   ): void {
     this.raiseThrow(
       delegation,
-      errorData(SERVER_ERROR, `mcp: the tool reply could not be decoded — ${messageOf(cause)}`),
+      errorData(MCP_SERVER_ERROR, `mcp: the tool reply could not be decoded — ${messageOf(cause)}`),
       caller,
       run,
       raiser,
@@ -1040,7 +1041,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             kind: "throw",
             error: valueToJson(
               errorData(
-                SERVER_ERROR,
+                MCP_SERVER_ERROR,
                 `mcp.call: no live mcp.provide scope for ${url}; a static tool call must run inside its provide scope`,
               ),
               "reveal",
@@ -1069,7 +1070,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
           delegation,
           outcome: {
             kind: "throw",
-            error: valueToJson(errorData(SERVER_ERROR, `mcp.call: ${messageOf(cause)}`), "reveal"),
+            error: valueToJson(
+              errorData(MCP_SERVER_ERROR, `mcp.call: ${messageOf(cause)}`),
+              "reveal",
+            ),
           },
         }),
       );
@@ -1405,9 +1409,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.waiters.clear();
   }
 }
-
-/** The domain error ctor every anticipated mcp transport failure throws (`prelude/mcp.ktr` declares it). */
-const SERVER_ERROR = "prelude.mcp.server_error";
 
 /** The domain error ctor a reply that does not conform to `T` throws — `prelude.json.validation_error` (the
  *  same "value does not fit T" error `json.validate` raises), which `prelude/mcp.ktr`'s `call` row carries so

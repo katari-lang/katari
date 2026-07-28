@@ -665,6 +665,55 @@ function withRegistryAgents(ir: IRModule): IRModule {
   return ir;
 }
 
+/** Augment a module with the `prelude.throw` wrapper a compiled raise delegates to (its agent entry + the
+ *  request leaf), plus a `thrower` task that raises `{ error: { message } }` through it — so a fiber can end
+ *  on an UNCAUGHT typed throw with a knowable payload, the `failed` counterpart of `withRegistryAgents`'
+ *  `panicker`. Blocks live at 58+ so they never collide with `watchIr` (0-16, 40/41), `withRegistryAgents`
+ *  (50-57), `withGate` (17/18) or the per-test appended blocks. */
+function withThrowingAgents(ir: IRModule): IRModule {
+  ir.blocks[58] = {
+    block: { kind: "agent", body: 59, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[59] = {
+    block: { kind: "request", name: createAgentName("prelude.throw"), input: 580 },
+    parameters: { parameter: 580 },
+  };
+  ir.blocks[60] = {
+    block: { kind: "agent", body: 61, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[61] = {
+    block: {
+      kind: "sequence",
+      result: null,
+      operations: raiseThrowOperations("upstream refused", 600, 60),
+    },
+    parameters: { parameter: 609 },
+  };
+  ir.entries[createAgentName("prelude.throw")] = { block: 58, private: false };
+  ir.entries[createAgentName("thrower")] = { block: 60, private: false };
+  return ir;
+}
+
+/** The operations a compiled `prelude.throw(error = <ctor>(message = ...))` lowers to: build the payload
+ *  record, wrap it as the request's `{ error }` argument, and delegate to the `prelude.throw` wrapper. The
+ *  raise diverges, so the trailing `exit` is unreachable — it is there only to make the sequence well-formed. */
+function raiseThrowOperations(message: string, base: number, exitTarget: number): Operation[] {
+  return [
+    { kind: "loadLiteral", output: base + 1, value: { kind: "string", value: message } },
+    { kind: "makeRecord", entries: [["message", base + 1]], output: base + 2 },
+    { kind: "makeRecord", entries: [["error", base + 2]], output: base + 3 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.throw") },
+      argument: base + 3,
+      output: base + 4,
+    },
+    { kind: "exit", target: exitTarget, value: base + 4 },
+  ];
+}
+
 /** Augment a `watchIr` module with the `gate` request agent — an unhandled hold the DELAYED-watch bodies below
  *  park on so a test can pause the continuation with NO watch registered yet (it surfaces at the run root). */
 function withGate(ir: IRModule): IRModule {
@@ -3263,5 +3312,206 @@ describe("region reactor", () => {
     const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
     expect(reported).toEqual({ kind: "string", value: "resumed" });
     await actorTwo.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("a fiber's uncaught throw arrives at the watch as the typed failed event carrying the thrown value, and the nursery keeps serving", async () => {
+    // The `failed` twin of the crashed test, and the whole point of the feature: the handle body forks a
+    // steady worker AND a named `thrower` fiber whose `prelude.throw` finds no handler inside the task. The
+    // throw does NOT ride the ceiling up past the watch (which is what used to force a throw guard around
+    // every forked task): the runtime tears the failed fiber down and re-emits `failed(id, name, error)` at
+    // the watch, where a handler for it — installed next to `on_message` — reports the record up as
+    // `fail_seen`. The error is the THROWN VALUE ITSELF, so the handler reads `error.message`.
+    const persistence = new StoringPersistence();
+    const handleBody: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadAgent", output: 156, name: createAgentName("thrower") },
+      { kind: "loadLiteral", output: 157, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 148, value: { kind: "string", value: "monitor" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 156],
+          ["argument", 157],
+          ["name", 148],
+        ],
+        output: 149,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 149,
+        output: 147,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    const ir = withThrowingAgents(watchIr({ handleBody }));
+    // Install a `failed` handler next to the default `on_message` one: report the failure record up as
+    // `fail_seen` (the test's observable), then answer the failed event with null.
+    const handleBlock = ir.blocks[14]?.block;
+    if (handleBlock === undefined || handleBlock.kind !== "handle") {
+      throw new Error("watchIr must place the handle at block 14");
+    }
+    handleBlock.handlers.push({ request: createAgentName("prelude.region.failed"), body: 20 });
+    ir.blocks[20] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("fail_seen") },
+            argument: 200,
+            output: 201,
+          },
+          { kind: "loadLiteral", output: 202, value: { kind: "null" } },
+          { kind: "continue", target: 14, value: 202, modifiers: [] },
+        ],
+      },
+      parameters: { parameter: 200 },
+    };
+    ir.blocks[22] = {
+      block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[23] = {
+      block: { kind: "request", name: createAgentName("fail_seen"), input: 220 },
+      parameters: { parameter: 220 },
+    };
+    ir.entries[createAgentName("fail_seen")] = { block: 22, private: false };
+
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const seen = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fail_seen")),
+    );
+    const argument = seen.argument;
+    if (argument?.kind !== "record") throw new Error("fail_seen must carry the failed record");
+    expect(argument.fields.name).toEqual({ kind: "string", value: "monitor" });
+    const id = argument.fields.id;
+    if (id?.kind !== "string") throw new Error("failed must carry a string id");
+    expect(id.value).toMatch(/^fiber:/);
+    // The payload is the thrown value VERBATIM — a data record, not a rendered message. That is the whole
+    // difference from `crashed`: a handler matches it exactly as a `prelude.throw` handler would.
+    expect(argument.fields.error).toEqual({
+      kind: "record",
+      fields: { message: { kind: "string", value: "upstream refused" } },
+    });
+    // The failed fiber is fully retired while the nursery lives on: the provide's bridges shrink back to
+    // the continuation + the steady worker.
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.innerCalls.length === 2 ? true : undefined;
+    });
+
+    // Answer the report; the handler's null answer to the failed event itself is swallowed (no fiber to
+    // descend to), freeing the watch — so the steady worker's on_message still round-trips end-to-end.
+    await actor.answerEscalation(seen.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "answered" });
+    await actor.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("only a throw raised INSIDE a fiber is trapped: the handler's own throw, raised above the watch while answering a fiber, still escapes the region", async () => {
+    // The containment boundary, proved from the other side. The worker fiber performs an ORDINARY
+    // `on_message` — which must still relay to the watch unchanged — and the handler answering it at the
+    // watch's caller raises `prelude.throw` instead of resuming. That throw is the CONTINUATION's, not a
+    // fiber's (a handler body escalates from its install site, which is above the watch), so it must NOT be
+    // trapped as `failed`: it relays up past the provide and fails the run, exactly as it did before fibers'
+    // throws were trapped at all. A `failed` event here would mean the reactor is trapping on the request
+    // name rather than on the raiser being a fiber.
+    const ir = withThrowingAgents(
+      watchIr({ handler: raiseThrowOperations("handler refused", 160, 14) }),
+    );
+    const actor = makeActor(ir);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The run fails with the HANDLER's throw payload, which is only reachable if it escaped the region.
+    await expect(result).rejects.toThrow(/handler refused/);
+    // ...and no `failed` event was ever synthesised: the trap fired for no throw at all.
+    expect(
+      actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("prelude.region.failed")),
+    ).toBeUndefined();
+  });
+
+  test("a fiber's throw is buffered as `failed` with no watch, and a panic in the same shape still buffers as `crashed`", async () => {
+    // The two endings stay TWO, told apart by the ask the fiber raised and by nothing else. Both fibers run
+    // the delayed-watch shape (the continuation parks on `gate` with NO watch registered), so each ending is
+    // written into the durable MAILBOX as a SYNTHETIC entry — no child leg, nothing at the run root — and
+    // only the watch that registers later re-emits it. Reading the buffer directly is what proves the
+    // reactor chose the request name from the raiser's ask rather than collapsing both into one event.
+    for (const shape of [
+      { task: "thrower", request: "prelude.region.failed" },
+      { task: "panicker", request: "prelude.region.crashed" },
+    ]) {
+      const persistence = new StoringPersistence();
+      const ir = withGate(
+        withThrowingAgents(
+          withRegistryAgents(
+            watchIr({
+              handleBody: forkHoldThenWatch({ task: shape.task, argument: "x", name: "boom" }),
+            }),
+          ),
+        ),
+      );
+      const actor = makeActor(ir, persistence);
+      actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+      await waitUntil(() =>
+        actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+      );
+      const buffered = await eventually(async () => {
+        const provide = (await peekRegionProvides(persistence))[0];
+        return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+      });
+      const entry = buffered.mailbox[0];
+      expect(entry?.child).toBeNull();
+      expect(entry?.ask.kind === "request" ? entry.ask.request : null).toEqual(
+        createAgentName(shape.request),
+      );
+
+      // Answer the gate: the watch registers and re-emits the buffered ending, which bubbles PAST the
+      // on_message-only handle to the run root as the typed event, still naming the fiber's tag.
+      const gate = await waitUntil(() =>
+        actor.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+      );
+      await actor.answerEscalation(gate.escalation, { kind: "null" });
+      const ended = await waitUntil(() =>
+        actor.listOpenEscalations().find((open) => open.request === createAgentName(shape.request)),
+      );
+      const argument = ended.argument;
+      if (argument?.kind !== "record") throw new Error("an ending event must carry its record");
+      expect(argument.fields.name).toEqual({ kind: "string", value: "boom" });
+      await actor.answerEscalation(ended.escalation, { kind: "null" });
+    }
   });
 });

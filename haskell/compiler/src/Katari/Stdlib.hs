@@ -14,7 +14,7 @@
 -- Haskell cannot register the /directory/ as a dependency (only the files that existed at splice
 -- time), and stack's recompilation check hashes file contents — so after ADDING a stdlib file, make
 -- a real edit to THIS module (this comment will do) or the new module silently stays out of the
--- embedded set. (Most recent addition: @prelude/crypto.ktr@.)
+-- embedded set. (Most recent addition: @prelude/poll.ktr@.)
 module Katari.Stdlib where
 
 import Data.ByteString (ByteString)

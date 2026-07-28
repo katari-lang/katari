@@ -1,0 +1,9 @@
+{
+  // The tests' own typecheck. They live outside `tsconfig.json` because that one deliberately compiles the
+  // published surface with NO ambient types (see its comment), while a test that reads repository source
+  // files needs the Node globals the base config provides.
+  "extends": "../tsconfig.base.json",
+  "include": [
+    "test"
+  ]
+}

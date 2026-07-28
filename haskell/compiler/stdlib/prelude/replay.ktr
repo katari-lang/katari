@@ -25,6 +25,23 @@
 // failure is already an `interrupted[F]` whose `F` the converter chose as a value, so exhaustion re-raises
 // a TYPED `throw[F]` and never needs to re-panic.
 //
+// THE COST MODEL — WHY EVERY LOOP HERE IS A `forever` AND NOT RECURSION. Calling an agent is a
+// DELEGATION, and a delegation pushes a DURABLE frame that lives until the call returns. A loop written
+// as self-recursion therefore never returns while it is looping: its depth is the number of iterations,
+// and every one of those frames is persisted state the runtime carries for the rest of the run. Nothing
+// reclaims them until the whole chain unwinds, so a long-lived recursive loop grows without bound — and
+// a crash-recovery reload has to rebuild the chain. A `forever` loop is FLAT instead: each finished
+// iteration's frames are reclaimed, and the loop's own `var`s are the only state that survives, however
+// many times it has gone round. That is why the providers below are `forever` loops, why their durable
+// footprint does not grow with the replay count, and why a daemon polls with `time.watch` (whose reactor
+// owns the loop, so a tick adds no depth) rather than a `time.sleep` recursion.
+//
+// The rule generalizes past this module: anything that iterates without a known-small bound wants a
+// `forever` or an explicit worklist, not self-recursion. A read-only tree walk should drain a worklist
+// breadth-first rather than recurse per node — a tool that leaves a durable frame chain behind has done
+// more than read. Bounded, shallow recursion (a parser over a small document, a fixed-depth descent) is
+// fine: the cost is per LIVE frame, not per call ever made.
+//
 // THE ONLY PERFORMABLE REQUEST IN THIS MODULE IS `interrupted` (the seam a converter performs). The
 // providers are ordinary `forever` loops: their per-iteration `interrupted`-catch is `run_once`, and their
 // evolving loop state (attempt count, backoff delay) is the `forever`'s own `var` — one owner, advanced by a

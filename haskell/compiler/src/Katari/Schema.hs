@@ -22,11 +22,12 @@
 -- happen in "Katari.Lowering", which has the type environment.
 module Katari.Schema where
 
-import Data.Aeson (toJSON)
+import Data.Aeson (Value (String), toJSON)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import GHC.List (List)
 import Katari.Data.Id (GenericId)
 import Katari.Data.JSONSchema
   ( AdditionalProperties (..),
@@ -34,7 +35,7 @@ import Katari.Data.JSONSchema
     JSONSchema (..),
     ObjectSchema (..),
   )
-import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
+import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType
   ( FieldInformation (..),
     SemanticGenericArgument,
@@ -46,10 +47,14 @@ import Katari.Data.SemanticType
 -- constructor's fields as 'SemanticType's (the caller denormalizes them from the type environment);
 -- 'parameterGenericIds' maps each generic parameter's name to its 'GenericId' so a @foo[args]@
 -- reference — whose arguments are keyed by parameter name — becomes a 'GenericId'-keyed substitution
--- over the field types.
+-- over the field types. 'annotation' and 'fieldAnnotations' are the declaration's @\@"..."@ docstrings,
+-- carried here so an inline expansion documents itself: a @data@ reached through a union arm has no
+-- other site at which a description could be attached.
 data DataDefinition = DataDefinition
   { fields :: Map Text FieldInformation,
-    parameterGenericIds :: Map Text GenericId
+    parameterGenericIds :: Map Text GenericId,
+    annotation :: Maybe Text,
+    fieldAnnotations :: Map Text Text
   }
   deriving stock (Eq, Show)
 
@@ -74,6 +79,35 @@ callableReferenceKey = "$katari_agent"
 -- | Reserved property name marking a @file@ value's blob handle.
 fileReferenceKey :: Text
 fileReferenceKey = "$katari_ref"
+
+-- | Reserved property name carrying a blob handle's semantic kind. The engine writes it and decode
+-- defaults a missing one to @file@, so the schema only ACCEPTS it — but it is wire vocabulary all the
+-- same, and lives here beside its siblings rather than inline, so every reserved name this module emits
+-- is greppable from one place (and stays checkable against the runtime's @wire.ts@).
+semanticKindKey :: Text
+semanticKindKey = "$katari_semantic_kind"
+
+-- | The description carried by every @$katari_constructor@ property. The reserved @$katari_@ namespace
+-- is a Katari wire convention, not anything a JSON Schema consumer could infer, so the schema states
+-- outright what the property is for and that its value is copied verbatim — otherwise a model reading
+-- a union of @data@ types has no way to learn that the tag is what selects an arm.
+constructorDiscriminatorDescription :: Text
+constructorDiscriminatorDescription = "The tag that selects this variant. Write this exact string."
+
+-- | Overlay a description on a schema when there is one to overlay. An absent description leaves the
+-- schema untouched rather than emitting an empty one, so an undocumented declaration adds no noise.
+describedWith :: Maybe Text -> JSONSchema -> JSONSchema
+describedWith maybeDescription schema = case maybeDescription of
+  Just description -> SchemaDescribed DescribedSchema {description = description, schema = schema}
+  Nothing -> schema
+
+-- | Peel every 'SchemaDescribed' overlay off a schema, exposing the shape beneath. A description
+-- annotates and never constrains, so a consumer that dispatches on STRUCTURE must look through one:
+-- otherwise documenting a declaration silently changes how its schema is recognised.
+undescribed :: JSONSchema -> JSONSchema
+undescribed schema = case schema of
+  SchemaDescribed described -> undescribed described.schema
+  other -> other
 
 -- | Convert a 'SemanticType' to its JSON Schema. @data@ references are inline-expanded from
 -- 'DataDefinitions'; a recursive reference is broken with an open schema.
@@ -135,8 +169,15 @@ toJSONSchema dataDefinitions = convert Set.empty
           let visitedWithSelf = Set.insert qualifiedName visited
               substitution = buildSubstitution definition.parameterGenericIds arguments
               expandedFields = Map.toAscList definition.fields
+              -- A documented field carries its own docstring. The overlay sits outside whatever
+              -- description the field's type already contributed, and the wire encoding keeps the
+              -- outermost, so the more specific text — this declaration's, about this field — wins.
               fieldProperties =
-                [ (fieldName, convert visitedWithSelf (substituteGenerics substitution field.semanticType))
+                [ ( fieldName,
+                    describedWith
+                      (Map.lookup fieldName definition.fieldAnnotations)
+                      (convert visitedWithSelf (substituteGenerics substitution field.semanticType))
+                  )
                   | (fieldName, field) <- expandedFields
                 ]
               -- The constructor's fields, nested under @value@ as their own object (an open object — a
@@ -150,16 +191,29 @@ toJSONSchema dataDefinitions = convert Set.empty
                     }
               -- The qualified constructor name tags the value; consumers use it as the discriminator
               -- when picking a union arm.
-              constructorProperty = (constructorDiscriminatorKey, SchemaConst (toJSON (renderQualifiedName qualifiedName)))
-           in SchemaObject
-                ObjectSchema
-                  { properties = [constructorProperty, (valueNestingKey, valueObject)],
-                    -- The wire form is exactly the discriminator and the nested fields object; both are
-                    -- always present, and no other top-level key is admitted (both live in the reserved
-                    -- @$katari_@ namespace, disjoint from any bare record).
-                    required = [constructorDiscriminatorKey, valueNestingKey],
-                    additionalProperties = AdditionalPropertiesBoolean False
-                  }
+              constructorProperty =
+                ( constructorDiscriminatorKey,
+                  SchemaDescribed
+                    DescribedSchema
+                      { description = constructorDiscriminatorDescription,
+                        schema = SchemaConst (toJSON (renderQualifiedName qualifiedName))
+                      }
+                )
+              taggedObject =
+                SchemaObject
+                  ObjectSchema
+                    { properties = [constructorProperty, (valueNestingKey, valueObject)],
+                      -- The wire form is exactly the discriminator and the nested fields object; both are
+                      -- always present, and no other top-level key is admitted (both live in the reserved
+                      -- @$katari_@ namespace, disjoint from any bare record).
+                      required = [constructorDiscriminatorKey, valueNestingKey],
+                      additionalProperties = AdditionalPropertiesBoolean False
+                    }
+           in -- The declaration's own docstring describes the whole variant. It is prefixed with the
+              -- constructor's short name so that an arm of a union reads as a labelled choice, which is
+              -- the only place this schema is ever expanded more than once. An undocumented declaration
+              -- gets no description: the tag const already names it, so a bare name would be noise.
+              describedWith ((\documentation -> qualifiedName.name <> ": " <> documentation) <$> definition.annotation) taggedObject
       -- An unknown @data@ name (should not arise once 'DataDefinitions' is complete): stay open
       -- rather than emit a wrong shape.
       | otherwise = SchemaAny
@@ -173,6 +227,40 @@ buildSubstitution parameterGenericIds arguments =
       | (parameterName, genericId) <- Map.toList parameterGenericIds,
         Just argument <- [Map.lookup parameterName arguments]
     ]
+
+-- | What 'dataValueSchemaParts' recovers from a @data@ value's wire schema: the constructor name the
+-- @$katari_constructor@ discriminator pins, and the constructor's field schemas exactly as they sit
+-- nested under @$katari_value@ (in declaration order, each still carrying whatever description the
+-- producer overlaid on it).
+data DataValueSchema = DataValueSchema
+  { constructorName :: Text,
+    fields :: List (Text, JSONSchema)
+  }
+  deriving stock (Eq, Show)
+
+-- | Recognise a @data@ value's wire schema — the inverse of the tagged object 'toJSONSchema' emits for a
+-- @data@ reference, and the ONE place that knowledge is written down for consumers. A consumer that
+-- dispatches on the encoding (the CLI's argument interview, which names a union arm by its constructor
+-- instead of showing two indistinguishable @record {…}@ labels) reads it through here rather than
+-- rebuilding the inverse by hand, so the encoding cannot drift away from a hand-written reader.
+--
+-- Both reserved properties are read through 'undescribed': the producer documents the discriminator
+-- (always) and any annotated field, and a documented declaration must still be recognised as the @data@
+-- shape it is. The declaration's OWN docstring wraps the whole object, so a caller holding a
+-- 'JSONSchema' peels that outer overlay first ('undescribed') and passes the 'ObjectSchema' beneath.
+dataValueSchemaParts :: ObjectSchema -> Maybe DataValueSchema
+dataValueSchemaParts objectSchema = case undescribed <$> lookup constructorDiscriminatorKey objectSchema.properties of
+  Just (SchemaConst (String name)) ->
+    Just
+      DataValueSchema
+        { constructorName = name,
+          fields = case undescribed <$> lookup valueNestingKey objectSchema.properties of
+            Just (SchemaObject valueObject) -> valueObject.properties
+            -- The discriminator alone identifies the encoding; a nesting property that is missing or not
+            -- an object means a constructor with nothing to list, not a non-@data@ shape.
+            _ -> []
+        }
+  _ -> Nothing
 
 -- | The schema of a callable value: a @$agent@-tagged reference object. Loose by design — the AI does
 -- not construct callables; they are runtime-supplied, and the precise reference field set follows the
@@ -189,7 +277,7 @@ fileReferenceSchema :: JSONSchema
 fileReferenceSchema =
   SchemaObject
     ObjectSchema
-      { properties = [(fileReferenceKey, SchemaString), ("$katari_semantic_kind", SchemaString)],
+      { properties = [(fileReferenceKey, SchemaString), (semanticKindKey, SchemaString)],
         required = [fileReferenceKey],
         additionalProperties = AdditionalPropertiesBoolean True
       }

@@ -20,6 +20,12 @@
 // runtime validates every delegation's argument against the callee's input schema, so malformed args
 // throw `call_error` at the call site rather than corrupting the callee — an AI-driven tool loop can
 // catch it and let the model retry with corrected arguments.
+//
+// `describe` writes to the same description channel `get_metadata` reads, at RUNTIME: it is the
+// value-level twin of a documented let (`@"..." let tool = some_agent`), which already stamps the
+// bound value's naming. Without it, the description an AI is shown must be a source literal, so a
+// protocol paragraph shared by a dozen tools is a dozen copies that drift apart; with it, the shared
+// paragraph is one ordinary string value composed into each tool's text by f-string.
 
 @"The public metadata of one callable: its (qualified) name, its `@\"...\"` description, and the JSON
 Schemas of its input, output and requests — each schema a plain document value, ready to embed in an AI
@@ -38,6 +44,24 @@ instantiated with `[T]` yields schemas specialised to the instantiation; a runti
 the name / description / input schema its provider declared."
 primitive agent get_metadata(@"The callable value to inspect." value: agent never -> unknown with all) -> agent_metadata
 
+@"Re-describe a callable VALUE: hand back the same callable carrying @description@ as the text
+`get_metadata` — and every tool listing built from it — reports. This is the runtime twin of a
+documented let (`@\"...\" let tool = some_agent`), and it obeys the same value-level rule: a
+re-description RENAMES nothing and RE-TYPES nothing. The input / output / request schemas stay the
+target's own, the qualified name stays what it was, and calling the result runs exactly the same
+agent. Only the sentence the model reads changes.
+
+Reach for it when one paragraph — a protocol, a safety rule, a shared vocabulary — belongs in the
+description of many tools. Written as source `@\"...\"` text that paragraph must be copied per tool
+and drifts; here it is an ordinary string value, composed into each tool's description with an
+f-string (`describe(target = close_ticket, description = f\"${own_text} ${protocol}\")`) so the shared
+half has exactly one home. Pure: the answer is a COPY, so the original binding keeps its old
+description — bind the result and hand that around."
+primitive agent describe[F extends agent never -> unknown with all](
+  @"The callable value to re-describe." target: F,
+  @"The description text the model should read for this tool." description: string,
+) -> F
+
 @"Reify T's JSON Schema as a plain document value — the same schema `json.validate[T]` checks a value
 against and `get_metadata` embeds for a callable's input / output. The reified schema is what a type
 looks like FROM OUTSIDE (an AI told what shape to produce, a tool list assembled by hand): an object
@@ -53,7 +77,14 @@ data call_error(@"The non-callable kind, or the offending path of the schema mis
 @"Invoke a callable VALUE with a runtime-built argument record — dynamic dispatch for a target an AI
 picked out of a tool list. `args` is validated against the target's input schema at the delegation
 boundary; a mismatch throws `call_error` at this call site (catch it to let the model retry). The
-target's effects flow through unchanged."
+target's effects flow through unchanged.
+
+FILE HANDLES PASS STRAIGHT THROUGH. `args` is an ordinary value tree (records / arrays / scalars), and a
+`$katari_ref` handle object anywhere inside it is ALREADY a real `file` value — the wire-to-value
+conversion happens once, unconditionally, wherever a JSON document crosses into the program (a model
+reply read by `json.parse`, an `mcp` result, an FFI return), and is never schema-directed. So a model
+that replays a handle it saw earlier in the conversation satisfies a `file` parameter with nothing to
+copy wrong, and the schema check here sees the `file` the target asked for rather than a bare record."
 primitive agent call_agent[R, effect E](
   @"The callable value to dispatch (e.g. the tool an AI picked)." target: agent never -> R with E,
   @"The target's whole argument record, keyed by its parameter names." args: unknown,

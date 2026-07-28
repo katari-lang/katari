@@ -75,14 +75,23 @@ emptyTypeEnvironment =
 ------------------------------------------------------------------------------------------------
 
 -- | A data declaration reduced to what the env-build needs: its name, generics, constructor
--- parameters and span (for error anchoring).
+-- parameters and span (for error anchoring), plus its own @\@"..."@ docstring, which rides along so
+-- the schema builder can describe the type wherever it is used (see 'DataInformation.annotation').
 data CollectedData = CollectedData
   { qualifiedName :: QualifiedName,
     genericParameters :: GenericParameters,
     genericBounds :: Map GenericId (SyntacticTypeExpression Identified),
     parameters :: List (ParameterSignature Identified),
+    annotation :: Maybe Text,
     sourceSpan :: SourceSpan
   }
+
+-- | Each documented constructor field's @\@"..."@ docstring, keyed by field name — the shape
+-- 'DataInformation.fieldAnnotations' stores. An undocumented parameter contributes no entry, so a
+-- lookup answers "is this field documented?".
+collectedFieldAnnotations :: CollectedData -> Map Text Text
+collectedFieldAnnotations item =
+  Map.fromList [(parameter.name, annotation) | parameter <- item.parameters, Just annotation <- [parameter.annotation]]
 
 -- | What a request-namespace declaration declares beyond its name and generics: an ordinary
 -- request's typed parameters and result type, or nothing at all for a marker effect (@effect
@@ -167,6 +176,7 @@ collectDeclarations modules =
               genericParameters = genericParameters,
               genericBounds = genericBounds,
               parameters = declaration.parameters,
+              annotation = declaration.annotation,
               sourceSpan = declaration.sourceSpan
             }
     collectRequest declaration =
@@ -466,7 +476,7 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
     -- shapes — the normalizer reads only the parameter lists for arity / variance / bounds).
     environmentOver dataParameters requestParameters =
       SubtypingContext
-        { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = placeholderConstructor}) | (item, parameters) <- dataParameters],
+        { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = placeholderConstructor, annotation = item.annotation, fieldAnnotations = collectedFieldAnnotations item}) | (item, parameters) <- dataParameters],
           requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType, marker = collectedMarker item}) | (item, parameters) <- requestParameters],
           genericsInScope = mempty,
           world = bottomAttribute,
@@ -519,7 +529,7 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
 
     normalizeData item parameters semantic =
       let (constructor, diagnostics) = runNormalize (inScope parameters) item.sourceSpan (normalizeConstructor semantic)
-       in (DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = constructor}, diagnostics)
+       in (DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = constructor, annotation = item.annotation, fieldAnnotations = collectedFieldAnnotations item}, diagnostics)
 
     normalizeRequest item parameters (parameterObject, returnSemantic) =
       let scopedEnvironment = inScope parameters

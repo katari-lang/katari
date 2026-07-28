@@ -222,10 +222,29 @@ function classifyContentBlock(block: unknown): ClassifiedContentBlock {
   return { kind: "other", placeholder };
 }
 
+// ─── the `prelude.mcp` data constructors this transport speaks ───────────────────────────────────
+//
+// The two typed errors it throws and the two arms of the `prelude.mcp.auth` sum it reads off a
+// descriptor, each named ONCE — `prelude/mcp.ktr` declares all four, and the stdlib-names trip-wire
+// (`test/stdlib-names.test.ts`) holds these strings to that declaration.
+
+/** The domain error ctor every anticipated mcp failure throws. Exported because the mcp REACTOR raises
+ *  the same typed error for the failures it meets on its own side of the seam (a reply it cannot decode,
+ *  a call it cannot route): one ctor name, one definition, so the two halves of `mcp` cannot drift. */
+export const MCP_SERVER_ERROR = "prelude.mcp.server_error";
+
+/** The domain error ctor the `headers` path's rejected key material throws — transport-only, since the
+ *  reactor never authors it. */
+const MCP_AUTH_ERROR = "prelude.mcp.auth_error";
+
+/** The `prelude.mcp.auth` sum's arms, as they arrive on the descriptor's `$katari_constructor` tag. */
+const MCP_AUTH_HEADERS = "prelude.mcp.headers";
+const MCP_AUTH_OAUTH = "prelude.mcp.oauth";
+
 /** The wire form of a typed `prelude.mcp.server_error` throw (decoded back into the data value at the
  *  reactor base). */
 function serverError(message: string): Json {
-  return { $katari_constructor: "prelude.mcp.server_error", $katari_value: { message } };
+  return { $katari_constructor: MCP_SERVER_ERROR, $katari_value: { message } };
 }
 
 /** The wire form of the typed `prelude.mcp.auth_error` throw — the `headers` path's rejected key
@@ -233,7 +252,7 @@ function serverError(message: string): Json {
  *  to the given headers, so retrying with the same material will not help. The oauth path never throws
  *  this — it parks and asks instead (`authorizationRequired`). */
 function authError(message: string): Json {
-  return { $katari_constructor: "prelude.mcp.auth_error", $katari_value: { message } };
+  return { $katari_constructor: MCP_AUTH_ERROR, $katari_value: { message } };
 }
 
 /** Classify one failed operation by the descriptor's auth variant — the ONE place the auth sum decides
@@ -640,7 +659,7 @@ function readDescriptorAuth(source: Json | undefined): DescriptorAuth {
       ? fieldsSource
       : {};
   switch (source.$katari_constructor) {
-    case "prelude.mcp.headers": {
+    case MCP_AUTH_HEADERS: {
       const headers: Record<string, string> = {};
       const rawValues = fields.values;
       if (rawValues !== null && typeof rawValues === "object" && !Array.isArray(rawValues)) {
@@ -650,7 +669,7 @@ function readDescriptorAuth(source: Json | undefined): DescriptorAuth {
       }
       return { kind: "headers", headers };
     }
-    case "prelude.mcp.oauth": {
+    case MCP_AUTH_OAUTH: {
       const name = fields.name;
       if (typeof name !== "string" || name === "") {
         throw new Error("mcp: an mcp.oauth(...) auth value must carry its credential name");

@@ -67,6 +67,86 @@ spec = do
       synthAt (recordExpression [("x", integerLiteral 1), ("y", booleanLiteral True)])
         `shouldBe` recordNormalizedClosed [("x", integerType), ("y", booleanType)]
 
+  describe "synthExpressionType (record spread)" $ do
+    -- The rest is what each case turns on, so every assertion here is an EXACT normalized type: a
+    -- spread contributes its base's rest along with its fields, and that is what decides whether the
+    -- result is still closed (usable as a `record[V]`) or has widened.
+    let base = LocalVariableId 0
+        spreadingIn baseType entries = synthIn [(base, baseType)] (recordExpressionOf entries)
+        baseVariable = variableExpression base
+
+    it "spreading a closed object stays closed and overrides field-wise (the later entry wins)" $
+      spreadingIn
+        (recordNormalizedClosed [("x", integerType), ("y", booleanType)])
+        [spreadEntry baseVariable, fieldEntry "y" (stringLiteral "s")]
+        `shouldBe` recordNormalizedClosed [("x", integerType), ("y", stringType)]
+
+    it "a field written BEFORE the spread loses to it (position, not syntax, decides)" $
+      spreadingIn
+        (recordNormalizedClosed [("y", booleanType)])
+        [fieldEntry "y" (stringLiteral "s"), spreadEntry baseVariable]
+        `shouldBe` recordNormalizedClosed [("y", booleanType)]
+
+    it "the LAST of two spreads wins a shared key" $
+      spreadingIn
+        (recordNormalizedClosed [("y", booleanType)])
+        [spreadEntry (recordExpression [("y", stringLiteral "s")]), spreadEntry baseVariable]
+        `shouldBe` recordNormalizedClosed [("y", booleanType)]
+
+    it "spreading a record[V] leaves V in the rest, so a written field widens rather than replaces it" $
+      -- `{...r, n = 1}` with `r : record[string]` is "n is an integer, every other key a string" — a
+      -- subtype of `record[string | integer]`, and no longer of `record[string]`.
+      spreadingIn
+        (recordOf stringType)
+        [spreadEntry baseVariable, fieldEntry "n" (integerLiteral 1)]
+        `shouldBe` objectNormalized stringType [("n", integerType)]
+
+    it "spreading a DECLARED (open) object type keeps the open rest a width-subtype needs" $
+      spreadingIn
+        (recordNormalized [("x", integerType)])
+        [spreadEntry baseVariable, fieldEntry "y" (booleanLiteral True)]
+        `shouldBe` objectNormalized unknownType [("x", integerType), ("y", booleanType)]
+
+    it "reports K3014 when the base is not an object, and keeps the written fields" $ do
+      let (result, diagnostics) =
+            runAt
+              (Map.singleton base (monoScheme integerType))
+              mempty
+              (synthExpressionType (recordExpressionOf [spreadEntry baseVariable, fieldEntry "y" (integerLiteral 1)]))
+      hasErrorCode "K3014" diagnostics `shouldBe` True
+      result `shouldBe` recordNormalizedClosed [("y", integerType)]
+
+  describe "record spread (end to end)" $ do
+    let itemType = "type item = { id: string, done: boolean }\n"
+
+    it "updates a few fields of a declared record and still fits its type" $
+      compiledCodes (itemType <> "agent complete(target: item) -> item { { ...target, done = true } }") `shouldBe` []
+
+    it "rejects an override that changes a field's type out of the declared shape (K3001)" $
+      compiledCodes (itemType <> "agent complete(target: item) -> item { { ...target, done = \"yes\" } }")
+        `shouldContain` ["K3001"]
+
+    it "a record[V] widened by a foreign field fits record[V | that type]" $
+      compiledCodes "agent f(r: record[string]) -> record[string | integer] { { ...r, n = 1 } }" `shouldBe` []
+
+    it "rejects the widened record[V] against record[V] alone (K3001)" $
+      compiledCodes "agent f(r: record[string]) -> record[string] { { ...r, n = 1 } }" `shouldContain` ["K3001"]
+
+    it "keeps a closed literal closed through a spread, so it is still a subtype of record[V]" $
+      compiledCodes "agent f() -> record[string] { { ...{ a = \"x\" }, b = \"y\" } }" `shouldBe` []
+
+    it "rejects spreading a value that is also null: there are no fields to merge from (K3014)" $
+      compiledCodes "agent f(r: { a: string } | null) -> record[unknown] { { ...r } }" `shouldContain` ["K3014"]
+
+    it "rejects spreading a nominal `data` value: a structural merge would strip its identity (K3014)" $
+      compiledCodes "data box(payload: string)\nagent f(b: box) -> record[unknown] { { ...b } }" `shouldContain` ["K3014"]
+
+    it "carries the spread base's privacy into the fields it contributes (no laundering)" $
+      -- The base is private at the handle, so every field it brings is observed private — spreading it
+      -- into a public-typed record must fail exactly as reading one of its fields would.
+      compiledCodes "agent f(r: { a: string } of private) -> { a: string } { { ...r } }"
+        `shouldContain` ["K3001"]
+
   describe "synthExpressionType (if)" $ do
     it "if-then-else unions the branches" $
       synthAt (ifExpression (booleanLiteral True) [integerLiteral 1] (Just [stringLiteral "x"]))
@@ -532,6 +612,7 @@ spec = do
             <> "  use handler {\n"
             <> "    request on_message(source: string, msg: string) -> null { null }\n"
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
             <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
             <> "  region.watch(nursery = r)\n"
@@ -1620,8 +1701,9 @@ spec = do
             <> "agent worker(input: null) -> null with ev {\n  let a = tick()\n  null\n}\n"
 
     it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
-      -- The handler covers the ceiling AND `region.crashed` — watch re-emits both, so handling the
-      -- crash event is part of the region's total obligation.
+      -- The handler covers the ceiling AND the two runtime ending events `region.crashed` /
+      -- `region.failed` — watch re-emits all three, so handling a fiber's death (panic or uncaught
+      -- throw) is part of the region's total obligation.
       compiledCodes
         ( botEvents
             <> discordWatch
@@ -1631,6 +1713,7 @@ spec = do
             <> "    request on_message(source: string, msg: string) -> null { null }\n"
             <> "    request needs_approval(x: string) -> boolean { true }\n"
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
             <> "  let f = region.fork(nursery = r, task = discord_watch, argument = null)\n"
             <> "  region.watch(nursery = r)\n"
@@ -1646,6 +1729,7 @@ spec = do
             <> "  use handler {\n"
             <> "    request tick() -> null { null }\n"
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
             <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
             <> "  let g = region.cancel(nursery = r, handle = f)\n"
@@ -1655,13 +1739,30 @@ spec = do
         `shouldBe` []
 
     it "rejects a watch whose surroundings do not handle region.crashed: the crash event is part of the region's total obligation (K3001)" $
-      -- `watch` re-emits `E | crashed`; a handler covering only the ceiling leaves the crash event
-      -- undischarged, so forgetting it is a compile error rather than a runtime surprise.
+      -- `watch` re-emits `E | crashed | failed`; a handler covering only the ceiling leaves both ending
+      -- events undischarged, so forgetting them is a compile error rather than a runtime surprise.
       compiledCodes
         ( tickWorker
             <> "agent bot() -> never with io {\n"
             <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
             <> "  use handler { request tick() -> null { null } }\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects a watch whose surroundings handle region.crashed but not region.failed: a fiber's uncaught throw is its own obligation (K3001)" $
+      -- The two ending events are DISTINCT obligations, and this is what pins that: covering only the
+      -- panic still leaves a fiber's uncaught throw — which the runtime traps at the watch and delivers
+      -- as `failed` — undischarged.
+      compiledCodes
+        ( tickWorker
+            <> "agent bot() -> never with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  use handler {\n"
+            <> "    request tick() -> null { null }\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "  }\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
@@ -1683,6 +1784,31 @@ spec = do
             <> "}"
         )
         `shouldContain` ["K3001"]
+
+    it "forks a THROWING task under a throw-free ceiling: `fork` widens its task row by prelude.throw[unknown]" $
+      -- The ceiling is `io` alone — no throw anywhere in it — yet a task that raises
+      -- `prelude.throw[boom] | io` still forks, because `fork`'s task parameter is declared
+      -- `E | prelude.throw[unknown]`. That widening is the boundary's contract made type: an uncaught
+      -- throw never crosses the region AS a throw (the runtime traps it at `watch` and delivers the
+      -- typed `failed` event), so the ceiling `watch` re-emits stays throw-free and no `fork` has to
+      -- wrap its task in a guard just to keep the region standing. Losing the widening would force
+      -- every throwing task to be guarded at the fork site, so it is pinned here.
+      compiledCodes
+        ( "data boom(reason: string)\n"
+            <> "agent throwing_worker(input: null) -> null with io | prelude.throw[boom] {\n"
+            <> "  prelude.throw(error = boom(reason = \"x\"))\n"
+            <> "}\n"
+            <> "agent bot() -> never with io {\n"
+            <> "  let r : region.nursery[region.scope, io] = use region.provide[region.scope, io]\n"
+            <> "  use handler {\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
+            <> "  }\n"
+            <> "  let f = region.fork(nursery = r, task = throwing_worker, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
 
     it "rejects forking a child whose effect exceeds the nursery's ceiling E (K3001)" $
       -- The nursery ceiling is `on_message` only; `rogue_watch` also raises `rogue`, which does not fit.
@@ -1849,6 +1975,111 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
+  describe "anonymous agent expressions" $ do
+    it "types a predicate written inline at a higher-order call" $
+      compiledCodes
+        ( "agent long_names(names: array[string]) -> array[string] {\n"
+            <> "  array.filter(target = names, keep = agent (value: string) -> boolean { string.length(value = value) > 3 })\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "captures an enclosing local, exactly as a named local agent does" $
+      compiledCodes
+        ( "agent scale_all(values: array[integer], factor: integer) -> array[integer] {\n"
+            <> "  array.map(target = values, transform = agent (value: integer) -> integer { value * factor })\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "is a first-class value: bound by a `let` and then called" $
+      compiledCodes
+        ( "agent bound(base: integer) -> integer {\n"
+            <> "  let add = agent (value: integer) -> integer { base + value }\n"
+            <> "  add(value = 1) + add(value = 2)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "infers the same effect row a named local agent gets (the request escapes to the caller)" $
+      compiledCodes
+        ( "request note(text: string) -> integer\n"
+            <> "agent named(lines: array[string]) -> array[integer] with note {\n"
+            <> "  agent step(value: string) -> integer { note(text = value) }\n"
+            <> "  array.map(target = lines, transform = step)\n"
+            <> "}\n"
+            <> "agent anonymous(lines: array[string]) -> array[integer] with note {\n"
+            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- The row is INFERRED from the body, not assumed empty: an agent annotated `with pure` whose
+    -- inline closure performs a request must fail exactly as the named-local-agent spelling does.
+    it "reports an inferred request that the enclosing annotation does not admit (K3001)" $
+      compiledCodes
+        ( "request note(text: string) -> integer\n"
+            <> "agent anonymous(lines: array[string]) -> array[integer] with pure {\n"
+            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "lets an enclosing `use handler` discharge the closure's request" $
+      compiledCodes
+        ( "request note(text: string) -> integer\n"
+            <> "agent handled(lines: array[string]) -> array[integer] {\n"
+            <> "  use handler(var seen: integer = 0) {\n"
+            <> "    request note(text: string) -> integer { next seen + 1 with { seen = seen + 1 } }\n"
+            <> "  }\n"
+            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts an explicit return type and `with` row on the closure" $
+      compiledCodes
+        ( "request note(text: string) -> integer\n"
+            <> "agent annotated(lines: array[string]) -> array[integer] with note {\n"
+            <> "  array.map(target = lines, transform = agent (value: string) -> integer with note { note(text = value) })\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- The parameter type is not propagated inward (the checker synthesizes then subtypes), so an
+    -- anonymous agent's parameters need annotations for the same reason a named one's do.
+    it "requires a parameter type annotation (K3013)" $
+      compiledCodes
+        ( "agent long_names(names: array[string]) -> array[string] {\n"
+            <> "  array.filter(target = names, keep = agent (value) -> boolean { string.length(value = value) > 3 })\n"
+            <> "}"
+        )
+        `shouldContain` ["K3013"]
+
+    it "rejects generic parameters on an agent expression (K3027)" $
+      compiledCodes
+        ( "agent identity_of(values: array[integer]) -> array[integer] {\n"
+            <> "  array.map(target = values, transform = agent [T](value: T) -> T { value })\n"
+            <> "}"
+        )
+        `shouldContain` ["K3027"]
+
+    it "names the offending generic parameter in the K3027 message" $
+      compiledMessages
+        ( "agent identity_of(values: array[integer]) -> array[integer] {\n"
+            <> "  array.map(target = values, transform = agent [T](value: T) -> T { value })\n"
+            <> "}"
+        )
+        `shouldSatisfy` Text.isInfixOf "cannot declare generic parameters (`T`)"
+
+    it "reports a body error inside the closure (the body is checked as written)" $
+      compiledCodes
+        ( "agent bad(values: array[integer]) -> array[integer] {\n"
+            <> "  array.map(target = values, transform = agent (value: integer) -> integer { \"not an integer\" })\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
@@ -1912,31 +2143,28 @@ tupleNormalized :: List NormalizedType -> NormalizedType
 tupleNormalized items =
   layeredOf neverLayer {sequenceLayer = Just NormalizedSequence {items = items, rest = bottomType}}
 
-recordNormalized :: List (Text, NormalizedType) -> NormalizedType
-recordNormalized fieldList =
+-- | An object type of required fields over an explicit tail. The tail is the whole story a record
+-- spread turns on, so it is a parameter here: a written literal is closed ('recordNormalizedClosed'),
+-- a declared object type is open ('recordNormalized'), and spreading a @record[V]@ leaves `V` behind.
+objectNormalized :: NormalizedType -> List (Text, NormalizedType) -> NormalizedType
+objectNormalized restType fieldList =
   layeredOf
     neverLayer
       { objectLayer =
           Just
             NormalizedObject
               { fields = Map.fromList [(name, NormalizedFieldInformation {normalizedType = fieldType, optional = False}) | (name, fieldType) <- fieldList],
-                rest = unknownType
+                rest = restType
               }
       }
+
+recordNormalized :: List (Text, NormalizedType) -> NormalizedType
+recordNormalized = objectNormalized unknownType
 
 -- | A *closed* record literal's normalized type: like 'recordNormalized' but with a `never` tail — the
 -- shape 'synthRecordExpression' produces, which makes a literal a subtype of a homogeneous `record[V]`.
 recordNormalizedClosed :: List (Text, NormalizedType) -> NormalizedType
-recordNormalizedClosed fieldList =
-  layeredOf
-    neverLayer
-      { objectLayer =
-          Just
-            NormalizedObject
-              { fields = Map.fromList [(name, NormalizedFieldInformation {normalizedType = fieldType, optional = False}) | (name, fieldType) <- fieldList],
-                rest = bottomType
-              }
-      }
+recordNormalizedClosed = objectNormalized bottomType
 
 -- | The normalized union of two types, computed by the real lattice join, so a union assertion is
 -- exact equality rather than slot-subset satisfaction.
@@ -1999,13 +2227,17 @@ tupleExpression elements =
     TupleExpression {parallel = False, elements = elements, sourceSpan = testSpan, typeOf = ()}
 
 recordExpression :: List (Text, Expression Identified) -> Expression Identified
-recordExpression entries =
-  ExpressionRecord
-    RecordExpression
-      { entries = [RecordEntry {name = name, value = value, sourceSpan = testSpan} | (name, value) <- entries],
-        sourceSpan = testSpan,
-        typeOf = ()
-      }
+recordExpression entries = recordExpressionOf [fieldEntry name value | (name, value) <- entries]
+
+recordExpressionOf :: List (RecordEntry Identified) -> Expression Identified
+recordExpressionOf entries =
+  ExpressionRecord RecordExpression {entries = entries, sourceSpan = testSpan, typeOf = ()}
+
+fieldEntry :: Text -> Expression Identified -> RecordEntry Identified
+fieldEntry name value = RecordEntryField RecordField {name = name, value = value, sourceSpan = testSpan}
+
+spreadEntry :: Expression Identified -> RecordEntry Identified
+spreadEntry = RecordEntrySpread
 
 ifExpression :: Expression Identified -> List (Expression Identified) -> Maybe (List (Expression Identified)) -> Expression Identified
 ifExpression condition thenStatements maybeElseStatements =

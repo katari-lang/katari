@@ -119,12 +119,17 @@ referencesInStatement = \case
 referencesInModifier :: Modifier Identified -> Set QualifiedName
 referencesInModifier modifier = referencesInExpression modifier.value
 
+referencesInRecordEntry :: RecordEntry Identified -> Set QualifiedName
+referencesInRecordEntry = \case
+  RecordEntryField field -> referencesInExpression field.value
+  RecordEntrySpread value -> referencesInExpression value
+
 referencesInExpression :: Expression Identified -> Set QualifiedName
 referencesInExpression = \case
   ExpressionLiteral _ -> Set.empty
   ExpressionVariable expression -> referenceOf expression.variableReference
   ExpressionTuple expression -> foldMap referencesInExpression expression.elements
-  ExpressionRecord expression -> foldMap (\entry -> referencesInExpression entry.value) expression.entries
+  ExpressionRecord expression -> foldMap referencesInRecordEntry expression.entries
   ExpressionCall expression -> referencesInExpression expression.callee <> foldMap referencesInCallArgument expression.arguments
   ExpressionBinaryOperator expression -> referencesInExpression expression.left <> referencesInExpression expression.right
   ExpressionUnaryOperator expression -> referencesInExpression expression.operand
@@ -143,6 +148,10 @@ referencesInExpression = \case
   ExpressionTypeApplication expression -> referencesInExpression expression.callee
   ExpressionTemplate expression -> foldMap referencesInTemplateElement expression.elements
   ExpressionHandler expression -> referencesInHandler expression
+  -- An anonymous agent's body references are the enclosing top-level declaration's dependencies, for
+  -- the same reason a nested declaration's are: checking the enclosing body checks this body too, so
+  -- whatever it names has to be ordered before the enclosing declaration.
+  ExpressionAgent declaration -> referencesInBlock declaration.body
   ExpressionQualifiedReference expression -> referenceOf expression.variableReference
 
 referencesInCallArgument :: CallArgument Identified -> Set QualifiedName

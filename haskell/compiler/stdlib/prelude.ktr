@@ -75,10 +75,22 @@ primitive agent concat(left: string, right: string) -> string
 //     payload its parameter annotation names — handle the whole union, or rethrow the rest.
 //
 //   - `panic` is the runtime's own failure signal and has no declaration here on purpose: a program
-//     can neither raise it nor handle it. The runtime panics on invariant violations (a
-//     non-exhaustive match, a zero divisor, an FFI infrastructure error, an engine backstop), and an
-//     unhandled panic fails the run. Recovery from a broken invariant is not a program-level
-//     concern; re-running is.
+//     can never RAISE one, and can never name it in an effect row. The runtime panics on invariant
+//     violations (a non-exhaustive match, a zero divisor, an FFI infrastructure error, an engine
+//     backstop), and an unhandled panic fails the run. Repairing a broken invariant is not a
+//     program-level concern; re-running is.
+//
+//     A panic CAN be OBSERVED, though, by the one clause that names it: the ambient
+//     `request panic(msg) { ... }`, addable to any `use handler`. Because `panic` is undeclared the
+//     checker recognizes that bare clause structurally, types it from a wired-in signature —
+//     `panic(msg: string) -> never`, so the parameter must be spelled `msg` and only an explicit
+//     `break` recovers — and keeps it OUT of the continuation's effect row. That last part is what
+//     makes it addable anywhere: no signature gains a `panic`, and a caller pays nothing for a
+//     handler that catches one. Use it where a crash must be CONTAINED rather than repaired: an AI
+//     tool loop turns a crashed tool into a message the model reads and works around (the `ai`
+//     package's tool desk does exactly this), a supervisor turns one into a replay signal. The
+//     work that panicked is over either way — containing the panic keeps the rest of the run alive,
+//     it does not undo the invariant that broke.
 
 @"Signal a typed error the caller may recover from. The payload is a domain-specific error `data`
 (e.g. `json.parse_error`); a handler at that payload type catches it — `use handler { request

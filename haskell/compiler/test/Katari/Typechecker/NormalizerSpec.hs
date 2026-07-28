@@ -394,7 +394,9 @@ environment =
               { parameterNames = ["T"],
                 parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
               },
-          constructor = constructorObjectOf [("x", genericOf genericT)]
+          constructor = constructorObjectOf [("x", genericOf genericT)],
+          annotation = Nothing,
+          fieldAnnotations = Map.empty
         }
     requestInfoOf qualifiedName =
       RequestInformation

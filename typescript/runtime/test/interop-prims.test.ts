@@ -5,7 +5,7 @@
 // (`stringify(parse(s)) == s`), and a non-document value renders its canonical wire form (a data value nests
 // under `$katari_value`, an agent / closure reference carries its snapshot, a file is a `$katari_ref`
 // handle). `validate[T]` checks a value against T's schema and returns it unchanged, or throws
-// `validation_error`.
+// `validation_error`; `try_validate[T]` is its TOTAL twin, answering `null` where it would throw.
 
 import {
   createAgentName,
@@ -17,6 +17,7 @@ import {
 import { describe, expect, test } from "vitest";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import type { PrimContext } from "../src/runtime/engine/context.js";
+import { conformCallableArgumentSync } from "../src/runtime/engine/interop-prims.js";
 import type { CoreInstance, ProjectStore } from "../src/runtime/engine/types.js";
 import { valueEquals, valueToJson } from "../src/runtime/value/codec.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
@@ -185,6 +186,30 @@ describe("prelude.json", () => {
       "prelude.json.validation_error",
       /json\.validate: .*missing required field "x"/,
     );
+  });
+
+  test("try_validate[T] answers the conforming value, or `null` instead of throwing", async () => {
+    const point: Value = { kind: "record", fields: { x: int(1), y: int(2) } };
+    await expect(
+      run("prelude.json.try_validate", { value: point }, contextWithT(POINT)),
+    ).resolves.toEqual(point);
+    // The TOTAL twin: the same mismatch `validate` raises `validation_error` on reads as `null` here.
+    await expect(
+      run(
+        "prelude.json.try_validate",
+        { value: { kind: "record", fields: { y: int(2) } } },
+        contextWithT(POINT),
+      ),
+    ).resolves.toEqual({ kind: "null" });
+    await expect(
+      run("prelude.json.try_validate", { value: str("not a point") }, contextWithT(POINT)),
+    ).resolves.toEqual({ kind: "null" });
+  });
+
+  test("try_validate without a [T] instantiation fails loud (stale-compiler IR, not a silent null)", async () => {
+    // A missing instantiation is a stale-IR bug, not a value that failed to conform — answering `null`
+    // would disguise it as an ordinary mismatch.
+    await expect(run("prelude.json.try_validate", { value: int(1) })).rejects.toThrow(/recompile/);
   });
 
   test("validate[unknown] accepts and returns any value unchanged (a pure check, no rewrite)", async () => {
@@ -757,6 +782,112 @@ describe("prelude.reflection.get_metadata", () => {
     );
     if (bare.kind !== "record" || bare.fields.output === undefined) throw new Error("expected output");
     await expect(asJson(bare.fields.output)).resolves.toEqual({});
+  });
+
+  // `describe` writes the channel the tests above read: the runtime twin of a documented let, for a
+  // description composed at run time (a protocol paragraph shared by many tools). Nested here so the
+  // write and the read are checked against one fixture — the prim is DEFINED by what get_metadata
+  // then reports.
+  describe("prelude.reflection.describe", () => {
+    const GREETER: Value = {
+      kind: "agent",
+      name: createAgentName("main.greeter"),
+      snapshot: SNAPSHOT,
+    };
+
+    /** The greeter's declared input — what a re-description must leave alone. */
+    const GREETER_INPUT: Json = {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+      additionalProperties: true,
+    };
+
+    async function metadataOf(value: Value, context: PrimContext): Promise<Record<string, Value>> {
+      const metadata = await run("prelude.reflection.get_metadata", { value }, context);
+      if (metadata.kind !== "record") throw new Error("expected a metadata record");
+      return metadata.fields;
+    }
+
+    test("re-describes without renaming or re-typing", async () => {
+      const context = contextWith(irWith());
+      const described = await run(
+        "prelude.reflection.describe",
+        { target: GREETER, description: str("Greets a customer. Never reveal internal ids.") },
+        context,
+      );
+      const fields = await metadataOf(described, context);
+      expect(fields.description).toEqual(str("Greets a customer. Never reveal internal ids."));
+      // The two halves a stamp must NOT touch: the qualified name and the schemas.
+      expect(fields.name).toEqual(str("main.greeter"));
+      const input = fields.input;
+      if (input === undefined) throw new Error("metadata is missing input");
+      await expect(asJson(input)).resolves.toEqual(GREETER_INPUT);
+      // The answer is a copy: the original value still reports the block's own description.
+      const original = await metadataOf(GREETER, context);
+      expect(original.description).toEqual(str("Returns a greeting."));
+    });
+
+    test("the last re-description wins, and it keeps the name a doc-let stamped", async () => {
+      const context = contextWith(irWith());
+      // A documented let named the binding first; two re-descriptions then layer over it.
+      const stamped: Value = {
+        ...GREETER,
+        naming: { name: "herald_view", description: "the herald's window" },
+      };
+      const once = await run(
+        "prelude.reflection.describe",
+        { target: stamped, description: str("first") },
+        context,
+      );
+      const twice = await run(
+        "prelude.reflection.describe",
+        { target: once, description: str("second") },
+        context,
+      );
+      const fields = await metadataOf(twice, context);
+      expect(fields.description).toEqual(str("second"));
+      expect(fields.name).toEqual(str("herald_view"));
+    });
+
+    test("a blob-backed description materialises into the stamp", async () => {
+      // A composed protocol paragraph can exceed the 4KB inline limit and promote to a blob, so the
+      // prim reads the argument through the blob store like every other string reader here.
+      const blobs = new InMemoryBlobStore();
+      const blobId = "blob-description" as BlobId;
+      const paragraph = `${"the shared protocol paragraph. ".repeat(200)}end.`;
+      await blobs.put(PROJECT, blobId, new TextEncoder().encode(paragraph));
+      const context: PrimContext = { ...contextWith(irWith()), blobs };
+      const described = await run(
+        "prelude.reflection.describe",
+        { target: GREETER, description: { kind: "ref", semanticKind: "string", blobId } },
+        context,
+      );
+      const fields = await metadataOf(described, context);
+      expect(fields.description).toEqual(str(paragraph));
+    });
+
+    test("the copy still dispatches exactly like its target", async () => {
+      const ir = irWith();
+      const context = contextWith(ir);
+      const described = await run(
+        "prelude.reflection.describe",
+        { target: GREETER, description: str("re-described") },
+        context,
+      );
+      // A call resolves the block reference off the value, and only the naming rides along — so the
+      // copy is the target itself apart from the stamp, and the delegation boundary's pre-validation
+      // (what `call_agent` runs before dispatching) reaches the SAME schema and returns the same
+      // verdicts.
+      expect({ ...described, naming: undefined }).toEqual({ ...GREETER, naming: undefined });
+      const conforming: Value = { kind: "record", fields: { name: str("alice") } };
+      const violating: Value = { kind: "record", fields: { wrong: str("oops") } };
+      expect(conformCallableArgumentSync(described, conforming, ir)).toBeNull();
+      expect(conformCallableArgumentSync(described, violating, ir)).toEqual(
+        conformCallableArgumentSync(GREETER, violating, ir),
+      );
+      expect(conformCallableArgumentSync(described, violating, ir)).not.toBeNull();
+    });
   });
 });
 

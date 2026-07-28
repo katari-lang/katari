@@ -21,6 +21,24 @@
 // boundary (a run result, the trace). This is the same information-flow contract as `env.get_secret`; the
 // difference is that the runtime, not the operator's env, owns and rotates the token.
 //
+// TOKEN CACHING, AND ITS WORST CASE. Ask on every use — `token` is not something to hoist into a `var`
+// and reuse. Each ask re-reads the stored credential and answers from its RECORDED EXPIRY: while the
+// stored clock still says valid (with a ~60-second margin, so a refresh lands before a token dies under
+// an in-flight call) the stored access token comes straight back; once due, the runtime runs a
+// `refresh_token` grant against the token endpoint saved at acquisition, persists the rotation, and
+// answers with the fresh token. Concurrent asks for one credential share a SINGLE refresh — a rotated
+// refresh token is often single-use, so two racing grants would burn it. A credential whose grant
+// declared no lifetime at all has no expiry to consult and is served until the server rejects it.
+//
+// The consequence to design around: the stored expiry is the ONLY input. There is no channel for a
+// program to tell the runtime "the token you just gave me was refused", so an access token REVOKED
+// before its stored expiry keeps being served — every call gets the dead token until the recorded
+// lifetime runs out. The worst case is therefore bounded by one access-token lifetime (about an hour for
+// Google), and it surfaces as the API's own 401 / 403, never as an `oauth` error. The recovery is
+// ordinary: turn that downstream auth failure into a `replay.interrupted` (see `prelude.replay`), and
+// each re-run asks afresh — once the stored lifetime passes, the ask refreshes, and a refresh the token
+// endpoint REFUSES parks the run on the authorization escalation below rather than failing it.
+//
 // THE PAUSE-AND-ASK CONTRACT. When the named credential has no usable token — it was never authorized, or
 // its refresh died beyond what the runtime can fix, even mid-run — `token` does NOT fail. The run PAUSES on
 // a user-facing `prelude.oauth.authorize` escalation; the admin console renders it as an authorization
@@ -44,7 +62,14 @@ enters the program. When @name@ has no usable token (never authorized, or refres
 a `prelude.oauth.authorize` escalation and resumes once the credential is established (the runtime-hosted
 browser flow, or a proactive login) — it does not fail. A transient resolution failure throws
 `server_error` (catchable with `use handler { request throw(error: oauth.server_error) -> never { ... } }`);
-uncaught, it fails the run."
+uncaught, it fails the run.
+
+ASK EVERY TIME — never cache the answer in a `var`. Each ask re-reads the stored credential and serves it
+while the RECORDED expiry holds (with a ~60s refresh margin), refreshing once due; the runtime owns the
+caching, so a program that keeps its own copy only defeats the refresh. The flip side, which callers must
+design around: because the stored expiry is the only input, a token revoked BEFORE it expires keeps being
+served, and the API answers 401 / 403 for up to one access-token lifetime. Convert that downstream failure
+into a `replay.interrupted` to recover automatically — see this module's header."
 external agent token(
   @"The registered name of a stored credential (e.g. \"github\"); the name itself is not a secret." name: string,
 ) -> string of private with io | prelude.throw[server_error] from "oauth"

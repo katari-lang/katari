@@ -24,7 +24,17 @@ export const REPLAY_INTERRUPTED_REQUEST = "prelude.replay.interrupted";
  *  `-> never`). All fail rather than wait for an answer (their answer type is `never`, so no valid answer
  *  exists): reaching the run root, they fail the run rather than open an answerable escalation. Named once
  *  here so every site that distinguishes "a failure" from "an answerable request" reads the same set —
- *  adding a failure channel updates one place. */
+ *  adding a failure channel updates one place.
+ *
+ *  WHY A NAME LIST AND NOT THE GENERAL RULE. The general rule is structural: a request whose DECLARED
+ *  result is `never` has no valid answer, so it can only be a failure channel — and the runtime could read
+ *  that off the snapshot instead of naming the two stdlib requests that satisfy it. That generalisation is
+ *  deliberately NOT taken: it buys nothing today (the stdlib declares exactly these two `-> never`
+ *  requests) and it would make every user-declared `-> never` request silently un-answerable, which is a
+ *  language decision, not a runtime one. The cost of a name list is drift — a third stdlib `-> never`
+ *  request would quietly become an un-answerable escalation parked at the run root — so the list is held
+ *  to the stdlib by a trip-wire (`test/never-requests.test.ts`), which fails on any new `-> never`
+ *  declaration and forces the choice: add it here, or intend it to be user-facing. */
 export function isFailureRequest(request: string): boolean {
   return (
     request === PANIC_REQUEST || request === THROW_REQUEST || request === REPLAY_INTERRUPTED_REQUEST

@@ -25,6 +25,7 @@ import {
 } from "@katari-lang/types";
 import { newBlobId } from "../ids.js";
 import type { IrSource } from "../ir.js";
+import { NURSERY_FIBER_FIELD } from "../region-abi.js";
 import { jsonToValue, valueEquals, valueToJson } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
 import type { BlobRefValue, GenericSubstitution, Value } from "../value/types.js";
@@ -35,7 +36,6 @@ import {
   renderConformFailures,
   typeSubstitutionOf,
 } from "../value/validation.js";
-import { NURSERY_FIBER_FIELD } from "./common.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
 import { blobStoreStringReader, literalLift, type StringReader } from "./json-value.js";
 import {
@@ -234,6 +234,16 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     // the declared, catchable `validation_error` naming the offending path. Never rewrites the value.
     const schema = instantiatedSchema(context, "json.validate");
     return conformedOrThrow(field(argument, "value"), schema, "json.validate");
+  },
+  "prelude.json.try_validate": (argument, context) => {
+    // The TOTAL twin of `validate`: the same conformance check against T's schema, with a mismatch
+    // reported as `null` instead of a thrown `validation_error`. The failure detail is deliberately
+    // dropped here — a caller that needs the offending path calls `validate` and catches the throw.
+    // A missing `[T]` instantiation still fails loud (`instantiatedSchema`): that is a stale-IR bug,
+    // not a value that failed to conform, and silently answering `null` would hide it.
+    const schema = instantiatedSchema(context, "json.try_validate");
+    const value = field(argument, "value");
+    return conformValue(value, schema).ok ? value : NULL_VALUE;
   },
 
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
@@ -642,6 +652,15 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       },
     };
   },
+  "prelude.reflection.describe": async (argument, context) => {
+    // The runtime twin of a documented let: stamp the naming channel on a COPY of the callable, so
+    // the original binding keeps its old text (`operations.ts`'s `stampDescription` copies the same
+    // way). Only the description moves — the name carries over, and no schema is touched, so the
+    // copy re-describes without re-typing.
+    const target = field(argument, "target");
+    const description = await readStringField(argument, "description", context);
+    return { ...target, naming: { name: callableNameOf(target), description } };
+  },
   "prelude.reflection.schema_of": (_argument, context) => {
     // Reify T's schema as a plain document value — the exact schema `json.validate[T]` checks
     // against, rendered the same way `get_metadata` embeds a callable's input / output.
@@ -741,6 +760,19 @@ export async function callableMetadata(
     output: fillGenericSchema(typeSubstitution, callable.schema.output),
     requests: requestsToJson(callable.schema.requests, typeSubstitution, requestSubstitution),
   };
+}
+
+/** The name `callableMetadata` would report for a callable value, resolved WITHOUT the snapshot (the
+ *  name is carried on the value itself in every case: an existing naming stamp first, then an agent's
+ *  qualified name / a tool's minted name, and a closure has none). `reflection.describe` reads it to
+ *  carry the current name onto the stamp it writes — a re-description must not blank the name, and the
+ *  stamp holds both halves. Kept beside `callableMetadata` because it must mirror that function's name
+ *  resolution exactly; the two would drift silently otherwise. */
+function callableNameOf(value: Value): string {
+  if (value.naming !== undefined) return value.naming.name;
+  if (value.kind === "tool") return value.name;
+  if (value.kind === "agent") return String(value.name);
+  return ""; // a closure (or a non-callable the checker should have refused) has no qualified name
 }
 
 /** Whether `argument` conforms to `value`'s DECLARED input schema — the pure pre-validation the async input

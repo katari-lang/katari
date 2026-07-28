@@ -26,9 +26,11 @@
           },
           "output": {
             "additionalProperties": false,
+            "description": "point: A point in the plane.",
             "properties": {
               "$katari_constructor": {
-                "const": "golden_probe.point"
+                "const": "golden_probe.point",
+                "description": "The tag that selects this variant. Write this exact string."
               },
               "$katari_value": {
                 "additionalProperties": true,

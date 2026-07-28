@@ -41,7 +41,7 @@ import Katari.Cli.Api
     parseRunState,
     runStateLabel,
   )
-import Katari.Cli.Common (RuntimeContext (..), dieIn, makeRuntimeClient, tryLoadNearestConfig, withRuntimeContext)
+import Katari.Cli.Common (RuntimeContext (..), dieIn, isPreludeName, makeRuntimeClient, tryLoadNearestConfig, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTimestamp, newOutputContext, printJson, printText, renderTable)
 import Katari.Cli.Prompt (compactJson, renderSchemaBrief)
@@ -129,7 +129,7 @@ run options = do
           (raw, response) <- listAgents context.client context.projectId options.snapshotId
           -- Apply the prelude/@--all@ filter to both output modes: the JSON path must agree with the
           -- table, so machine consumers get the same set and @--all@ has an effect under @--json@.
-          let visibleName name = options.includePrimitives || not ("prelude." `Text.isPrefixOf` name)
+          let visibleName name = options.includePrimitives || not (isPreludeName name)
               agents = [view | view <- response.agents, visibleName view.qualifiedName]
           emit options (filterAgentsPayload visibleName raw) $
             table

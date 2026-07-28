@@ -17,6 +17,9 @@ module Katari.Cli.Command.Run
   ( Options (..),
     optionsParser,
     run,
+
+    -- * Pure helpers (unit-tested)
+    runsOnDefaults,
   )
 where
 
@@ -52,11 +55,12 @@ import Katari.Cli.Api
     oauthTargetDescription,
     startRun,
   )
-import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, exitInterrupted, withRuntimeContext)
+import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, exitInterrupted, isPreludeName, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), compactTime, hint, printJson, printText, progress, traceLine)
 import Katari.Cli.Prompt (compactJson, promptFromSchema, select)
 import Katari.Data.JSONSchema (JSONSchema (..), ObjectSchema (..))
+import Katari.Schema (undescribed)
 import Options.Applicative
 
 data Options = Options
@@ -171,25 +175,34 @@ resolveAgent context options = case options.agent of
               Nothing -> dieIn "run" "cancelled"
     | otherwise -> dieIn "run" "no agent given (pass AGENT, or run interactively)"
   where
-    visible view = options.includePrimitives || not ("prelude." `Text.isPrefixOf` view.qualifiedName)
+    visible view = options.includePrimitives || not (isPreludeName view.qualifiedName)
 
 -- | Decide the argument from the input schema alone (no @--arg@ was given): an agent whose
 -- parameters are all optional runs on its defaults; required parameters start the interview on a
 -- terminal and are a hard error off one. The 'Bool' says whether an interview actually ran.
 argumentForSchema :: RuntimeContext -> Text -> JSONSchema -> IO (Maybe Value, Bool)
-argumentForSchema context qualifiedName schema = case schema of
-  SchemaObject objectSchema
-    | null objectSchema.required ->
-        -- All parameters have defaults; an explicit empty record lets the runtime fill them.
-        pure (Just (Object KeyMap.empty), False)
-  _
-    | context.output.interactive -> do
-        answered <- promptFromSchema context.output ["arg"] schema
-        case answered of
-          Just answeredArgument -> pure (Just answeredArgument, True)
-          Nothing -> dieIn "run" "cancelled"
-    | otherwise ->
-        dieIn "run" (qualifiedName <> " has required parameters; pass --arg '<json>'")
+argumentForSchema context qualifiedName schema
+  -- All parameters have defaults; an explicit empty record lets the runtime fill them. The interview
+  -- below still walks the ORIGINAL schema, descriptions and all.
+  | runsOnDefaults schema = pure (Just (Object KeyMap.empty), False)
+  | context.output.interactive = do
+      answered <- promptFromSchema context.output ["arg"] schema
+      case answered of
+        Just answeredArgument -> pure (Just answeredArgument, True)
+        Nothing -> dieIn "run" "cancelled"
+  | otherwise =
+      dieIn "run" (qualifiedName <> " has required parameters; pass --arg '<json>'")
+
+-- | Whether an agent's input schema leaves EVERY parameter optional, so the run needs no argument of
+-- its own. The shape is read through 'undescribed': a documented agent's input schema arrives wrapped
+-- in a @description@ overlay, and matching the bare 'SchemaObject' alone would mistake every documented
+-- all-optional agent for one with required parameters — demanding @--arg@ off a terminal and opening a
+-- pointless interview on one. A description annotates and never constrains, so it must never change
+-- which branch a schema takes.
+runsOnDefaults :: JSONSchema -> Bool
+runsOnDefaults schema = case undescribed schema of
+  SchemaObject objectSchema -> null objectSchema.required
+  _ -> False
 
 parseArgument :: Text -> IO Value
 parseArgument text = case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 text) of

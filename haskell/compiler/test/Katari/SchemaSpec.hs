@@ -113,6 +113,52 @@ spec = do
     it "stays open for an unknown data name" $
       toJSONSchema noData (SemanticTypeData boxName mempty) `shouldBe` SchemaAny
 
+    it "keeps the data's and each field's docstring on a union arm" $
+      -- The documented arm is labelled with the constructor's short name and the declaration's own
+      -- docstring; its documented field carries its own. The undocumented arm gains no description, so
+      -- an undocumented declaration costs nothing.
+      toJSONSchema documentedDefinitions (SemanticTypeUnion [SemanticTypeData alertName mempty, SemanticTypeData noteName mempty])
+        `shouldBe` SchemaAnyOf
+          [ SchemaDescribed
+              DescribedSchema
+                { description = "alert: Something needs a human.",
+                  schema =
+                    dataSchema
+                      "test.alert"
+                      [("reason", SchemaDescribed DescribedSchema {description = "Why the run stopped.", schema = SchemaString})]
+                      ["reason"]
+                },
+            dataSchema "test.note" [("body", SchemaString), ("title", SchemaString)] ["body"]
+          ]
+
+    it "serialises an arm's descriptions onto the wire, next to the tag that selects it" $
+      -- The description overlay merges into the object it annotates, so the arm's own text and the
+      -- discriminator's instruction both reach a model reading the raw JSON Schema document.
+      toJSON (toJSONSchema documentedDefinitions (SemanticTypeData alertName mempty))
+        `shouldBe` object
+          [ "type" .= ("object" :: Text),
+            "description" .= ("alert: Something needs a human." :: Text),
+            "properties"
+              .= object
+                [ "$katari_constructor"
+                    .= object
+                      [ "const" .= ("test.alert" :: Text),
+                        "description" .= ("The tag that selects this variant. Write this exact string." :: Text)
+                      ],
+                  "$katari_value"
+                    .= object
+                      [ "type" .= ("object" :: Text),
+                        "properties"
+                          .= object
+                            ["reason" .= object ["type" .= ("string" :: Text), "description" .= ("Why the run stopped." :: Text)]],
+                        "required" .= (["reason"] :: List Text),
+                        "additionalProperties" .= True
+                      ]
+                ],
+            "required" .= (["$katari_constructor", "$katari_value"] :: List Text),
+            "additionalProperties" .= False
+          ]
+
   describe "fillGenericSchema" $ do
     it "replaces a placeholder nested inside an array" $
       fillGenericSchema (Map.singleton genericT SchemaString) (SchemaArray (SchemaGeneric genericT))
@@ -140,13 +186,21 @@ spec = do
           ]
 
 -- | The nested wire schema of a @data@ value: a @$katari_constructor@ const over the fields nested (as an open
--- object) under @$katari_value@, with the outer wrapper closed to exactly those two keys.
+-- object) under @$katari_value@, with the outer wrapper closed to exactly those two keys. The
+-- discriminator's description is spelled out here rather than imported, so the wording a model actually
+-- reads is pinned by these tests.
 dataSchema :: Text -> List (Text, JSONSchema) -> List Text -> JSONSchema
 dataSchema constructorName fields requiredFields =
   SchemaObject
     ObjectSchema
       { properties =
-          [ ("$katari_constructor", SchemaConst (toJSON constructorName)),
+          [ ( "$katari_constructor",
+              SchemaDescribed
+                DescribedSchema
+                  { description = "The tag that selects this variant. Write this exact string.",
+                    schema = SchemaConst (toJSON constructorName)
+                  }
+            ),
             ( "$katari_value",
               SchemaObject
                 ObjectSchema
@@ -179,7 +233,9 @@ boxDefinitions =
     boxName
     DataDefinition
       { fields = Map.singleton "value" FieldInformation {semanticType = SemanticTypeGeneric genericT, optional = False},
-        parameterGenericIds = Map.singleton "T" genericT
+        parameterGenericIds = Map.singleton "T" genericT,
+        annotation = Nothing,
+        fieldAnnotations = Map.empty
       }
 
 noteName :: QualifiedName
@@ -196,7 +252,9 @@ noteDefinitions =
             [ ("body", FieldInformation {semanticType = SemanticTypeString, optional = False}),
               ("title", FieldInformation {semanticType = SemanticTypeString, optional = True})
             ],
-        parameterGenericIds = Map.empty
+        parameterGenericIds = Map.empty,
+        annotation = Nothing,
+        fieldAnnotations = Map.empty
       }
 
 listName :: QualifiedName
@@ -209,5 +267,25 @@ listDefinitions =
     listName
     DataDefinition
       { fields = Map.singleton "tail" FieldInformation {semanticType = SemanticTypeData listName mempty, optional = False},
-        parameterGenericIds = Map.empty
+        parameterGenericIds = Map.empty,
+        annotation = Nothing,
+        fieldAnnotations = Map.empty
       }
+
+alertName :: QualifiedName
+alertName = QualifiedName {moduleName = testModule, name = "alert"}
+
+-- | @data alert(reason: string)@ with a docstring on the declaration and on its field, alongside the
+-- undocumented @note@ — the pair a union of the two needs to show that documentation survives the
+-- inline expansion (PAIN #27: it used to be dropped the moment a @data@ was reached through a union).
+documentedDefinitions :: DataDefinitions
+documentedDefinitions =
+  Map.insert
+    alertName
+    DataDefinition
+      { fields = Map.singleton "reason" FieldInformation {semanticType = SemanticTypeString, optional = False},
+        parameterGenericIds = Map.empty,
+        annotation = Just "Something needs a human.",
+        fieldAnnotations = Map.singleton "reason" "Why the run stopped."
+      }
+    noteDefinitions

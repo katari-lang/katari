@@ -20,7 +20,7 @@ module Katari.Parser.Expression where
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr (Operator (..), makeExprParser)
 import Data.Maybe (fromMaybe, isJust)
-import Data.Text (Text, pack)
+import Data.Text (Text, pack, unpack)
 import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.SourceSpan (HasSourceSpan (..), Located (..), SourceSpan (..))
@@ -205,6 +205,7 @@ primaryExpression =
         foreverExpression,
         parallelExpression,
         handlerExpression,
+        agentExpression,
         tupleExpression,
         parenExpression,
         braceExpression,
@@ -248,14 +249,26 @@ recordLiteral = do
   (entries, sourceSpan) <- bracesMultiline (commaSeparated recordEntry)
   pure (ExpressionRecord RecordExpression {entries = entries, sourceSpan = sourceSpan, typeOf = ()})
 
+-- | One record-literal element: a @...base@ spread or a written @label = e@ field. The spread is tried
+-- first and needs no backtracking guard — @...@ starts no other expression form, and 'string' does not
+-- consume on failure, so a field entry still sees the full input.
 recordEntry :: Parser (RecordEntry Parsed)
-recordEntry = do
+recordEntry = recordSpreadEntry <|> recordFieldEntry
+
+-- | @...base@ — every field of @base@ at this position (later entries override it, earlier ones lose).
+recordSpreadEntry :: Parser (RecordEntry Parsed)
+recordSpreadEntry = do
+  _ <- symbol "..."
+  RecordEntrySpread <$> expression
+
+recordFieldEntry :: Parser (RecordEntry Parsed)
+recordFieldEntry = do
   -- A key is a bare identifier (@label = e@) or a quoted string (@"Content-Type" = e@). The string form
   -- carries field names an identifier cannot spell (hyphens, etc.), e.g. for an http header record.
   name <- identifier <|> stringLiteral
   assignEquals
   value <- expression
-  pure RecordEntry {name = name.value, value = value, sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf value)}
+  pure (RecordEntryField RecordField {name = name.value, value = value, sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf value)})
 
 blockExpression :: Parser ExpressionP
 blockExpression = do
@@ -268,7 +281,7 @@ ifExpression = do
   ifSpan <- keyword "if"
   condition <- fst <$> parens expression
   thenBlock <- block
-  elseBlock <- optional (keyword "else" *> elseBody)
+  elseBlock <- optional (elseKeyword *> elseBody)
   let endSpan = maybe (sourceSpanOf thenBlock) sourceSpanOf elseBlock
   pure
     ( ExpressionIf
@@ -280,6 +293,20 @@ ifExpression = do
             typeOf = ()
           }
     )
+
+-- | The @else@ keyword, allowed to start on a LATER line than the then-block's @}@. A block's closing
+-- brace consumes its trailing whitespace in the /outer/ space mode, which at statement level stops at
+-- the newline; without eating that newline here the K&R-style
+--
+-- > if (c) {
+-- > }
+-- > else { ... }
+--
+-- would leave the @else@ behind a statement separator, where it starts a (bogus) new statement. The
+-- whole lookahead backtracks, so an @if@ with no @else@ still leaves the newline that ends its
+-- statement exactly where it was.
+elseKeyword :: Parser SourceSpan
+elseKeyword = try (multilineSpace *> keyword "else")
 
 -- | The @else@ branch: a block, or a chained @if@ (wrapped as a one-expression block).
 elseBody :: Parser (Block Parsed)
@@ -530,26 +557,43 @@ requestHandler = do
       }
 
 ---------------------------------------------------------------------------------------------------
--- Agent declaration (top-level and local)
+-- Agent declaration (top-level and local) and the anonymous agent expression
 ---------------------------------------------------------------------------------------------------
+
+-- | @[private] agent (params) [-> T] [with E] { body }@ in expression position — an anonymous agent,
+-- the closure form a higher-order call takes directly (@array.filter(target = names, keep = agent
+-- (value: string) -> boolean { ... })@). It is the same node a local declaration produces, minus the
+-- name; a doc annotation has nowhere to attach, so a documented value is written by documenting the
+-- @let@ that binds it.
+agentExpression :: Parser ExpressionP
+agentExpression = ExpressionAgent <$> agentFormWith Nothing noAgentName
 
 -- | The agent declaration after its (already-parsed) doc annotation, so the top-level dispatcher can
 -- consume the shared annotation once and commit to this branch on the @agent@ / @private@ keyword.
+-- The name is mandatory here: a declaration is what binds the agent, so a nameless one has no
+-- declaration reading (an anonymous @agent (...) -> T { ... }@ is 'agentExpression' instead).
+agentDeclarationWith :: Maybe (Located Text) -> Parser (AgentDeclaration Parsed)
+agentDeclarationWith annotation = agentFormWith annotation (Just <$> identifier)
+
+-- | @[private] agent [name][generics](label => pattern, ...) [-> T] [with E] { body }@ — the grammar
+-- both agent forms share. @nameParser@ is the only difference between them: a declaration demands a
+-- name, the anonymous expression form refuses one ('noAgentName'). Everything after the name — the
+-- generics, parameters, the optional return type and @with@ row, and the body — is identical, so the
+-- two forms cannot drift apart.
 --
 -- The signature is parsed in line mode so the body's @{@ must sit on the same line as the signature's
 -- last token (generics / parameters still wrap freely inside their brackets). This rejects an Allman
--- @agent f() -> R \n { ... }@ uniformly — a top-level agent now behaves like a local one and like the
+-- @agent f() -> R \n { ... }@ uniformly — a top-level agent behaves like a local one and like the
 -- @if@ / @for@ / @match@ control constructs, whose brace is already same-line.
-agentDeclarationWith :: Maybe (Located Text) -> Parser (AgentDeclaration Parsed)
-agentDeclarationWith annotation = do
+agentFormWith :: Maybe (Located Text) -> Parser (Maybe (Located Text)) -> Parser (AgentDeclaration Parsed)
+agentFormWith annotation nameParser = do
   -- Only the signature is line-scoped (so the body brace must be same-line — generics / parameters
   -- still wrap inside their brackets). The body 'block' runs in the ambient mode, so its closing @}@
   -- consumes the trailing newline the top-level dispatcher relies on to reach the next declaration.
   (privateSpan, agentSpan, name, generics, parameters, returnType, effects) <-
     lineScoped $ do
-      privateSpan <- optional (keyword "private")
-      agentSpan <- keyword "agent"
-      name <- identifier
+      (privateSpan, agentSpan) <- agentKeywords
+      name <- nameParser
       generics <- genericParameters
       parameters <- fst <$> parens (commaSeparated parameterBinding)
       returnType <- optional (symbol "->" *> typeExpression)
@@ -561,8 +605,10 @@ agentDeclarationWith annotation = do
     AgentDeclaration
       { annotation = (.value) <$> annotation,
         private = isJust privateSpan,
-        name = name.value,
-        variableReference = parsedReference name.sourceSpan,
+        name = maybe anonymousAgentName (.value) name,
+        -- An anonymous agent binds no name, so the @agent@ keyword itself is its defining handle: it
+        -- is the span a hover lands on, and the one every later phase stamps its own resolution onto.
+        variableReference = parsedReference (maybe agentSpan (.sourceSpan) name),
         genericParameters = generics,
         parameters = parameters,
         returnType = returnType,
@@ -571,6 +617,32 @@ agentDeclarationWith annotation = do
         typeOf = (),
         sourceSpan = mergeSpans startSpan (sourceSpanOf body)
       }
+
+-- | @[private] agent@ — the keyword prefix of both agent forms. It backtracks as a unit because
+-- @private@ is not a reserved word: without the @try@, a bare @private@ used as an ordinary
+-- identifier would be half-consumed here and could never fall through to the variable branch.
+agentKeywords :: Parser (Maybe SourceSpan, SourceSpan)
+agentKeywords = try $ do
+  privateSpan <- optional (keyword "private")
+  agentSpan <- keyword "agent"
+  pure (privateSpan, agentSpan)
+
+-- | The anonymous form's name parser: it takes no name. A written one is diagnosed here — rather than
+-- surfacing later as a bare "expecting `(`" from the parameter list — because the fix depends on
+-- knowing that the name is what does not belong in expression position.
+noAgentName :: Parser (Maybe (Located Text))
+noAgentName = do
+  written <- optional (lookAhead identifier)
+  case written of
+    Nothing -> pure Nothing
+    Just name ->
+      fail
+        ( "an `agent` expression has no name; bind it (`let "
+            <> unpack name.value
+            <> " = agent (...) -> ... { ... }`) or declare it (`agent "
+            <> unpack name.value
+            <> "(...) -> ... { ... }`)"
+        )
 
 ---------------------------------------------------------------------------------------------------
 -- Blocks and statements
@@ -659,13 +731,26 @@ blockElement = do
       choice
         [ BlockElementUse <$> useProvider,
           BlockElementStatement <$> letStatementWith Nothing,
-          BlockElementStatement . StatementAgent <$> agentDeclarationWith Nothing,
+          BlockElementStatement . StatementAgent <$> localAgentDeclaration,
           BlockElementStatement <$> returnStatement,
           BlockElementStatement <$> nextStatement,
           BlockElementStatement <$> breakStatement,
           BlockElementStatement <$> finallyStatement,
           BlockElementExpression <$> expression
         ]
+
+-- | A local agent declaration — but only when a name actually follows the keyword. An anonymous
+-- @agent (...) -> T { ... }@ at the head of a block element is an EXPRESSION, and it must reach the
+-- expression branch with nothing consumed so its postfix chain and any surrounding operators still
+-- parse (@agent (...) -> T { ... }.field@, a comparison, an immediate application). The lookahead is
+-- what keeps the two apart: committing on the keyword first and only then discovering the form would
+-- leave a half-consumed @agent@ that 'choice' cannot back out of.
+localAgentDeclaration :: Parser (AgentDeclaration Parsed)
+localAgentDeclaration = namedAgentAhead *> agentDeclarationWith Nothing
+
+-- | Succeeds, consuming nothing, exactly when the upcoming @[private] agent@ is followed by a name.
+namedAgentAhead :: Parser ()
+namedAgentAhead = void (lookAhead (try (agentKeywords *> identifier)))
 
 -- | @use provider@ or @let pattern = use provider@; returns the builder once the body is known.
 useProvider :: Parser (Block Parsed -> UseStatement Parsed)

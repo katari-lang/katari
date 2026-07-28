@@ -34,6 +34,7 @@ import Katari.Error
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
     FinallyEffectErrorInfo (..),
+    GenericAgentExpressionErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
     MalformedUseErrorInfo (..),
     MalformedUseReason (..),
@@ -49,7 +50,7 @@ import Katari.Error
     WrongReferenceKindErrorInfo (..),
   )
 import Katari.Panic (panic)
-import Katari.Primitive (panicRequestName)
+import Katari.Primitive (isPanicHandler, panicRequestName)
 import Katari.Stdlib (isReservedModuleName)
 import Katari.Typechecker.Context
   ( Checker,
@@ -104,6 +105,7 @@ synthExpression = \case
   ExpressionFor expression -> synthForExpression expression
   ExpressionForever expression -> synthForeverExpression expression
   ExpressionHandler expression -> synthHandlerExpression expression
+  ExpressionAgent declaration -> synthAgentExpression declaration
   ExpressionBlock expression -> synthBlockExpression expression
   ExpressionFieldAccess expression -> synthFieldAccessExpression expression
   ExpressionTypeApplication expression -> synthTypeApplicationExpression expression
@@ -556,28 +558,117 @@ synthTupleExpression expression = do
           typeOf = semantic
         }
 
+-- | A record literal, entry by entry in SOURCE ORDER: each entry is layered onto the object built so
+-- far, so a later entry OVERRIDES an earlier one on a shared key. That is exactly
+-- @prelude.record.merge@'s right-wins rule, which is what lowering desugars a spread into — the type
+-- and the runtime value agree by construction.
+--
+-- With no spread the result is what it always was: a *closed* object, its rest `never` rather than the
+-- open `unknown` a written @{...}@ / @record@ type carries. That is what lets a record literal be a
+-- subtype of a homogeneous @record[V]@ (@{Authorization: secret} \<: record[string of private]@) — the
+-- rest check becomes @never \<: V@, which holds, instead of @unknown \<: V@, which would not. Width
+-- subtyping is unaffected: an extra field on the literal aligns against the /supertype's/ rest, never
+-- the literal's own.
+--
+-- A spread contributes its base's whole object, rest included, so the result is exactly as open as its
+-- widest source. Spreading another literal keeps the closed `never` rest; spreading a declared object
+-- type (open — rest `unknown`) yields an open object, which is the everyday @{...item, done = true}@
+-- update and still fits the declared type it came from; spreading a @record[V]@ leaves `V` in the rest,
+-- so @{...r, k = e}@ types as "@k@ is @e@'s type, every other key is `V`" — a subtype of
+-- @record[V | typeof e]@, and no longer of @record[V]@ alone unless @e@ already fits `V`.
 synthRecordExpression :: RecordExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthRecordExpression expression = do
-  -- Duplicate field labels are rejected in the identifier phase (K2003), so keying the field map by
-  -- name here drops nothing.
-  entries <- traverse synthEntry expression.entries
-  -- A literal is a *closed* object: its rest is `never`, not the open `unknown` a written `{...}` /
-  -- `record` type carries. This is what lets a record literal be a subtype of a homogeneous `record[V]`
-  -- (`{Authorization: secret} <: record[string of private]`): the rest check becomes `never <: V`, which
-  -- holds, instead of `unknown <: V`, which would not. Width subtyping is unaffected — an extra field on
-  -- the literal aligns against the *supertype's* rest, never the literal's own.
-  let resultType = namedObjectTypeWithRest bottomType [(name, fieldType) | (_, name, fieldType) <- entries]
+  -- Duplicate WRITTEN labels are rejected in the identifier phase (K2003); a key a spread also carries
+  -- is not a duplicate but an override, and is resolved by position here.
+  (reversedEntries, object) <- foldM addEntry ([], emptyRecordObject) expression.entries
+  let resultType = layeredOf neverLayer {objectLayer = Just object}
   typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionRecord
       RecordExpression
-        { entries = [typedEntry | (typedEntry, _, _) <- entries],
+        { entries = reverse reversedEntries,
           sourceSpan = expression.sourceSpan,
           typeOf = semantic
         }
   where
-    synthEntry entry = do
-      (typedValue, fieldType) <- synthExpression entry.value
-      pure (RecordEntry {name = entry.name, value = typedValue, sourceSpan = entry.sourceSpan}, entry.name, fieldType)
+    addEntry (reversedEntries, object) = \case
+      RecordEntryField field -> do
+        (typedValue, fieldType) <- synthExpression field.value
+        -- A written field is a closed one-key object: it definitely sets its key and brings no other.
+        overlaid <- overlayObject field.sourceSpan object (NormalizedObject {fields = Map.singleton field.name (requiredField fieldType), rest = bottomType})
+        let typedField = RecordEntryField RecordField {name = field.name, value = typedValue, sourceSpan = field.sourceSpan}
+        pure (typedField : reversedEntries, overlaid)
+      RecordEntrySpread value -> do
+        (typedValue, baseType) <- synthExpression value
+        maybeBase <- spreadObject (sourceSpanOf value) baseType
+        overlaid <- case maybeBase of
+          Just base -> overlayObject (sourceSpanOf value) object base
+          Nothing -> do
+            reportExpectedShape (sourceSpanOf value) "an object to spread" baseType
+            pure object
+        pure (RecordEntrySpread typedValue : reversedEntries, overlaid)
+
+-- | The empty record literal @{}@: no key at all, hence a closed (`never`) rest.
+emptyRecordObject :: NormalizedObject
+emptyRecordObject = NormalizedObject {fields = mempty, rest = bottomType}
+
+requiredField :: NormalizedType -> NormalizedFieldInformation
+requiredField fieldType = NormalizedFieldInformation {normalizedType = fieldType, optional = False}
+
+-- | Layer @override@'s entries onto @base@'s, the way @prelude.record.merge@ layers its right operand
+-- onto its left. Every case is decided by ONE question — can the override actually be absent at this
+-- key? A required override field cannot, so it replaces outright. An optional one can, so whatever the
+-- base carries there shows through as an alternative. And a key the override does not name can still be
+-- supplied through its `rest` (an open object may carry any key), so the override's rest unions into
+-- every surviving base field. A closed override — a written field, another literal — has a `never` rest,
+-- which makes that union the identity: layering written fields alone rebuilds exactly the object the
+-- pre-spread checker produced.
+--
+-- This mirrors the Normalizer's own defaulting rule ('alignObjectFields' pairs a missing name against
+-- the other side's `rest`), so what a spread types as and what a subtype check later reads out of it
+-- cannot drift.
+overlayObject :: SourceSpan -> NormalizedObject -> NormalizedObject -> Checker NormalizedObject
+overlayObject sourceSpan base override = do
+  survivingBase <- traverse throughOverrideRest (Map.difference base.fields override.fields)
+  applied <- Map.traverseWithKey applyOverride override.fields
+  rest <- runNormalizer sourceSpan (union base.rest override.rest)
+  -- The two maps are disjoint by construction (one is the base's keys MINUS the override's).
+  pure NormalizedObject {fields = survivingBase <> applied, rest = rest}
+  where
+    throughOverrideRest field = do
+      fieldType <- runNormalizer sourceSpan (union field.normalizedType override.rest)
+      pure NormalizedFieldInformation {normalizedType = fieldType, optional = field.optional}
+    applyOverride name field
+      | not field.optional = pure field
+      | otherwise = do
+          let underlying = Map.lookup name base.fields
+              underlyingType = maybe base.rest (.normalizedType) underlying
+          fieldType <- runNormalizer sourceSpan (union field.normalizedType underlyingType)
+          -- The key is present for certain only when the base guarantees it (the override may be absent).
+          pure NormalizedFieldInformation {normalizedType = fieldType, optional = maybe True (.optional) underlying}
+
+-- | The object a @...base@ spread contributes. The base must be SOLELY object-shaped: a value that is
+-- also @null@ (or any other union member) has no fields to merge from, and a nominal @data@ value is
+-- excluded on purpose — a structural merge strips the nominal identity that makes it that data type, so
+-- spreading one is a type error rather than a silent downgrade to a plain object. The base's own handle
+-- attribute is pushed into the fields it contributes, the same "observe an interior through its
+-- container" lift a field access applies ('withSoleLayer'), so spreading a private record cannot launder
+-- its fields into a public one.
+spreadObject :: SourceSpan -> NormalizedType -> Checker (Maybe NormalizedObject)
+spreadObject sourceSpan valueType = do
+  raised <- soleLayer sourceSpan (Set.singleton ObjectKind) valueType
+  pure $ case raised of
+    Just (attribute, layer) -> liftObjectBy attribute <$> layer.objectLayer
+    Nothing -> Nothing
+
+liftObjectBy :: NormalizedAttribute -> NormalizedObject -> NormalizedObject
+liftObjectBy attribute object =
+  NormalizedObject
+    { fields = liftField <$> object.fields,
+      rest = liftByAttribute attribute object.rest
+    }
+  where
+    liftField field =
+      NormalizedFieldInformation {normalizedType = liftByAttribute attribute field.normalizedType, optional = field.optional}
 
 synthIfExpression :: IfExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthIfExpression expression = do
@@ -2527,11 +2618,6 @@ walkRequestHandler handler =
               pure Nothing
         Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
 
--- | Whether a handler clause is the ambient @panic@ catch: the bare (unqualified) name @panic@. Panic is
--- undeclared, so the clause is recognized structurally here rather than by name resolution.
-isPanicHandler :: RequestHandler phase -> Bool
-isPanicHandler handler = isNothing handler.moduleQualifier && handler.name == panicRequestName.name
-
 -- | The synthetic signature of the ambient @panic@ handler: @panic(msg: string) -> never@. Panic has no
 -- declaration, so its 'RequestInformation' is built here rather than read from the request environment. It
 -- carries no generics; its parameter object is @{ msg: string }@ and, like @throw@, it returns @never@ (so
@@ -2914,6 +3000,27 @@ synthAgent declaration = do
 -- | The function type of an acyclic agent, for tests that only need the synthesized type.
 synthAgentType :: AgentDeclaration Identified -> Checker NormalizedType
 synthAgentType = fmap ((.valueType) . snd) . synthAgent
+
+-- | An anonymous @agent (...) -> T { ... }@ in expression position. It is checked exactly as an
+-- acyclic named agent ('synthAgent') — the same annotation policy (an absent return type / effect is
+-- inferred from the body), the same world and the same @return@ boundary — and its type is that
+-- agent's function type.
+--
+-- What it cannot have is generics. A 'Scheme' is instantiated at a use site through the value's NAME,
+-- and an expression has none, so a quantified parameter here would be unsolvable forever; the
+-- expression's type is therefore the scheme's MONOTYPE, and any written parameter is refused (K3027)
+-- rather than dropped. The refused declaration is still checked as written, so the body's own
+-- diagnostics surface in the same pass.
+synthAgentExpression :: AgentDeclaration Identified -> Checker (Expression Typed, NormalizedType)
+synthAgentExpression declaration = do
+  case declaration.genericParameters of
+    firstParameter : _ ->
+      reportType
+        firstParameter.sourceSpan
+        (TypeErrorGenericAgentExpression GenericAgentExpressionErrorInfo {parameterNames = (.name) <$> declaration.genericParameters})
+    [] -> pure ()
+  (typedDeclaration, scheme) <- synthAgent declaration
+  pure (ExpressionAgent typedDeclaration, scheme.valueType)
 
 -- | A recursive-group member's seed return type and effect, used both to build its seed scheme and to
 -- check its body so the two agree by construction.

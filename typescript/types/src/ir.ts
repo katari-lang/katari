@@ -470,7 +470,9 @@ export type JSONSchema = {
   anyOf?: JSONSchema[];
   not?: JSONSchema;
   $generic?: GenericId;
-  /** A parameter's `@"..."` annotation, overlaid on its property schema by the compiler. Annotates,
-   *  never constrains — validation ignores it; `get_metadata` and the listings pass it through. */
+  /** An `@"..."` annotation the compiler overlaid on this schema: a parameter's, or — where a `data`
+   *  type is inline-expanded — the declaration's own (labelling the union arm), a constructor field's,
+   *  or the fixed instruction on the `$katari_constructor` tag. Annotates, never constrains —
+   *  validation ignores it; `get_metadata` and the listings pass it through. */
   description?: string;
 };

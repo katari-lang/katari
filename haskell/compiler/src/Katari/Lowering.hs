@@ -22,7 +22,7 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -48,7 +48,7 @@ import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (.
 import Katari.Diagnostics (Diagnostics)
 import Katari.Lowering.Drop (insertDropOperations)
 import Katari.Panic (panic)
-import Katari.Primitive (panicRequestName, preludeModuleName, recordMergeLeftLabel, recordMergeName, recordMergeRightLabel)
+import Katari.Primitive (isPanicHandler, panicRequestName, preludeModuleName, recordMergeLeftLabel, recordMergeName, recordMergeRightLabel)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -310,7 +310,11 @@ buildDataDefinitions environment = Map.map convert
     convert information =
       Schema.DataDefinition
         { fields = constructorFields (runDenormalize environment (denormalize (objectAsType information.constructor))),
-          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation
+          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation,
+          -- The docstrings ride in from the type environment, not this module's AST: a @data@ used as an
+          -- agent argument is commonly declared elsewhere, and lowering only ever sees one module.
+          annotation = information.annotation,
+          fieldAnnotations = information.fieldAnnotations
         }
     -- A constructor is always an object; a nullary constructor denormalizes to the empty record, which
     -- carries no fields.
@@ -612,6 +616,27 @@ buildAgent catchesReturn agentBlock name description genericBindings functionTyp
       schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (buildSchemaInformation context genericBindings functionType)
   recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = schema, description = description, defaults = defaults}) mempty (Just name)
 
+-- | An anonymous @agent (...) -> T { ... }@ expression: the same closure a local agent declaration
+-- lowers to, minus the binding. Nothing can name it, so no local is introduced and no self-reference
+-- has to be in scope while its body is built — the closure variable is simply the expression's value.
+-- The emitted IR is therefore indistinguishable from a local declaration's, and the runtime needs no
+-- new operation.
+lowerAgentExpression :: AST.AgentDeclaration AST.Typed -> Lower VariableId
+lowerAgentExpression declaration = do
+  closureVariable <- freshVariableId
+  agentBlock <- freshBlockId
+  buildAgent
+    True
+    agentBlock
+    declaration.name
+    (descriptionOf declaration.annotation)
+    (genericBindingsOfDeclaration declaration.genericParameters)
+    declaration.typeOf
+    declaration.parameters
+    declaration.body
+  emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = agentBlock})
+  pure closureVariable
+
 -- | Read one declared parameter out of the incoming argument record and bind it, returning the locals
 -- it introduces. A plain variable parameter binds the field variable directly; a destructuring
 -- parameter is taken apart. Defaults are handled by the runtime via 'Agent.defaults', not here.
@@ -765,6 +790,7 @@ lowerExpression = \case
   AST.ExpressionForever expression -> lowerForever expression
   AST.ExpressionBlock expression -> lowerBlockExpression expression.block
   AST.ExpressionHandler expression -> lowerHandlerExpression expression
+  AST.ExpressionAgent declaration -> lowerAgentExpression declaration
   -- Operators are desugared into primitive calls by the identifier, so they never reach lowering.
   AST.ExpressionBinaryOperator _ -> panic "lowering: binary operator survived past the identifier desugar"
   AST.ExpressionUnaryOperator _ -> panic "lowering: unary operator survived past the identifier desugar"
@@ -792,11 +818,54 @@ readField source field = do
   emit (OperationGetField GetFieldOperation {source = source, field = field, output = output})
   pure output
 
+-- | A record literal. Written fields build a record directly; a @...base@ spread is desugared into
+-- @prelude.record.merge@ — the SAME primitive a partial application's residual body already synthesizes
+-- ('lowerPartialApplication'), so a spread needs no IR node and no runtime support of its own. Merge's
+-- right operand wins a shared key, which is exactly the "a later entry overrides an earlier one" rule
+-- the checker types the literal by, so folding the segments left to right reproduces the typed shape.
+--
+-- Without a spread this emits precisely the single 'MakeRecordOperation' it always did.
 lowerRecord :: List (AST.RecordEntry AST.Typed) -> Lower VariableId
 lowerRecord recordEntries = do
-  entries <- mapM (\entry -> do value <- lowerExpression entry.value; pure (entry.name, value)) recordEntries
+  segments <- lowerRecordSegments recordEntries
+  case segments of
+    [] -> makeRecord []
+    (first : remaining) -> foldM mergeRecords first remaining
+
+-- | The literal's entries as a list of whole records to merge, in source order: each run of written
+-- fields collapses into one 'MakeRecordOperation', and each spread contributes its base directly.
+-- Entry values are lowered as they are reached, so a literal's side effects still run left to right.
+lowerRecordSegments :: List (AST.RecordEntry AST.Typed) -> Lower (List VariableId)
+lowerRecordSegments = \case
+  [] -> pure []
+  entries@(AST.RecordEntryField _ : _) -> do
+    let (fields, remaining) = spanRecordFields entries
+    values <- mapM (\field -> do value <- lowerExpression field.value; pure (field.name, value)) fields
+    segment <- makeRecord values
+    (segment :) <$> lowerRecordSegments remaining
+  (AST.RecordEntrySpread value : remaining) -> do
+    segment <- lowerExpression value
+    (segment :) <$> lowerRecordSegments remaining
+
+-- | The leading run of written fields, and whatever follows it.
+spanRecordFields :: List (AST.RecordEntry AST.Typed) -> (List (AST.RecordField AST.Typed), List (AST.RecordEntry AST.Typed))
+spanRecordFields = \case
+  (AST.RecordEntryField field : remaining) ->
+    let (fields, rest) = spanRecordFields remaining in (field : fields, rest)
+  entries -> ([], entries)
+
+makeRecord :: List (Text, VariableId) -> Lower VariableId
+makeRecord entries = do
   output <- freshVariableId
   emit (OperationMakeRecord MakeRecordOperation {entries = entries, output = output})
+  pure output
+
+-- | @prelude.record.merge(left = left, right = right)@ — @right@ wins a shared key.
+mergeRecords :: VariableId -> VariableId -> Lower VariableId
+mergeRecords left right = do
+  argument <- makeRecord [(recordMergeLeftLabel, left), (recordMergeRightLabel, right)]
+  output <- freshVariableId
+  emit (OperationDelegate DelegateOperation {target = CalleeName recordMergeName, argument = argument, output = Just output, generics = mempty})
   pure output
 
 lowerTuple :: List (AST.Expression AST.Typed) -> Lower VariableId
@@ -899,16 +968,12 @@ lowerPartialApplication :: AST.CallExpression AST.Typed -> Lower VariableId
 lowerPartialApplication callExpression = do
   target <- calleeReference callExpression.callee
   suppliedEntries <- concat <$> mapM suppliedEntry callExpression.arguments
-  suppliedRecord <- freshVariableId
-  emit (OperationMakeRecord MakeRecordOperation {entries = suppliedEntries, output = suppliedRecord})
+  suppliedRecord <- makeRecord suppliedEntries
   context <- asks (.context)
   let generics = delegateGenerics context callExpression
   argumentVariable <- freshVariableId
   (resultVariable, operations) <- withFreshOperations $ do
-    mergeArgument <- freshVariableId
-    emit (OperationMakeRecord MakeRecordOperation {entries = [(recordMergeLeftLabel, argumentVariable), (recordMergeRightLabel, suppliedRecord)], output = mergeArgument})
-    mergedArgument <- freshVariableId
-    emit (OperationDelegate DelegateOperation {target = CalleeName recordMergeName, argument = mergeArgument, output = Just mergedArgument, generics = mempty})
+    mergedArgument <- mergeRecords argumentVariable suppliedRecord
     output <- freshVariableId
     emit (OperationDelegate DelegateOperation {target = target, argument = mergedArgument, output = Just output, generics = generics})
     pure output
@@ -1265,10 +1330,11 @@ lowerRequestHandler ::
   Lower Handler
 lowerRequestHandler handleBlock stateParameters stateLocals requestHandler = do
   -- The ambient @panic@ clause is undeclared, so its reference never resolves; lower it to the wired-in
-  -- @prelude.panic@ name directly (recognized structurally, as in the checker), rather than reading a
-  -- resolution that is not there.
+  -- @prelude.panic@ name directly, rather than reading a resolution that is not there. The clause is
+  -- recognized by the same 'isPanicHandler' the checker uses, so the two passes cannot drift over which
+  -- clause gets this treatment.
   let requestName =
-        if isNothing requestHandler.moduleQualifier && requestHandler.name == panicRequestName.name
+        if isPanicHandler requestHandler
           then panicRequestName
           else resolvedRequestName requestHandler.typeReference
   argumentVariable <- freshVariableId

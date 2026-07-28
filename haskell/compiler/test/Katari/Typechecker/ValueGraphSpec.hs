@@ -48,6 +48,33 @@ spec = do
       sccNames (sccsOf [("test", "request tick() -> integer\nagent a() -> integer { tick() }")])
         `shouldBe` [["tick"], ["a"]]
 
+  -- An anonymous agent's body is checked while checking the enclosing declaration, so whatever it
+  -- names has to be ordered before that declaration — exactly like a nested declaration's body.
+  describe "valueSCCs (anonymous agent expressions)" $ do
+    it "counts a reference made only inside an anonymous agent as the enclosing agent's dependency" $
+      sccNames
+        ( sccsOf
+            [ ( "test",
+                "agent caller() -> agent (value: integer) -> integer { agent (value: integer) -> integer { callee(value = value) } }\n\
+                \agent callee(value: integer) -> integer { value }"
+              )
+            ]
+        )
+        `shouldBe` [["callee"], ["caller"]]
+
+    it "sees a self-reference made from inside an anonymous agent as recursion" $ do
+      let sccs =
+            sccsOf
+              [ ( "test",
+                  "agent loop(value: integer) -> integer {\n\
+                  \  let step = agent (inner: integer) -> integer { loop(value = inner) }\n\
+                  \  step(inner = value)\n\
+                  \}"
+                )
+              ]
+      sccNames sccs `shouldBe` [["loop"]]
+      map isCyclic sccs `shouldBe` [True]
+
   describe "valueSCCs (cross-module)" $
     it "links an agent to an agent it calls in another module" $ do
       let sccs =

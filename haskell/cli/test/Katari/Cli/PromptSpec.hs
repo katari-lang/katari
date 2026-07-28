@@ -1,6 +1,9 @@
 module Katari.Cli.PromptSpec (spec) where
 
 import Data.Aeson (Value (..), toJSON)
+import Data.Map qualified as Map
+import Data.Text (Text)
+import GHC.List (List)
 import Katari.Cli.Prompt
   ( TypedInputKind (..),
     coerceTypedInput,
@@ -12,6 +15,10 @@ import Katari.Data.JSONSchema
     JSONSchema (..),
     ObjectSchema (..),
   )
+import Katari.Data.ModuleName (ModuleName (..))
+import Katari.Data.QualifiedName (QualifiedName (..))
+import Katari.Data.SemanticType (FieldInformation (..), SemanticType (..))
+import Katari.Schema (DataDefinition (..), DataDefinitions, toJSONSchema)
 import Test.Hspec
 
 spec :: Spec
@@ -63,3 +70,53 @@ spec = do
 
     it "renders a literal as its JSON" $
       renderSchemaBrief (SchemaConst Null) `shouldBe` "null"
+
+    it "names a documented data arm by its constructor, seeing through the descriptions" $
+      -- The fixture is the COMPILER's own output — `toJSONSchema` over two documented `data`
+      -- declarations — rather than a hand-transcribed copy of the wire encoding: a transcription stays
+      -- green when the encoding moves out from under the reader, which is exactly the drift this test
+      -- exists to catch. The compiler documents the arm, its discriminator and each annotated field, so
+      -- the brief must peel all three; a picker that fell through would show two identical `record {…}`.
+      -- Field order follows the encoding's own (ascending by name), not declaration order.
+      renderSchemaBrief
+        ( toJSONSchema
+            targetDefinitions
+            (SemanticTypeUnion [SemanticTypeData urlTargetName Map.empty, SemanticTypeData channelTargetName Map.empty])
+        )
+        `shouldBe` "test.url_target {interval_seconds, url} | test.channel_target {channel_id}"
+
+-- | Two documented @data@ declarations as "Katari.Lowering" denormalizes them for inline expansion:
+-- each carries its own docstring and its per-field docstrings, so 'toJSONSchema' emits every
+-- description overlay a brief has to see through.
+targetDefinitions :: DataDefinitions
+targetDefinitions =
+  Map.fromList
+    [ ( urlTargetName,
+        documentedDefinition
+          "A URL to poll."
+          [("url", "Where to poll."), ("interval_seconds", "How often to poll it.")]
+      ),
+      ( channelTargetName,
+        documentedDefinition "A channel to watch." [("channel_id", "Which channel.")]
+      )
+    ]
+
+-- | One documented declaration: every field a required @string@, annotated with the given docstring.
+documentedDefinition :: Text -> List (Text, Text) -> DataDefinition
+documentedDefinition annotation fieldDocumentation =
+  DataDefinition
+    { fields =
+        Map.fromList
+          [ (fieldName, FieldInformation {semanticType = SemanticTypeString, optional = False})
+            | (fieldName, _) <- fieldDocumentation
+          ],
+      parameterGenericIds = Map.empty,
+      annotation = Just annotation,
+      fieldAnnotations = Map.fromList fieldDocumentation
+    }
+
+urlTargetName :: QualifiedName
+urlTargetName = QualifiedName {moduleName = ModuleName "test", name = "url_target"}
+
+channelTargetName :: QualifiedName
+channelTargetName = QualifiedName {moduleName = ModuleName "test", name = "channel_target"}

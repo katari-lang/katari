@@ -1,0 +1,440 @@
+// The `prelude.poll` sub-module: a DURABLE SUBSCRIPTION over a source that can only be ASKED. Where
+// `time.watch` subscribes to a SCHEDULE (the occurrences are the events) and `region.watch` subscribes
+// to a NURSERY (the fibers push their escalations up), `poll.subscribe` subscribes to a source that
+// pushes nothing: it ticks on a schedule, asks the caller's `fetch` what the source holds now, and
+// hands each item it has not seen before to the caller's `deliver_to`. Everything hard about that
+// sentence lives in "has not seen before", and this module is that one sentence written once.
+//
+// DELIVERY IS AT-LEAST-ONCE. That is the whole contract, and it is deliberately the WEAKER one: an
+// item is delivered one or more times, never zero. A crash between a delivery and its commit
+// re-delivers exactly that item; nothing is dropped. EXACTLY-ONCE IS BUILT AT THE DESTINATION, by
+// making the delivery idempotent (post keyed by the item's id, upsert rather than insert, label a
+// message rather than reply to it) — never by strengthening the loop, which cannot be strengthened
+// without a transaction the source does not offer. Every watch in the ecosystem should state its
+// guarantee in these words; a source-side "exactly-once" only ever means "exactly once per key, per
+// activation", which is this module's at-least-once plus an idempotent key.
+//
+// WHY THIS IS A MODULE AND NOT A HELPER IN EACH PACKAGE. Two packages (gmail, google_calendar) grew
+// this loop independently, ~120 lines each, and each learned the SAME four traps the hard way. The
+// knowledge died in their comments, and every next source — GitHub, RSS, Notion, a database change
+// feed — was going to pay for it again. The four traps are now INVARIANTS OF THE SKELETON, not advice:
+//
+//   1. THE CURSOR MOVES ON THE SOURCE'S CLOCK, NEVER ON THE POLLER'S. A tick that finds nothing does
+//      NOT advance the cursor. The wall clock is read exactly once in a subscription's life — at
+//      priming, to decide where "already there" ends (`initial`) — and never again. Advancing on the
+//      poller's clock instead looks harmless and silently steps over every item that was in flight
+//      while the tick ran.
+//   2. THE CURSOR NEVER PASSES THE TICK THAT OBSERVED IT. An item whose mark lies in the FUTURE (an
+//      imported mail carrying its own date, a row with a clock-skewed timestamp) would otherwise park
+//      the cursor there and mute the subscription until that instant arrived. Capping the ADVANCE can
+//      only hold the cursor BACK, which costs a re-listing that the remembered keys absorb — while the
+//      KEY keeps the item's true mark, so a future-dated item stays remembered for as long as the
+//      cursor sits below it and is never delivered twice.
+//   3. THE COMMIT IS PER ITEM, NOT PER TICK. Deliver one item, then move the cursor; repeat. A tick
+//      that fails halfway leaves the rest of its batch still ABOVE the cursor, so the next tick lists
+//      them again. Committing the whole batch at the end would be exactly-once on the happy path and
+//      LOSSY on the failing one, which is the wrong trade for a subscription.
+//   4. A BOUNDED MEMORY FORGETS BY AGE, NEVER BY ABSENCE. A dedup memory pruned to "what this tick
+//      listed" forgets a key the moment its item is missing from one listing, and re-notifies the
+//      moment it comes back — a transient blip at the source is enough to deliver twice. `watermark`
+//      forgets what has fallen below the floor (which can no longer be listed at all); `seen_set`
+//      forgets the oldest key past its cap. Both forget by age alone.
+//
+// THE DEDUP REGIME IS A VALUE, NOT A COPY OF THE LOOP. The two regimes that exist in the wild are the
+// two constructors of `dedup`, and the skeleton dispatches on them:
+//
+//   - `watermark(overlap)` — the source has a MONOTONE RECEIVE CLOCK and can be listed from an
+//     instant ("mail that arrived after T", "issues updated since T"). The memory is a floor plus the
+//     keys sitting at or above it, so it is CONSTANT-SIZE however long the subscription runs.
+//   - `seen_set(capacity)` — the source has NO usable receive clock, only a window that slides
+//     ("meetings starting in the next 30 minutes"). The memory is the last @capacity@ keys.
+//
+// Both ride the same loop, the same per-item commit, the same priming, the same durable cursor. What
+// differs is one `match` in `advance` and one in `poll_since`.
+//
+// WHERE THE CURSOR LIVES IS THE CALLER'S CHOICE, AND IT IS NOT A DETAIL. A subscription whose cursor
+// is only a handler `var` is re-primed every time its fiber is re-forked — and a process restart
+// re-forks every fiber. The subscription then comes back UP, reports itself healthy, and silently
+// skips everything that arrived while the process was down: the failure is invisible, permanent, and
+// only shows up as "we never heard about that one". `continuity` makes that a decision in the source:
+// `resume(key = ...)` keeps the cursor in the store (a restart resumes; the downtime is delivered),
+// `fresh()` keeps it in the run alone (a restart re-primes; the downtime is skipped). There is no
+// default, on purpose — the choice is too consequential to inherit.
+//
+// NO RETRY IS BUILT IN, exactly as in `time.watch`: a `fetch` or a `deliver_to` that throws kills the
+// subscription, and resilience is COMPOSED at the call site (`replay.forever` plus a converter that
+// chooses which failures are transient). A subscription with `resume` recovers what it missed while
+// the replay backed off, because the cursor outlived the failed activation — which is the composition
+// this module exists to make ordinary.
+//
+// `poll_since` / `classify` / `commit` / `mark_primed` (and `initial` / `load` / `persist` /
+// `advance`) are internal machinery: a caller never performs or handles them. They are module members
+// only because Katari has no module-private declarations.
+
+// ── the item contract: what a source must be able to say about each of its items ──────────────────
+
+@"One item as the subscription sees it: an identity, a position, and the payload. A source becomes
+subscribable by answering these three things per item — the whole adapter a package writes.
+@key@ must be STABLE (the same item yields the same key on every listing) and UNIQUE among the items
+that can be in the memory at once; when identity alone is not enough (a recurring meeting whose
+occurrences share an id, an item that may legitimately re-fire when it moves), join the discriminator
+into the key (`id ++ \" \" ++ start`). @mark@ is the item's own position in the SOURCE's receive clock,
+as EPOCH MILLISECONDS — the only quantity allowed to move a `watermark` cursor, and the reason a slow
+tick or a skewed poller can never step over an item. Under `seen_set` no cursor moves, so @mark@ is
+unused there; record the tick instant and be done."
+data item[T](
+  @"The item's stable, unique dedup identity." key: string,
+  @"The item's own arrival instant in the SOURCE's clock, epoch milliseconds (unused under `seen_set`)." mark: number,
+  @"The payload handed to `deliver_to`." value: T,
+)
+
+// ── dedup: the memory regime, as a first-class value ─────────────────────────────────────────────
+
+@"Dedup by a MONOTONE FLOOR in the source's own receive clock — for a source that can be listed from
+an instant (\"mail that arrived after T\"). The cursor is the floor; it advances to each delivered
+item's own @mark@, never past the tick that observed it, and never on the poller's clock. The memory
+alongside it is only the keys at or above the floor, so it stays CONSTANT-SIZE forever: a key below
+the floor has nothing left to prevent, because an item that far back can no longer be listed.
+
+@overlap@ is how far BELOW the floor each fetch re-lists, in the same milliseconds: the slack that
+covers a boundary the source rounds or reads exclusively (Gmail's `after:` takes whole SECONDS and
+does not document whether it means `>` or `>=`, so `overlap = 1000` makes both readings safe). The
+overlap costs no duplicates — the keys inside it are exactly the ones still remembered — and an
+@overlap@ of 0 is right for a source whose listing boundary is exact."
+data watermark(@"How far below the floor each fetch re-lists, in milliseconds; the keys inside it stay remembered." overlap: number)
+
+@"Dedup by a BOUNDED SET OF KEYS — for a source with no usable receive clock, only a window that
+slides (\"meetings starting within the next 30 minutes\"). No cursor moves; every fetch sees the same
+`since` and works from the tick instant instead. The memory is the most recent @capacity@ keys.
+
+A CAP IS NOT A PRUNE TO THE CURRENT WINDOW — that is trap 4, and it is why this is a cap. THE
+RE-NOTIFY HAZARD IT LEAVES: forgetting the oldest key means an item that is STILL inside the window
+after @capacity@ other items have been delivered will be delivered again. Size @capacity@ well above
+the largest number of items one window can hold (google_calendar uses 200 for a 30-minute lead) and
+the drop only ever reaches keys long past; size it too small and a busy window re-notifies its own
+head. There is no cheaper bound — the memory has to forget something, and age is the only safe axis.
+
+A SEEN-SET SUBSCRIPTION CANNOT BACKFILL, whatever its `continuity`: with no floor there is nothing to
+list from, so whatever crossed the window while the subscription was down is simply gone. `resume`
+still earns its keep here — it stops the re-notification storm a re-primed memory would cause — but
+only a `watermark` subscription delivers its downtime."
+data seen_set(@"How many keys to remember; must exceed the largest number of items one window can hold." capacity: integer)
+
+// Which memory a subscription keeps. (Type synonyms take no docs.)
+type dedup = watermark | seen_set
+
+// ── backlog: what the FIRST activation does with what the source already holds ────────────────────
+
+@"Skip whatever the source already holds when the subscription first starts: report ARRIVALS, not
+matches. Under `watermark` the cursor is primed at the starting instant, so the backlog is never even
+listed; under `seen_set` the first tick RECORDS its window without delivering (the priming tick), and
+delivery begins with the tick after it. This is the right shape for \"tell me about new things\" and
+the WRONG one for \"tell me about everything that matches\" — a subscription is a subscription to a
+transition, and a listing agent is what answers \"what is there now\"."
+data skip_backlog()
+
+@"Deliver whatever the source already holds when the subscription first starts, then keep going. Under
+`watermark` the cursor starts at the epoch, so the first tick lists the source's whole history — which
+is what a backfill wants and what a busy source will drown in; bound it inside the `fetch` if that
+matters. Under `seen_set` there is no priming tick: the first window is delivered."
+data deliver_backlog()
+
+// What the FIRST activation does with the backlog. (Type synonyms take no docs.)
+type backlog = skip_backlog | deliver_backlog
+
+// ── continuity: where the cursor lives — the restart decision, made in source ─────────────────────
+
+@"Keep the cursor in the STORE, at @key@ — so it outlives the run that wrote it. Every commit writes
+it; a fresh activation (a restart, a re-fork, a `replay` re-run) reads it back and RESUMES. Under
+`watermark` that means the items which arrived while the process was down are DELIVERED rather than
+skipped; under `seen_set`, which has no floor to list from, it means the window is not re-notified
+from scratch. @key@ is an ordinary store key: it resolves against the surrounding `store.scope` /
+`store.workspace` exactly like any other, so WHERE the cursor lands is the calling workspace's
+decision. Give every subscription its own key — two subscriptions sharing one key overwrite each
+other's memory. This is the choice to make unless the subscription genuinely wants to forget."
+data resume(@"The store key the cursor record lives at, relative to the current workspace." key: string)
+
+@"Keep the cursor in the RUN ONLY (a handler `var`, durable across a crash-recovery restart of that
+same run, but gone when the run ends). Every fresh activation re-primes, so whatever arrived between
+activations is skipped for good and silently. Choose it when re-priming is the semantics — a
+subscription whose backlog is worthless, a probe, a test — and never merely because there is no
+obvious key to name."
+data fresh()
+
+// Where the cursor lives between activations. (Type synonyms take no docs.)
+type continuity = resume | fresh
+
+// ── the durable memory and the per-item verdict (internal machinery) ──────────────────────────────
+
+@"The subscription is still recording its first tick: items are remembered, not delivered. Internal to
+`subscribe`."
+data priming()
+
+@"The subscription is delivering. Internal to `subscribe`."
+data live()
+
+// Whether a tick delivers or merely records. (Type synonyms take no docs.)
+type phase = priming | live
+
+@"One remembered delivery: the item's @key@, and the @mark@ that decides when the memory may forget
+it. Internal to `subscribe`."
+data delivered(@"The delivered item's dedup key." key: string, @"The delivered item's mark, in the source's clock." mark: number)
+
+@"A subscription's whole memory, in one value — the thing `resume` writes to the store, so it is also
+the thing an operator reads in the console when a subscription looks stuck. Internal to `subscribe`;
+an app never builds one."
+data cursor(
+  @"The floor in the source's clock; 0 under `seen_set`, which has no floor." floor: number,
+  @"The keys remembered at or above the floor (or the last `capacity` keys under `seen_set`)." recent: array[delivered],
+  @"Whether the first tick has finished recording." phase: phase,
+)
+
+@"Unseen and the subscription is live: deliver it, then commit. Internal to `subscribe`."
+data deliver()
+
+@"Unseen but the subscription is still priming: commit WITHOUT delivering. Internal to `subscribe`."
+data remember()
+
+@"Already remembered: do nothing. Internal to `subscribe`."
+data skip()
+
+// One item's fate this tick. (Type synonyms take no docs.)
+type verdict = deliver | remember | skip
+
+@"The instant this tick's fetch lists from: the floor minus the regime's overlap, clamped at 0.
+Handled inside `subscribe`; an app does not handle it."
+request poll_since() -> number
+
+@"One item's fate, decided against the memory and the phase — the ONE place \"have I seen this\" is
+asked, so no code re-tests the set. Handled inside `subscribe`; an app does not handle it."
+request classify(@"The item's dedup key." key: string) -> verdict
+
+@"Fold one item into the memory and make it durable — the PER-ITEM COMMIT (trap 3). Performed only
+AFTER its delivery returns, so a failed delivery leaves the item uncommitted and the next tick lists
+it again. Handled inside `subscribe`; an app does not handle it."
+request commit(
+  @"The item's dedup key." key: string,
+  @"The item's mark, in the source's clock." mark: number,
+  @"The tick's scheduled instant — the ceiling this commit may not move the cursor past." tick: number,
+) -> null
+
+@"End the priming tick: from here on an unseen item is delivered rather than merely recorded.
+Performed once, at the END of the first tick, so a crash partway through priming resumes as a priming
+tick rather than delivering the part it never reached. Handled inside `subscribe`; an app does not
+handle it."
+request mark_primed() -> null
+
+@"The memory a subscription starts from when nothing is stored. THE ONE READ OF THE POLLER'S CLOCK in
+a subscription's whole life (trap 1), and only in the one case that needs it: a `watermark` that skips
+its backlog, where the starting instant is precisely the line between \"already there\" and \"arrived\".
+Every other combination starts at the epoch — a `seen_set` has no floor to raise, so it skips its
+backlog with a priming TICK instead. Internal to `subscribe`."
+agent initial(@"The dedup regime." dedup: dedup, @"What to do with the backlog." backlog: backlog) -> cursor with io {
+  match (backlog) {
+    case deliver_backlog(_) -> cursor(floor = 0, recent = [], phase = live())
+    case skip_backlog(_) -> {
+      match (dedup) {
+        // The floor starts at NOW: everything the source already holds sits below it and is never
+        // listed. This clock read decides where "already there" ends and nothing else.
+        case watermark(overlap => _) -> cursor(floor = time.now(), recent = [], phase = live())
+        // No floor to raise, so the backlog is skipped by RECORDING the first tick instead.
+        case seen_set(capacity => _) -> cursor(floor = 0, recent = [], phase = priming())
+      }
+    }
+  }
+}
+
+@"The memory this activation starts from: the stored one under `resume` (the restart resumes), a fresh
+one otherwise. A stored value that does not conform — a key overwritten by something else, a record
+written by an older shape — degrades to a fresh memory rather than throwing, because a subscription
+that refuses to start is strictly worse than one that re-primes. Internal to `subscribe`."
+agent load(
+  @"The dedup regime." dedup: dedup,
+  @"What to do with the backlog." backlog: backlog,
+  @"Where the cursor lives." continuity: continuity,
+) -> cursor with io | store.get {
+  match (continuity) {
+    case fresh(_) -> initial(dedup = dedup, backlog = backlog)
+    case resume(key => key) -> {
+      match (store.get(key = key)) {
+        case store.absent(key => _) -> initial(dedup = dedup, backlog = backlog)
+        case store.found(value => value) -> {
+          match (json.try_validate[cursor](value = value)) {
+            case null -> initial(dedup = dedup, backlog = backlog)
+            case restored -> restored
+          }
+        }
+      }
+    }
+  }
+}
+
+@"Make the memory durable, if the caller asked for a durable one. Called on every commit, so the
+store write is the commit — under `fresh` it is a no-op and the handler `var` is the whole memory.
+Internal to `subscribe`."
+agent persist(@"Where the cursor lives." continuity: continuity, @"The memory to write." memory: cursor) -> null with store.set {
+  match (continuity) {
+    case fresh(_) -> null
+    case resume(key => key) -> store.set(key = key, value = memory)
+  }
+}
+
+@"The memory with one delivered item folded in — where the two regimes actually differ, and where
+traps 1, 2 and 4 are enforced. Internal to `subscribe`."
+agent advance(
+  @"The dedup regime." dedup: dedup,
+  @"The memory before this delivery." memory: cursor,
+  @"The delivered item's key." key: string,
+  @"The delivered item's mark, in the source's clock." mark: number,
+  @"The tick's scheduled instant." tick: number,
+) -> cursor {
+  match (dedup) {
+    case watermark(overlap => overlap) -> {
+      // The floor moves on the ITEM's mark (trap 1) and only FORWARD, because a listing is rarely
+      // ordered exactly by the receive clock; and never past the tick that observed it (trap 2), so a
+      // future-dated item cannot park the cursor ahead and mute the subscription. Capping can only
+      // hold the cursor back, which costs a re-listing the remembered keys absorb.
+      let floor = math.max(left = memory.floor, right = math.min(left = mark, right = tick))
+      // Forget by AGE alone (trap 4): a key below the new fetch boundary can no longer be listed, so
+      // it has nothing left to prevent. Everything inside the overlap stays — that is what makes the
+      // overlap free. The key keeps the item's TRUE mark, so a future-dated item stays remembered for
+      // as long as the cursor sits below it.
+      let kept = array.flatten(target = for (let entry in memory.recent) {
+        next if (entry.mark >= floor - overlap) { [entry] } else { [] }
+      })
+      cursor(
+        floor = floor,
+        recent = array.append(target = kept, value = delivered(key = key, mark = mark)),
+        phase = memory.phase,
+      )
+    }
+    case seen_set(capacity => capacity) -> {
+      // No floor to move; the memory is a bounded queue, and the cap is what bounds it (trap 4). See
+      // `seen_set`'s own docs for the re-notify hazard the cap leaves.
+      let grown = array.append(target = memory.recent, value = delivered(key = key, mark = mark))
+      let total = array.length(target = grown)
+      cursor(
+        floor = memory.floor,
+        recent = array.slice(target = grown, start = math.max(left = 0, right = total - capacity), end = total),
+        phase = memory.phase,
+      )
+    }
+  }
+}
+
+// ── subscribe: the skeleton ───────────────────────────────────────────────────────────────────────
+
+@"Poll a source on @schedule@ and deliver each item it has not seen before to @deliver_to@, forever —
+the durable-subscription skeleton every source package composes instead of rewriting. Shaped like
+`time.watch` (`-> never`, @deliver_to@'s effects @E@ flow to the caller's handlers unchanged), so it
+composes under `parallel [ … ]` beside any other daemon and beside other subscriptions.
+
+DELIVERY IS AT-LEAST-ONCE. An item reaches @deliver_to@ one or more times, never zero: the commit lands
+only after a delivery returns, so a crash or a throw in between re-delivers exactly that item on the
+next tick. Build exactly-once at the DESTINATION by making the delivery idempotent — keyed by
+`item.key`, which is the identity this loop already promises is stable.
+
+WHAT @fetch@ MUST GUARANTEE, and it is the whole adapter: given @since@ (the instant this tick lists
+from — the cursor's floor minus the regime's overlap) and @tick@ (the occurrence's scheduled instant),
+return every item at or above @since@, OLDEST FIRST, across every page of the source's pagination.
+Oldest-first is load-bearing: the cursor then only ever passes items that have actually been
+delivered, so a delivery that throws mid-tick leaves the rest of the tick still above the cursor.
+Draining every page is load-bearing too: a listing cut off at a cap that orders newest-first hands
+back only the newest matches, and a cursor advanced over them strands the older ones below it forever.
+Returning an item AGAIN that was returned before is free — that is what the remembered keys are for.
+
+WHAT IT REPORTS. With `skip_backlog` it reports ARRIVALS: whatever the source already held when the
+subscription first started is never delivered, however well it matches, and an old item that comes to
+match LATER is not delivered either (the fetch never looks below the cursor). That is the right shape
+for hearing about new things and the wrong one for \"tell me whenever anything matches\"; a listing
+agent answers the latter.
+
+RESTARTS. With `continuity = resume(key = ...)` the cursor lives in the store, so a runtime restart, a
+re-forked fiber and a `replay` re-run all RESUME from it — and the items that arrived while the
+subscription was down are delivered, oldest first, on the tick after it comes back. With `fresh()`
+every activation re-primes and that downtime is skipped for good. Nothing else about the subscription
+changes between the two.
+
+NO RETRY IS BUILT IN — a failing @fetch@ or @deliver_to@ propagates and kills the subscription, exactly
+as an uncaught failure in any callee does. Compose resilience at the call site: `replay.forever` plus a
+converter that turns the transient failures (and, for an OAuth source, `auth_error`) into
+`replay.interrupted`. With `resume`, the backoff costs nothing but latency; the cursor survives it.
+
+The first poll is one @schedule@ occurrence in (a `time.watch` occurrence fires one interval AFTER the
+start), and under `seen_set` + `skip_backlog` that first poll is the priming one — so the earliest
+notification such a subscription can produce is two occurrences after it starts."
+agent subscribe[T, effect E](
+  @"When each poll fires: a `time.interval(...)` or a `time.cron(...)`." schedule: time.schedule,
+  @"The dedup regime: `watermark(overlap = ...)` or `seen_set(capacity = ...)`." dedup: dedup,
+  @"What the first activation does with what the source already holds." backlog: backlog,
+  @"Where the cursor lives between activations — `resume(key = ...)` to survive a restart, `fresh()` not to." continuity: continuity,
+  @"List the source from @since@ as of @tick@: every item at or above @since@, OLDEST FIRST, every page." fetch: agent (since: number, tick: number) -> array[item[T]] with E,
+  @"Called once per item not seen before; its effects flow to the caller's handlers unchanged." deliver_to: agent (value: T) -> null with E,
+) -> never with E | io | store.get | store.set {
+  // The memory is a handler `var` — ONE owner, advanced only by `commit` / `mark_primed` — seeded from
+  // the store so a fresh activation resumes rather than re-primes. `time.watch` owns the loop, so the
+  // durable footprint stays flat however long the subscription runs: no growing recursion, no history.
+  use handler (var memory: cursor = load(dedup = dedup, backlog = backlog, continuity = continuity)) {
+    request poll_since() {
+      next match (dedup) {
+        // The overlap is subtracted HERE, once, so the fetch and the memory's pruning boundary can
+        // never drift apart: what the fetch re-lists is exactly what the memory still remembers.
+        case watermark(overlap => overlap) -> math.max(left = 0, right = memory.floor - overlap)
+        case seen_set(capacity => _) -> memory.floor
+      }
+    }
+    request classify(key: string) {
+      let seen = for (let entry in memory.recent) { next entry.key }
+      next match (array.index_of(target = seen, value = key)) {
+        case null -> {
+          match (memory.phase) {
+            case live(_) -> deliver()
+            case priming(_) -> remember()
+          }
+        }
+        case _ -> skip()
+      }
+    }
+    request commit(key: string, mark: number, tick: number) {
+      let advanced = advance(dedup = dedup, memory = memory, key = key, mark = mark, tick = tick)
+      // The durable write and the var move together: after this returns, the item is committed both
+      // in this run and across restarts.
+      persist(continuity = continuity, memory = advanced)
+      next null with { memory = advanced }
+    }
+    request mark_primed() {
+      match (memory.phase) {
+        // Already live: nothing to end, and no durable write to spend on every later tick.
+        case live(_) -> { next null }
+        case priming(_) -> {
+          let advanced = cursor(floor = memory.floor, recent = memory.recent, phase = live())
+          persist(continuity = continuity, memory = advanced)
+          next null with { memory = advanced }
+        }
+      }
+    }
+  }
+  // The `time.watch` deliver_to: list this tick, then walk the listing one item at a time. A local
+  // agent because it captures @fetch@ and @deliver_to@; its `poll_since` / `classify` / `commit` /
+  // `mark_primed` are handled by the var above, while @E@ flows out to the caller. The occurrence's
+  // scheduled instant does not decide what is new — the memory does — it only caps how far the cursor
+  // may travel in this tick.
+  agent poll_on_tick(time: number) -> null with E | poll_since | classify | commit | mark_primed {
+    for (let entry in fetch(since = poll_since(), tick = time)) {
+      // Deliver-then-commit, per item (trap 3). The three-way verdict is decided ONCE, in `classify`,
+      // and dispatched here — no code re-tests the memory.
+      match (classify(key = entry.key)) {
+        case deliver(_) -> {
+          deliver_to(value = entry.value)
+          commit(key = entry.key, mark = entry.mark, tick = time)
+        }
+        case remember(_) -> commit(key = entry.key, mark = entry.mark, tick = time)
+        case skip(_) -> null
+      }
+    }
+    // Priming ends only once the WHOLE first tick has been recorded, so a crash partway through it
+    // resumes as a priming tick instead of delivering the part it never reached.
+    mark_primed()
+  }
+  time.watch(schedule = schedule, deliver_to = poll_on_tick)
+}

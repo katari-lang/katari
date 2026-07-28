@@ -10,8 +10,9 @@
 -- kept in agreement by "Katari.StdlibSpec".
 module Katari.Primitive where
 
+import Data.Maybe (isNothing)
 import Data.Text (Text)
-import Katari.Data.AST (BinaryOperator (..), UnaryOperator (..))
+import Katari.Data.AST (BinaryOperator (..), RequestHandler (..), UnaryOperator (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 
@@ -28,6 +29,13 @@ preludeModuleName = ModuleName "prelude"
 -- @prelude.panic@ ask.
 panicRequestName :: QualifiedName
 panicRequestName = QualifiedName {moduleName = preludeModuleName, name = "panic"}
+
+-- | Whether a handler clause is the ambient @panic@ catch: the bare (unqualified) name @panic@. Panic is
+-- undeclared, so the clause is recognized structurally rather than by name resolution — and by more than
+-- one pass (the checker types it from its synthetic signature, lowering maps it to 'panicRequestName'), so
+-- the shape lives here beside the name it tests, next to the passes that must agree on it.
+isPanicHandler :: RequestHandler phase -> Bool
+isPanicHandler handler = isNothing handler.moduleQualifier && handler.name == panicRequestName.name
 
 -- | The wired-in @prelude.record.merge@ primitive. Lowering synthesizes a call to it inside a
 -- partial application's residual body: merging the residual's incoming argument record with the

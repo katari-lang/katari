@@ -168,6 +168,13 @@ renderTypeError typeError =
       "A `lacks` entry must be a bare request name. The constraint is name-level — it excludes every"
         <> " instantiation of the named request, whatever its arguments — so an applied form"
         <> " (`lacks throw[t]`) or anything that is not a request has no reading here."
+    TypeErrorGenericAgentExpression info ->
+      "An `agent` expression cannot declare generic parameters ("
+        <> Text.intercalate ", " (renderBackticked <$> info.parameterNames)
+        <> "): type arguments are supplied through a value's NAME (`value[T]`), and this agent has"
+        <> " none, so nothing could ever instantiate them. Declare it as a named agent (`agent"
+        <> " name[T](...) -> ... { ... }`) and pass that name instead, or write the anonymous agent"
+        <> " at the concrete types it is used at."
   where
     renderBackticked name = "`" <> name <> "`"
 
@@ -251,6 +258,11 @@ data TypeError where
   -- name-level (it excludes every instantiation of the request, whatever its arguments), so an
   -- applied form or anything that is not a request has no reading.
   TypeErrorLacksEntry :: TypeError
+  -- | An anonymous @agent@ expression declares generic parameters. A generic value's parameters are
+  -- bound at a use site through its NAME (@value[T]@), and an expression has no name — so the
+  -- parameters could never be instantiated. Rejected rather than silently dropped, because dropping
+  -- them would leave the body checked against variables nothing can ever solve.
+  TypeErrorGenericAgentExpression :: GenericAgentExpressionErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -278,6 +290,7 @@ typeErrorCode = \case
   TypeErrorParallelForVarBinding _ -> "K3024"
   TypeErrorParallelHandlerVarBinding _ -> "K3025"
   TypeErrorLacksEntry -> "K3026"
+  TypeErrorGenericAgentExpression _ -> "K3027"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -306,6 +319,7 @@ typeErrorSeverity = \case
   TypeErrorParallelForVarBinding _ -> SeverityError
   TypeErrorParallelHandlerVarBinding _ -> SeverityError
   TypeErrorLacksEntry -> SeverityError
+  TypeErrorGenericAgentExpression _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -470,6 +484,13 @@ newtype ParallelForVarBindingErrorInfo = ParallelForVarBindingErrorInfo
 -- the message can name the state whose updates would race across concurrent request dispatches.
 newtype ParallelHandlerVarBindingErrorInfo = ParallelHandlerVarBindingErrorInfo
   { variableNames :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @parameterNames@ are the generic parameters the anonymous @agent@ expression declared, in written
+-- order, so the message can name the ones that have no way to be instantiated.
+newtype GenericAgentExpressionErrorInfo = GenericAgentExpressionErrorInfo
+  { parameterNames :: List Text
   }
   deriving (Eq, Ord, Show)
 

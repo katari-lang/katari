@@ -559,6 +559,12 @@ thenClauseFacts moduleName clause =
 -- Expressions
 ---------------------------------------------------------------------------------------------------
 
+-- | Both record-entry forms carry one expression; a spread's is its base.
+recordEntryFacts :: ModuleName -> RecordEntry Typed -> ModuleFacts
+recordEntryFacts moduleName = \case
+  RecordEntryField field -> expressionFacts moduleName field.value
+  RecordEntrySpread value -> expressionFacts moduleName value
+
 -- | A hole contributes no facts (it is a marker, not an expression); an expression payload recurses.
 callArgumentFacts :: ModuleName -> CallArgument Typed -> ModuleFacts
 callArgumentFacts moduleName argument = case argument.value of
@@ -575,7 +581,7 @@ expressionFacts moduleName expression = case expression of
     foldMap (expressionFacts moduleName) tuple.elements
       <> typedSpanFacts tuple.sourceSpan tuple.typeOf
   ExpressionRecord record ->
-    foldMap (\entry -> expressionFacts moduleName entry.value) record.entries
+    foldMap (recordEntryFacts moduleName) record.entries
       <> typedSpanFacts record.sourceSpan record.typeOf
   ExpressionCall call ->
     expressionFacts moduleName call.callee
@@ -623,6 +629,12 @@ expressionFacts moduleName expression = case expression of
   ExpressionTemplate template ->
     foldMap (templateElementFacts moduleName) template.elements
       <> typedSpanFacts template.sourceSpan template.typeOf
+  -- An anonymous agent carries the same node a declaration does, so it contributes the same facts —
+  -- its `agent` keyword stands in for the name (hovering it shows the closure's type), and the whole
+  -- expression span gets the type every other expression node records.
+  ExpressionAgent declaration ->
+    agentDeclarationFacts moduleName declaration
+      <> typedSpanFacts declaration.sourceSpan declaration.typeOf
   ExpressionHandler handler -> handlerExpressionFacts moduleName handler
   ExpressionQualifiedReference qualified ->
     moduleQualifierFacts moduleName qualified.moduleQualifier
@@ -741,4 +753,5 @@ typeOfExpression = \case
   ExpressionTypeApplication expression -> expression.typeOf
   ExpressionTemplate expression -> expression.typeOf
   ExpressionHandler expression -> expression.typeOf
+  ExpressionAgent declaration -> declaration.typeOf
   ExpressionQualifiedReference expression -> expression.typeOf

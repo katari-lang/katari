@@ -50,7 +50,7 @@ import Data.Vector qualified as Vector
 import GHC.List (List)
 import Katari.Cli.Output (OutputContext (..), styled)
 import Katari.Data.JSONSchema (AdditionalProperties (..), DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
-import Katari.Schema (constructorDiscriminatorKey, valueNestingKey)
+import Katari.Schema (DataValueSchema (..), dataValueSchemaParts)
 import System.Console.ANSI
   ( Color (..),
     ColorIntensity (..),
@@ -483,17 +483,19 @@ renderSchemaBrief = \case
   SchemaGeneric _ -> "any json (generic)"
   SchemaDescribed described -> renderSchemaBrief described.schema
 
--- | If an object schema is a @data@ value's wire schema — a @$katari_constructor@ const over fields nested
--- under @$katari_value@ (see "Katari.Schema") — a brief naming the constructor and its fields, so a union
--- picker distinguishes the variants (otherwise every @data@ arm reads @record {…}@).
+-- | If an object schema is a @data@ value's wire schema, a brief naming the constructor and its fields,
+-- so a union picker distinguishes the variants (otherwise every @data@ arm reads @record {…}@). The
+-- encoding is recognised by the compiler's own 'dataValueSchemaParts' — the inverse belongs beside the
+-- producer, not hand-written here, or documenting a declaration (or renaming a reserved key) silently
+-- turns every arm back into @record {…}@ with nothing to catch it.
 dataConstructorBrief :: ObjectSchema -> Maybe Text
-dataConstructorBrief objectSchema = case lookup constructorDiscriminatorKey objectSchema.properties of
-  Just (SchemaConst (String name)) ->
-    let fields = case lookup valueNestingKey objectSchema.properties of
-          Just (SchemaObject valueObject) -> [fieldName | (fieldName, _) <- valueObject.properties]
-          _ -> []
-     in Just (if null fields then name else name <> " {" <> Text.intercalate ", " fields <> "}")
-  _ -> Nothing
+dataConstructorBrief objectSchema = do
+  parts <- dataValueSchemaParts objectSchema
+  let fieldNames = [fieldName | (fieldName, _) <- parts.fields]
+  pure $
+    if null fieldNames
+      then parts.constructorName
+      else parts.constructorName <> " {" <> Text.intercalate ", " fieldNames <> "}"
 
 -- | A JSON value rendered compactly for labels and hints.
 compactJson :: Value -> Text

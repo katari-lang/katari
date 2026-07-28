@@ -1,10 +1,22 @@
 // Visual display for a JSON Schema (Draft 2020-12 canonical shapes, as the compiler emits them):
 // a structured tree with type badges and border-l indentation for nested properties — far easier to
 // scan than raw schema JSON, which stays one copy-click away.
+//
+// The Katari wire shapes a schema can carry (a `data` value's tagged object, a `file` handle, a callable
+// reference) are recognised through `wire-shape.ts`, which derives them from `@katari-lang/types`' own
+// discriminator constants and `wireKindOf` recogniser — the same single definition the runtime codec and
+// the FFI port encode against, and the same one `ValueViewer` reads. So this viewer cannot drift from what
+// the compiler emits.
 
 import type { ReactNode } from "react";
 import type { Json, JsonSchema } from "../../api/types";
 import { CopyButton } from "../ui/Copy";
+import {
+  asObject,
+  schemaConstructorFieldsOf,
+  schemaConstructorNameOf,
+  schemaWireKindOf,
+} from "./wire-shape";
 
 export function SchemaViewer({ schema }: { schema: JsonSchema }) {
   return (
@@ -27,11 +39,6 @@ function RequiredBadge() {
 
 function Description({ text }: { text: string }) {
   return <p className="mt-0.5 text-xs text-fg-faint">{text}</p>;
-}
-
-/** Narrow a `Json` value to a schema object (the keyed shape), or null for a scalar / array. */
-function asObject(value: Json | undefined): JsonSchema | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 }
 
 function SchemaNode({ schema }: { schema: Json }): ReactNode {
@@ -180,35 +187,33 @@ function ObjectNode({
   description: string | null;
 }): ReactNode {
   const properties = asObject(node.properties);
-  const requiredSet = new Set(Array.isArray(node.required) ? node.required.filter(isString) : []);
+  const wireKind = schemaWireKindOf(properties);
 
-  // Katari reference shapes: surface the semantic type name rather than the wire machinery.
-  const referenceType = referenceTypeOf(properties);
-  if (referenceType !== null) {
+  // Every wire variant but `data` is an opaque REFERENCE — a blob handle, a runtime-supplied callable.
+  // Its reserved properties are machinery the reader has no use for, so surface the semantic type name
+  // alone (`file`, `agent`, …) rather than the object it is carried as.
+  if (wireKind !== null && wireKind !== "data") {
     return (
       <div>
         {description !== null && <Description text={description} />}
-        <TypeBadge>{referenceType}</TypeBadge>
+        <TypeBadge>{wireKind}</TypeBadge>
       </div>
     );
   }
 
-  // A `data` constructor carries a `$katari_constructor` const with the constructor name.
-  const constructorSchema = asObject(properties?.$katari_constructor);
-  const constructorName =
-    constructorSchema !== null && typeof constructorSchema.const === "string"
-      ? constructorSchema.const
-      : null;
+  // A `data` value's own fields nest one level down, under `$katari_value`, so the properties worth
+  // displaying are that inner object's — never the outer two reserved keys. The discriminator's `const`
+  // becomes the type label. A `data` schema missing its nesting falls back to the outer object, which
+  // shows the raw wire rather than nothing.
+  const constructorName = wireKind === "data" ? schemaConstructorNameOf(properties) : null;
+  const shape = (wireKind === "data" ? schemaConstructorFieldsOf(properties) : null) ?? node;
+  const shapeProperties = wireKind === "data" ? asObject(shape.properties) : properties;
+  const requiredSet = new Set(Array.isArray(shape.required) ? shape.required.filter(isString) : []);
 
-  const displayProperties =
-    properties !== null
-      ? Object.entries(properties).filter(
-          ([key]) => constructorName === null || key !== "$katari_constructor",
-        )
-      : [];
-  const additionalSchema = asObject(node.additionalProperties);
+  const displayProperties = shapeProperties !== null ? Object.entries(shapeProperties) : [];
+  const additionalSchema = asObject(shape.additionalProperties);
   const hasAdditional =
-    node.additionalProperties !== undefined && node.additionalProperties !== false;
+    shape.additionalProperties !== undefined && shape.additionalProperties !== false;
   const isRecord = displayProperties.length === 0 && hasAdditional;
   const typeLabel = constructorName ?? (isRecord ? "record" : "object");
 
@@ -248,18 +253,6 @@ function ObjectNode({
 
 function isString(value: Json): value is string {
   return typeof value === "string";
-}
-
-/** The semantic type name for a Katari reference-object schema, or null. `{$katari_agent}` → "agent";
- *  `{$katari_ref, as:{const:"file"}}` → "file"; a bare `{$katari_ref}` → "ref". */
-function referenceTypeOf(properties: JsonSchema | null): string | null {
-  if (properties === null) return null;
-  if (properties.$katari_agent !== undefined) return "agent";
-  if (properties.$katari_ref !== undefined) {
-    const as = asObject(properties.as);
-    return as?.const === "file" ? "file" : "ref";
-  }
-  return null;
 }
 
 function singleType(node: JsonSchema): string | undefined {

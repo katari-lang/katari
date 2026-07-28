@@ -273,6 +273,57 @@ spec = describe "lowerModule (via compile)" $ do
     it "a literal field's privacy flows into the record[V] element (public <: private)" $
       compileErrorCodes "agent f(s: string of private) -> record[string of private] { { auth = s, accept = \"*\" } }" `shouldBe` []
 
+    it "a spread-free literal is still ONE makeRecord (no merge is synthesized)" $ do
+      let operations = entryBodyOperations (loweredTestModule "agent f() -> record[string] { { a = \"x\", b = \"y\" } }") "f"
+      [map fst recordOperation.entries | OperationMakeRecord recordOperation <- operations] `shouldBe` [["a", "b"]]
+      [() | OperationDelegate _ <- operations] `shouldBe` []
+
+  describe "record spread" $ do
+    -- A spread needs no IR node and no runtime support: it desugars to the SAME
+    -- `prelude.record.merge` primitive a partial application's residual body already synthesizes.
+    let spreadSource = "type item = { id: string, done: boolean }\nagent complete(target: item) -> item { { ...target, done = true } }"
+
+    it "desugars `{...base, k = v}` into a delegate to prelude.record.merge" $
+      [target | OperationDelegate operation <- entryBodyOperations (loweredTestModule spreadSource) "complete", CalleeName target <- [operation.target]]
+        `shouldBe` [QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}]
+
+    it "puts the spread base on merge's LEFT and the written fields on its RIGHT, so the later entry wins" $ do
+      -- Swapping them would make `{...target, done = true}` silently keep the base's `done` — the
+      -- override direction the checker types the literal by, pinned against the emitted call.
+      let operations = entryBodyOperations (loweredTestModule spreadSource) "complete"
+          base = [operation.output | OperationGetField operation <- operations, operation.field == "target"]
+          written = [recordOperation.output | OperationMakeRecord recordOperation <- operations, map fst recordOperation.entries == ["done"]]
+          mergeEntries =
+            [ recordOperation.entries
+              | OperationMakeRecord recordOperation <- operations,
+                map fst recordOperation.entries == [recordMergeLeftLabel, recordMergeRightLabel]
+            ]
+      case (base, written, mergeEntries) of
+        ([baseVariable], [writtenVariable], [entries]) -> do
+          lookup recordMergeLeftLabel entries `shouldBe` Just baseVariable
+          lookup recordMergeRightLabel entries `shouldBe` Just writtenVariable
+        other -> expectationFailure ("expected one base read, one written record and one merge argument, got " <> show other)
+
+    it "folds several entries left to right: a run of written fields is one record, each spread its own merge" $ do
+      let source =
+            "type item = { id: string, done: boolean, note: string }\n"
+              <> "agent blend(left: item, right: item) -> item { { ...left, note = \"n\", ...right, done = true } }"
+          operations = entryBodyOperations (loweredTestModule source) "blend"
+          merges = [() | OperationDelegate operation <- operations, CalleeName target <- [operation.target], target == QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}]
+      -- Four segments (left, {note}, right, {done}) fold with three merges.
+      length merges `shouldBe` 3
+      [map fst recordOperation.entries | OperationMakeRecord recordOperation <- operations]
+        `shouldBe` [ ["note"],
+                     ["done"],
+                     [recordMergeLeftLabel, recordMergeRightLabel],
+                     [recordMergeLeftLabel, recordMergeRightLabel],
+                     [recordMergeLeftLabel, recordMergeRightLabel]
+                   ]
+
+    it "lowers a lone `{...base}` to the base itself (nothing to merge it with)" $ do
+      let source = "type item = { id: string }\nagent copy(target: item) -> item { { ...target } }"
+      [() | OperationDelegate _ <- entryBodyOperations (loweredTestModule source) "copy"] `shouldBe` []
+
   describe "the http stdlib (primitive.http)" $ do
     it "types `http.fetch` as an effect returning { status: integer, body: string }" $
       compileErrorCodes "agent f() -> string {\n  http.fetch(url = \"https://x\", method = \"GET\", headers = {}, body = http.text(content = \"\")).body\n}\n" `shouldBe` []
@@ -387,6 +438,61 @@ spec = describe "lowerModule (via compile)" $ do
           violation <- sequenceDropViolations sequenceBlock
         ]
         `shouldBe` []
+
+  -- An anonymous agent emits exactly what a named local agent emits — the same `BlockAgent` wrapper
+  -- over a body sequence, made first-class by the same `OperationMakeClosure`. That equivalence is
+  -- what lets the runtime stay untouched, so it is asserted rather than assumed.
+  describe "an anonymous agent expression lowers to a closure" $ do
+    let anonymousSource =
+          "agent apply_each(values: array[integer], step: agent (value: integer) -> integer) -> array[integer] {\n"
+            <> "  for (let value in values) { next step(value = value) }\n"
+            <> "}\n"
+            <> "agent bump(values: array[integer]) -> array[integer] {\n"
+            <> "  apply_each(values = values, step = agent (value: integer) -> integer { value + 1 })\n"
+            <> "}"
+
+    it "makes a closure at the call site rather than loading a named agent" $ do
+      let operations = entryBodyOperations (loweredTestModule anonymousSource) "bump"
+      [() | OperationMakeClosure _ <- operations] `shouldBe` [()]
+      [() | OperationLoadAgent _ <- operations] `shouldBe` []
+
+    it "wraps the body in a `BlockAgent` under the anonymous debug label" $ do
+      let irModule = loweredTestModule anonymousSource
+      case namedAgentBlocks irModule "agent" of
+        [agent] -> do
+          objectFieldNames agent.schema.input `shouldBe` ["value"]
+          blockKind irModule agent.body `shouldBe` Just "sequence"
+        other -> expectationFailure ("expected exactly one anonymous agent block, got " <> show (length other))
+
+    it "emits the same block kinds a named local agent does" $ do
+      let namedSource =
+            "agent apply_each(values: array[integer], step: agent (value: integer) -> integer) -> array[integer] {\n"
+              <> "  for (let value in values) { next step(value = value) }\n"
+              <> "}\n"
+              <> "agent bump(values: array[integer]) -> array[integer] {\n"
+              <> "  agent step(value: integer) -> integer { value + 1 }\n"
+              <> "  apply_each(values = values, step = step)\n"
+              <> "}"
+      Set.fromList (blockKinds (loweredTestModule anonymousSource))
+        `shouldBe` Set.fromList (blockKinds (loweredTestModule namedSource))
+
+    it "keeps a variable the closure captures alive (read through the closure's scope chain)" $ do
+      let operations =
+            entryBodyOperations
+              ( loweredTestModule
+                  ( "agent apply_each(values: array[integer], step: agent (value: integer) -> integer) -> array[integer] {\n"
+                      <> "  for (let value in values) { next step(value = value) }\n"
+                      <> "}\n"
+                      <> "agent scale(values: array[integer]) -> array[integer] {\n"
+                      <> "  let factor = 2\n"
+                      <> "  apply_each(values = values, step = agent (value: integer) -> integer { value * factor })\n"
+                      <> "}"
+                  )
+              )
+              "scale"
+      case [variable | OperationBindPattern bindOperation <- operations, PatternVariable variable <- [bindOperation.pattern]] of
+        [variable] -> droppedVariables operations `shouldNotContain` [variable]
+        other -> expectationFailure ("expected exactly one let-bound variable, got " <> show other)
 
   describe "partial application (`_` holes) lowers to a closure" $ do
     let scaleDecl = "agent scale(factor: number, value: number) -> number { factor * value }\n"

@@ -221,6 +221,14 @@ data AgentDeclaration (phase :: Phase) = AgentDeclaration
 instance HasSourceSpan (AgentDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
+-- | The @name@ an anonymous agent expression ('ExpressionAgent') carries. Nothing binds such an agent
+-- to a name, but the field is not optional: it exists so lowering can label the emitted IR block, and
+-- that label is the only place this text reaches. It is deliberately the keyword itself rather than a
+-- synthesised unique name — a synthesised name would read like a user-written identifier if it ever
+-- surfaced in a diagnostic, which is precisely the confusion this form must not create.
+anonymousAgentName :: Text
+anonymousAgentName = "agent"
+
 -- | @request name[generics](label : type ?= default, ...) -> T@
 data RequestDeclaration (phase :: Phase) = RequestDeclaration
   { annotation :: Maybe Text,
@@ -957,6 +965,13 @@ data Expression (phase :: Phase) where
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | First-class handler provider
   ExpressionHandler :: HandlerExpression phase -> Expression phase
+  -- | @[private] agent (params) [-> T] [with E] { body }@ — an anonymous agent in expression
+  -- position. It carries the very same 'AgentDeclaration' node a named local agent does, so every
+  -- later phase reuses the local-agent path (resolution, checking, the closure lowering) instead of a
+  -- parallel one; only the name differs, and an anonymous agent's is the fixed 'anonymousAgentName'
+  -- label. Because nothing binds it, it cannot be self-recursive, and it takes no doc annotation
+  -- (documenting the @let@ that binds it is the way to stamp the value).
+  ExpressionAgent :: AgentDeclaration phase -> Expression phase
   -- | @module.target@ — synthesised by the Identifier from a field-access chain
   -- whose left-most segment resolves to a module; never produced by the parser
   ExpressionQualifiedReference :: QualifiedReferenceExpression phase -> Expression phase
@@ -979,6 +994,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionTypeApplication expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandler expression -> expression.sourceSpan
+    ExpressionAgent declaration -> declaration.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
 
 data LiteralExpression (phase :: Phase) = LiteralExpression
@@ -1021,16 +1037,32 @@ data RecordExpression (phase :: Phase) = RecordExpression
 instance HasSourceSpan (RecordExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
+-- | One element of a record literal, in source order. Order is what makes the two forms compose: a
+-- later entry OVERRIDES an earlier one on a shared key, so @{ ...base, done = true }@ reads as
+-- "everything base has, then this field on top" while @{ done = true, ...base }@ lets the base win.
+data RecordEntry (phase :: Phase) where
+  -- | @label = value@ — one written field.
+  RecordEntryField :: RecordField phase -> RecordEntry phase
+  -- | @...base@ — every field of @base@, contributed at this position.
+  RecordEntrySpread :: Expression phase -> RecordEntry phase
+
+instance HasSourceSpan (RecordEntry phase) where
+  sourceSpanOf = \case
+    RecordEntryField field -> field.sourceSpan
+    -- A spread has no node of its own; the base expression is also where a "not an object" diagnostic
+    -- belongs, so its span is the entry's.
+    RecordEntrySpread value -> sourceSpanOf value
+
 -- | @label = value@ in a record literal. The key is a value on the wire, not a reference to a
 -- declaration, so it carries no resolution — only its own span, for key-level diagnostics.
-data RecordEntry (phase :: Phase) = RecordEntry
+data RecordField (phase :: Phase) = RecordField
   { name :: Text,
     value :: Expression phase,
     sourceSpan :: SourceSpan
   }
 
-instance HasSourceSpan (RecordEntry phase) where
-  sourceSpanOf entry = entry.sourceSpan
+instance HasSourceSpan (RecordField phase) where
+  sourceSpanOf field = field.sourceSpan
 
 -- | Arguments are keyword-labelled; source order is preserved
 data CallExpression (phase :: Phase) = CallExpression
@@ -1832,6 +1864,10 @@ deriving stock instance (ShowPhase phase) => Show (RecordExpression phase)
 deriving stock instance (EqPhase phase) => Eq (RecordEntry phase)
 
 deriving stock instance (ShowPhase phase) => Show (RecordEntry phase)
+
+deriving stock instance (EqPhase phase) => Eq (RecordField phase)
+
+deriving stock instance (ShowPhase phase) => Show (RecordField phase)
 
 deriving stock instance (EqPhase phase) => Eq (CallExpression phase)
 

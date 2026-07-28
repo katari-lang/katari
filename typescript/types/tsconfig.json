@@ -1,6 +1,10 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
+    // The published type surface stays Node-free: no ambient `@types` at all, so nothing under `src` can
+    // lean on a Node global and have it silently ride into the shipped `.d.ts`. The trip-wire test DOES
+    // need those globals (it reads repository files), so it is typechecked separately under
+    // `tsconfig.test.json` rather than by relaxing the rule here.
     "types": []
   },
   "include": [

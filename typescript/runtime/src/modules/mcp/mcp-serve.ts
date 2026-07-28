@@ -25,6 +25,7 @@
 import type { Json } from "@katari-lang/types";
 import { messageOf } from "../../runtime/actor/failure.js";
 import type { ProjectActor } from "../../runtime/actor/project-actor.js";
+import { CALL_ERROR } from "../../runtime/engine/dynamic-dispatch.js";
 import { jsonToValue, valueToJson } from "../../runtime/value/codec.js";
 import { schemaToJson } from "../../runtime/value/schema-json.js";
 import type { Value } from "../../runtime/value/types.js";
@@ -271,9 +272,10 @@ export function unknownMcpServeEndpoint(): McpServeEndpoint {
 
 /** Whether a thrown payload is the dynamic-dispatch schema violation (`reflection.call_error`). Shared
  *  with the webhook reply path in the facade — both boundaries turn it into "the caller's request was
- *  bad" rather than "the program failed". */
+ *  bad" rather than "the program failed". The ctor name comes from the dispatch that AUTHORS the error
+ *  (`CALL_ERROR`), so this recogniser cannot drift from what is actually thrown. */
 export function isCallError(value: Value): boolean {
-  return value.kind === "record" && String(value.ctor) === "prelude.reflection.call_error";
+  return value.kind === "record" && String(value.ctor) === CALL_ERROR;
 }
 
 /** The human-readable half of a `reflection.call_error` (its `message` field), for the JSON-RPC

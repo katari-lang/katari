@@ -91,6 +91,37 @@ hoverSpec = describe "hoverAt" $ do
     (hover >>= (.qualifiedName)) `shouldBe` Nothing
     (renderHoverType <$> (hover >>= (.semanticType))) `shouldBe` Just "string"
 
+  -- An anonymous agent has no name to hover, so the `agent` keyword stands in for it: that is where
+  -- the closure's own type is recorded, and where a hover on the construct has to land.
+  it "shows the closure's type on an anonymous agent's `agent` keyword" $ do
+    let snapshot =
+          snapshotOf
+            [ ( "anon",
+                Text.unlines
+                  [ "agent make() -> agent (value: integer) -> integer {", -- line 1
+                    "  agent (value: integer) -> integer { value + 1 }", -- line 2
+                    "}" -- line 3
+                  ]
+              )
+            ]
+        hover = hoverAt snapshot (ModuleName "anon") (at 2 4)
+    (renderHoverType <$> (hover >>= (.semanticType)))
+      `shouldBe` Just "agent(value: integer) -> integer"
+
+  it "shows an anonymous agent's parameter type inside its body" $ do
+    let snapshot =
+          snapshotOf
+            [ ( "anon",
+                Text.unlines
+                  [ "agent make() -> agent (value: integer) -> integer {", -- line 1
+                    "  agent (value: integer) -> integer { value + 1 }", -- line 2
+                    "}" -- line 3
+                  ]
+              )
+            ]
+        hover = hoverAt snapshot (ModuleName "anon") (at 2 40)
+    (renderHoverType <$> (hover >>= (.semanticType))) `shouldBe` Just "integer"
+
 ---------------------------------------------------------------------------------------------------
 -- Definition
 ---------------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/types",
-  "version": "0.1.0-rc10",
+  "version": "0.1.0-rc11",
   "description": "Shared type definitions for Katari Language",
   "type": "module",
   "main": "src/index.ts",
@@ -27,7 +27,8 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "typecheck": "tsc --noEmit"
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
   "author": "yukikurage",
   "license": "MIT",
@@ -39,8 +40,10 @@
   "homepage": "https://katari-lang.dev",
   "bugs": "https://github.com/katari-lang/katari/issues",
   "devDependencies": {
+    "@types/node": "^25.9.2",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3",
-    "unrun": "^0.3.1"
+    "unrun": "^0.3.1",
+    "vitest": "^4.1.8"
   }
 }
