@@ -196,12 +196,21 @@ jobs:
         shell: bash
         run: |
           VERSION="${TAG#v}"
-          # Stable -> latest; a pre-release publishes under its identifier (rc, beta, ...) so
-          # `npm install @katari-lang/cli` never resolves to one by accident.
+          # Stable -> latest. Pre-1.0, the rc line IS the supported line: the README's plain
+          # `npm install @katari-lang/cli` must resolve to the current rc, not to a months-old
+          # one (a `latest` pointing at rc3 while rc11 shipped is how every cold-start user got
+          # a toolchain that no current doc describes). So rc publishes as BOTH `rc` and `latest`
+          # is not expressible in one publish — `latest` wins, and the `rc` alias is retired.
+          # Other pre-release identifiers (beta, ...) keep publishing under their own tag so an
+          # experiment never becomes the default by accident. Revisit at 1.0: stable returns to
+          # owning `latest`, and rc goes back under `rc`.
           if [[ "$VERSION" == *-* ]]; then
             SUFFIX="${VERSION#*-}"
             DIST_TAG="${SUFFIX%%[.0-9]*}"
             DIST_TAG="${DIST_TAG:-next}"
+            if [[ "$DIST_TAG" == "rc" ]]; then
+              DIST_TAG="latest"
+            fi
           else
             DIST_TAG="latest"
           fi
