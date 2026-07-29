@@ -120,3 +120,27 @@ agent text(target: unknown) -> string {
     case _ -> ""
   }
 }
+
+@"The STRING at object key @key@ — `field` and `text` in one step, with a @fallback@ (default `\"\"`) for
+every way the read can come up empty: @target@ is not a record, the key is absent, or the value under it is
+not a string. This is the one composite reader, because the two-step spelling
+(`text(target = field(target = ..., key = ...))`) is what a document walker actually writes at nearly every
+step — a renderer over an AI reply or a store row reaches for a NAMED TEXT FIELD far more often than for
+any other shape, and nesting the two readers per field turned every such line into a bracket-counting
+exercise. The @fallback@ is why this is not merely the two calls stacked: `text` alone can only degrade to
+`\"\"`, so a caller wanting a placeholder (\"(untitled)\", \"unknown\") had to branch on the empty string
+afterwards and could not tell an ABSENT field from one holding `\"\"`. It is deliberately ONE step deep: a
+path expression (\"a.b.c\") would need a mini-language with its own escaping rules, and nesting `field` for
+the rare deep read stays perfectly readable."
+agent text_at(
+  @"The document to read from; any value, and any non-record answers @fallback@." target: unknown,
+  @"The object key to read." key: string,
+  @"The value when the key is absent, or holds anything but a string." fallback: string ?= "",
+) -> string {
+  // Matched here rather than composed as `text(field(...))`: `text` folds a non-string to `""`, which
+  // would swallow @fallback@ at exactly the case @fallback@ exists for.
+  match (field(target = target, key = key)) {
+    case string(string_value) -> string_value
+    case _ -> fallback
+  }
+}

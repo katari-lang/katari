@@ -14,7 +14,8 @@
 //     `use store.scope(path = "core")` every operation's key is prefixed with `core/`; nested
 //     scopes accumulate prefixes; the outermost bare perform is project-root access. An agent
 //     dispatched inside a workspace lives in that directory BY CONSTRUCTION — it holds no value
-//     it could widen.
+//     it could widen. A path is `/`-separated `safe_segment`s and a malformed one panics, because
+//     that construction is only as sound as the strings a program puts in it.
 //   - FACILITY: a workspace-relative toolset — a package (a memory, a task list) whose tools open
 //     ONE fixed subdirectory scope (`use store.scope(path = "memory")`) around their own
 //     operations. The path is the package's constant; WHERE the facility's data lives is the
@@ -119,6 +120,86 @@ both). The default @path@ of \"\" lists the workspace itself; a subdirectory pat
 the path parameter is how a prefix travels for listings, since a listing has no key to carry it."
 request list(@"The subdirectory to list, relative to the current workspace; \"\" is the workspace itself." path: string ?= "") -> array[entry]
 
+// ── path segments: the one spelling a name in a key may take ─────────────────────────────────────
+//
+// A key is path-like and a workspace is a prefix of it, so a NAME that lands in either is structural: a
+// worker called "a/b" is two directories, one called ".." climbs out of the workspace its tools were
+// meant to be confined to, and one called "" collapses a prefix into a stray separator. The geometry the
+// store's whole design rests on — an agent dispatched inside a workspace lives there BY CONSTRUCTION —
+// is undone by a single unchecked string, and the strings most likely to reach here are the ones a MODEL
+// chose (a worker it named, a metric series it invented).
+//
+// So the charset lives HERE, once, instead of being re-derived per app. The two halves are deliberately
+// different shapes, because they answer to different owners: `safe_segment` is TOTAL and answers `null`
+// for the app to turn into a corrective sentence (a model's bad name is an ordinary event, not a bug),
+// while `scope` PANICS on a malformed path (a program that opened a workspace on unvalidated input has a
+// defect, and a defect is the runtime's channel, not a value to route).
+
+@"Canonicalise @name@ into a store path SEGMENT, or `null` when it cannot be one: trimmed, lower-cased,
+and then required to be non-empty and spelled only in lowercase letters, digits, `-` and `_`. ONE
+offending character rejects the whole name — this is not a sanitiser, and deliberately so: silently
+stripping a `/` out of \"a/b\" would hand back \"ab\", a DIFFERENT name than the one the caller asked
+for, and two distinct requests would quietly land in one place.
+
+The charset is what a KEY can hold without meaning something else. No `/` (that is a new segment), so no
+`.` and therefore no `..` (that would climb out of the workspace a facility exists to confine), no
+whitespace, and no case distinction — a store key compares byte-wise, so \"Weight\" and \"weight\" would
+be two series a reader sees as one.
+
+Reach for it wherever a name a MODEL or a USER supplied becomes part of a key (a worker's directory, a
+metric series, a topic): the answer is the name to store under, and `null` is the app's cue to write its
+own corrective sentence back to whoever proposed it. The trimming and lower-casing are part of the
+answer, not a precondition — pass the raw text and store what comes back, so the same name typed twice
+with different spacing or case is the same cell."
+agent safe_segment(@"The proposed name, exactly as it was supplied — untrimmed and in any case." name: string) -> string | null {
+  let normalized = string.to_lower(value = string.trim(value = name))
+  if (normalized == "" || !array.fold(target = string.split(value = normalized, separator = ""), initial = true, step = segment_character_step)) {
+    null
+  } else {
+    normalized
+  }
+}
+
+// One character of a candidate segment, folded: Katari has no character classes, so membership is a
+// `contains` over the charset spelled out. The accumulator short-circuits nothing (a fold visits every
+// element) — the strings are name-length, so the whole check is cheaper than the branch that would.
+agent segment_character_step(@"Whether every earlier character was in the charset." accumulator: boolean, @"The one character being judged." value: string) -> boolean {
+  accumulator && string.contains(value = "abcdefghijklmnopqrstuvwxyz0123456789-_", search = value)
+}
+
+// Whether a whole workspace PATH is well formed: one or more `/`-separated segments, each of them
+// already canonical (`safe_segment` answers the segment itself). Comparing against `safe_segment`'s
+// answer rather than re-checking the charset is what keeps ONE definition of a legal name: a path is
+// legal exactly when every piece of it is a name `safe_segment` would have handed back unchanged.
+agent is_safe_path(@"The candidate workspace path." path: string) -> boolean {
+  array.fold(target = string.split(value = path, separator = "/"), initial = true, step = path_segment_step)
+}
+
+agent path_segment_step(@"Whether every earlier segment was canonical." accumulator: boolean, @"The one segment being judged." value: string) -> boolean {
+  accumulator && safe_segment(name = value) == value
+}
+
+// @path@ back, or a PANIC when it is not a well-formed workspace path. A malformed path reaching `scope`
+// is a DEFECT and not an outcome: the path a workspace opens is the program's own geometry, so a `..` or
+// an empty segment in it means the program routed unvalidated input (a model's word) into its store
+// layout without asking `safe_segment` first. Recovering from that is not a thing a caller can do —
+// there is no correct directory to fall back to — and returning a value would let the run keep writing
+// into whatever place the bad prefix produced, which is the one failure the geometry exists to prevent.
+//
+// A program cannot RAISE a panic (see the `prelude` header: `panic` is the runtime's own channel and has
+// no declaration a program can perform), so the defect is spelled with the one total-to-partial door the
+// language has — a zero divisor, which the runtime reports as a panic ("division by zero"). The message
+// is therefore the runtime's own and says nothing about paths; this agent's NAME is what identifies the
+// defect in the trace, and it exists for that reason as much as for the branch.
+agent panic_on_unsafe_path(@"The candidate workspace path." path: string) -> string {
+  if (is_safe_path(path = path)) {
+    path
+  } else {
+    let _defect = 1 / 0
+    path
+  }
+}
+
 // ── scope: the workspace — the store's ambient working directory ─────────────────────────────────
 
 @"Open the workspace at @path@ under the current one, for the extent of @continuation@ — the
@@ -133,14 +214,22 @@ never a workspace's. And a scope is a one-way descent: there is deliberately no 
 several workspaces share is NOT reached by path escape — it is reached by a REQUEST served ABOVE the
 workspaces, whose clause opens the shared subtree's own scope in its body. That proxy is the
 semantics: a request is what an inner install can never capture by accident. `share` / `shared`
-below is that proxy, generalised once so it need not be respelt per shared cell."
+below is that proxy, generalised once so it need not be respelt per shared cell.
+
+@path@ is one or more `/`-separated SEGMENTS, each spelled as `safe_segment` requires (lowercase
+letters, digits, `-`, `_`). A path that is not — an empty segment, a `..`, a stray space, a name a model
+chose and nobody checked — PANICS here rather than opening a workspace somewhere else: the descent is
+the program's own geometry, so a malformed one is a defect in the program and not an outcome a caller
+could route. Validate a name that came from OUTSIDE the program with `safe_segment` first, and render
+its `null` into whatever sentence the proposer should read."
 agent scope[R, effect E](
-  @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"." path: string,
+  @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"; `/`-separated `safe_segment`s, and a malformed one panics." path: string,
   @"Runs with every store operation prefixed; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list},
 ) -> R with E | get | set | delete | list {
   // Clause parameter names are structural, so the `list` clause below MUST bind `path` — which
-  // would shadow this agent's own `path`. The prefix is rebound once, before the handler.
-  let base = path
+  // would shadow this agent's own `path`. The prefix is rebound once, before the handler — and the
+  // rebinding is where the descent is checked, so no handler below can ever prefix with a bad one.
+  let base = panic_on_unsafe_path(path = path)
   // PARALLEL on purpose: prefixing is stateless arithmetic, and a sequential handler here would
   // needlessly serialize a turn's concurrent tool batch through the workspace.
   use parallel handler {
@@ -337,6 +426,41 @@ agent shared_as[T extends unknown](
   // narrowing. The `extends unknown` bound pins T's privacy attribute to public, which `shared`'s own
   // public `unknown` answer already demands of anything crossing it.
   json.validate[T](value = shared(task = task))
+}
+
+@"The TYPED shared CRITICAL SECTION: run @task@ in the shared place, as one `store.exclusive` of that
+place's serial domain, and hand its answer back as a T — `shared_as` and `exclusive_as` in one call.
+
+This exists because the two typed wrappers DO NOT COMPOSE, and the reason is structural rather than an
+oversight. `shared_as[T]` reads T off a task that answers T; a task that wraps its body in
+`store.exclusive` answers whatever `exclusive` answers, and `exclusive` is a REQUEST — its reply crosses
+the handler boundary as `unknown`, which no inner `exclusive_as` can restore (the narrowing would have to
+happen inside a task the outer wrapper cannot see the type of). So the read-modify-write of a shared cell
+— the single most ordinary thing to do with one — fell out of both wrappers, and every site wrote a bare
+`shared` around a bare `exclusive` plus a hand-written `json.validate`, each with its own paragraph
+re-deriving why the helpers did not apply. This is that composition, spelled once.
+
+Everything both wrappers say still holds. The task runs AT THE `share` INSTALL SITE (so a subdirectory of
+the shared place is opened INSIDE the task body, `use store.scope(path = \"shared/soul\")` as its first
+move), it binds to the NEAREST enclosing `share`, and inside it the section is atomic against every other
+`exclusive` of that place's domain — which is the domain that matters here, since the shared place is
+where the contention is. The row is FIXED to the four store operations: @task@ does not perform
+`exclusive` itself (this agent wraps it), so it reads, computes and writes and nothing else.
+
+T is read off @task@'s own declared result type and must be PUBLIC, for the same reason `shared_as`'s
+must: the answer crosses two `unknown` request boundaries on the way out. A non-conforming answer throws
+`json.validation_error` and is a WRITER's schema mistake, not a condition to recover from."
+agent shared_exclusive_as[T extends unknown](
+  @"The critical section, run in the shared place; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> T with get | set | delete | list,
+) -> T with shared | prelude.throw[json.validation_error] {
+  // The one indirection the composition needs: `shared`'s task may perform `exclusive`, so the section
+  // is wrapped in a task that does exactly that and nothing else. Both boundaries erase the answer to
+  // `unknown`, so the single `validate` at the end is what restores it — narrowing once, at the outside,
+  // where T is actually known.
+  agent section(value: null) -> unknown with get | set | delete | list | exclusive {
+    exclusive(task = task)
+  }
+  json.validate[T](value = shared(task = section))
 }
 
 @"Open the SHARED PLACE for the extent of @continuation@ — the bare `use store.share` form (no

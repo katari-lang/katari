@@ -12,6 +12,28 @@ agent main() -> string {
   f"slept for ${string.to_string(value = after - before)}ms"
 }
 
+@"Entry: the CIVIL labels — what a wall clock reads, rendered for a person or a model. Every one of
+these is pure arithmetic over a FIXED instant and a FIXED offset, so the text below is exact and reads
+the same forever: no clock is consulted at all. `time.stamp` joins the date, the weekday, the time and
+the offset into the one line an app injects into a turn; `time.add_days` does calendar arithmetic on
+that same `YYYY-MM-DD` shape, anchoring at NOON so a daylight-saving step cannot push the answer onto
+the neighbouring date, and answering `null` for a date that does not exist rather than clamping it."
+agent civil_labels() -> string {
+  // 2026-07-26T05:32:00Z — a Sunday afternoon once it is read at +09:00.
+  let instant = 1785043920000
+  let stamp = time.stamp(epoch_milliseconds = instant, offset_minutes = 540)
+  let next_week = match (time.add_days(date = time.date_label(epoch_milliseconds = instant, offset_minutes = 540), days = 7, offset_minutes = 540)) {
+    case null -> "(unreadable)"
+    case day -> day
+  }
+  // Validated, not clamped: February 30th is no date, so the answer is `null` rather than March 2nd.
+  let impossible = match (time.add_days(date = "2026-02-30", days = 1, offset_minutes = 540)) {
+    case null -> "(no such date)"
+    case day -> day
+  }
+  f"${stamp} | next week=${next_week} | ${impossible} | half-hour zone=${time.offset_label(offset_minutes = 0 - 330)}"
+}
+
 @"A private signal used only to stop the watch below once it has seen enough occurrences."
 data enough()
 

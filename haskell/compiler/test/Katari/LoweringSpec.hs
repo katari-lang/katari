@@ -9,7 +9,7 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.IR
-import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
+import Katari.Data.JSONSchema (AdditionalProperties (..), DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
@@ -561,6 +561,78 @@ spec = describe "lowerModule (via compile)" $ do
 
     it "infers and propagates io — a caller needs no effect annotation" $
       compileErrorCodes (ext <> "agent f() -> integer { fetch(headers = {}, body = \"\").status }\n") `shouldBe` []
+
+  -- The nullary agent — `agent f() -> T { ... }` and `f()` — is the language's own zero-argument form,
+  -- not a hole a sugar has to fill. It is pinned here because a whole family of stdlib slots is typed
+  -- `agent (value: null) -> T` (`prelude.catch`, `store.shared`, `region.post`, `replay.*`), and the
+  -- reason a nullary agent may stand in one is structural: an object type names only the fields it
+  -- REQUIRES, so `{value: null}` is a subtype of `{}` and an agent's parameter record is contravariant.
+  -- That single fact is what lets an app drop the `(value: null)` / `value = null` ritual without any
+  -- stdlib or compiler change, so it is asserted rather than assumed.
+  describe "the nullary agent (a zero-parameter agent and its zero-argument call)" $ do
+    it "declares a zero-parameter agent and calls it with no arguments" $
+      compileErrorCodes "agent thunk() -> integer { 1 }\nagent caller() -> integer { thunk() }" `shouldBe` []
+
+    it "gives it an OPEN, field-less input schema — which is why a `value = null` call still conforms" $ do
+      -- The runtime's delegate acceptance check rejects an extra key only on a CLOSED object, so this
+      -- openness is what makes a `(value: null)` slot's internal `task(value = null)` land safely on a
+      -- nullary task at run time, not merely typecheck.
+      let irModule = loweredTestModule "agent thunk() -> integer { 1 }"
+      case entryBlock irModule "thunk" of
+        Just (BlockAgent agent) -> case agent.schema.input of
+          SchemaObject objectSchema -> do
+            objectSchema.properties `shouldBe` []
+            objectSchema.required `shouldBe` []
+            objectSchema.additionalProperties `shouldNotBe` AdditionalPropertiesBoolean False
+          other -> expectationFailure ("expected an object input schema, got " <> show other)
+        other -> expectationFailure ("expected a BlockAgent entry, got " <> show other)
+
+    it "takes a `value = null` argument anyway — the caller need not know the callee is nullary" $
+      compileErrorCodes "agent thunk() -> integer { 1 }\nagent caller() -> integer { thunk(value = null) }" `shouldBe` []
+
+    it "carries an anonymous nullary agent as a value" $
+      compileErrorCodes
+        ( "agent run(task: agent () -> integer) -> integer { task() }\n"
+            <> "agent caller() -> integer { run(task = agent () -> integer { 1 }) }"
+        )
+        `shouldBe` []
+
+    it "stands where a `(value: null)` task is expected — the ritual parameter is a supertype, not a demand" $
+      compileErrorCodes
+        ( "agent run(task: agent (value: null) -> integer) -> integer { task(value = null) }\n"
+            <> "agent caller() -> integer { run(task = agent () -> integer { 1 }) }"
+        )
+        `shouldBe` []
+
+    it "stands where an `(input: null)` task is expected too — the ritual parameter's NAME does not travel" $
+      compileErrorCodes
+        ( "agent run(task: agent (input: null) -> integer) -> integer { task(input = null) }\n"
+            <> "agent caller() -> integer { run(task = agent () -> integer { 1 }) }"
+        )
+        `shouldBe` []
+
+    it "stands in a real stdlib slot: `prelude.catch`'s `task: agent (value: null) -> T`" $
+      compileErrorCodes
+        ( "data boom(reason: string)\n"
+            <> "agent caught() -> integer {\n"
+            <> "  prelude.catch[integer, boom, pure](\n"
+            <> "    task = agent () -> integer with prelude.throw[boom] { 1 },\n"
+            <> "    recover = agent (error: boom) -> integer { 0 },\n"
+            <> "  )\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    -- The other direction is NOT sugar and stays an error: a declared `value: null` is a REQUIRED
+    -- field, and an empty argument record does not supply it. An agent meant to be called bare is
+    -- declared bare — which is the whole migration rule.
+    it "still rejects a bare call on an agent that declares a required `value: null`" $
+      compileErrorCodes "agent unit(value: null) -> integer { 1 }\nagent caller() -> integer { unit() }"
+        `shouldContain` ["K3001"]
+
+    it "still rejects a bare call on an agent that declares a required `input: null`" $
+      compileErrorCodes "agent unit(input: null) -> integer { 1 }\nagent caller() -> integer { unit() }"
+        `shouldContain` ["K3001"]
 
 ------------------------------------------------------------------------------------------------
 -- Driver

@@ -1975,6 +1975,98 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
+  -- The composition helpers added for the stdlib's 2026-07-29 pass. Each of these exists because a
+  -- CALL SHAPE was previously unwritable or hand-rolled, so the assertion that matters is that the
+  -- shape type-checks against the real wired-in stdlib — a signature that only reads well is worth
+  -- nothing if the inference behind it does not admit the call the docs advertise.
+  describe "stdlib composition helpers" $ do
+    it "store.shared_exclusive_as: a shared critical section answers a TYPED value across both request boundaries" $
+      compiledCodes
+        ( "agent driver() -> string with store.get | store.set | store.delete | store.list | store.exclusive | prelude.throw[json.validation_error] {\n"
+            <> "  use store.share\n"
+            <> "  agent save_entry(value: null) -> string {\n"
+            <> "    use store.scope(path = \"shared/digest\")\n"
+            <> "    store.set(key = \"today\", value = \"note\")\n"
+            <> "    \"(saved)\"\n"
+            <> "  }\n"
+            <> "  store.shared_exclusive_as(task = save_entry)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "store.safe_segment / store.scope: a checked name is what a workspace path is built from" $
+      compiledCodes
+        ( "agent open_worker(proposed: string) -> string with store.get | store.set | store.delete | store.list {\n"
+            <> "  match (store.safe_segment(name = proposed)) {\n"
+            <> "    case null -> \"(that name cannot be a directory)\"\n"
+            <> "    case name -> {\n"
+            <> "      use store.workspace(path = f\"workers/${name}\")\n"
+            <> "      store.set(key = \"brief\", value = \"hi\")\n"
+            <> "      name\n"
+            <> "    }\n"
+            <> "  }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "record.set_if: T is read off the target, so a chain over a typed record needs no instantiation" $
+      compiledCodes
+        ( "agent headers(token: string | null, agent_line: string | null) -> record[string] {\n"
+            <> "  let base = record.set(target = record.empty(), key = \"accept\", value = \"application/json\")\n"
+            <> "  record.set_if(target = record.set_if(target = base, key = \"authorization\", value = token), key = \"user-agent\", value = agent_line)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "record.set_if: a chain seeded at record.empty() instantiates T (the element type is only under a union)" $
+      compiledCodes
+        ( "agent arguments(cursor: string | null, limit: integer | null) -> record[unknown] {\n"
+            <> "  record.set_if[unknown](target = record.set_if[unknown](target = record.empty(), key = \"cursor\", value = cursor), key = \"limit\", value = limit)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "http.classify_status: one classifier, and the status rides out on either variant" $
+      compiledCodes
+        ( "agent is_worth_repeating(status: integer, body: string) -> boolean {\n"
+            <> "  match (http.classify_status(status = status, context = \"gmail.send\", message = body)) {\n"
+            <> "    case http.auth_error(status => _, context => _, message => _) -> false\n"
+            <> "    case http.api_error(status => failed, context => _, message => _) -> failed == 429 || failed >= 500\n"
+            <> "  }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "json.text_at / reflection.constructor_of: the two total reads over an unknown payload" $
+      compiledCodes
+        ( "agent describe(error: unknown) -> string {\n"
+            <> "  let kind = match (reflection.constructor_of(value = error)) {\n"
+            <> "    case null -> \"crash\"\n"
+            <> "    case name -> name\n"
+            <> "  }\n"
+            <> "  let line = json.text_at(target = error, key = \"message\", fallback = \"(no message)\")\n"
+            <> "  f\"${kind}: ${line}\"\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "time civil labels: the stamp composes the four renders, and add_days round-trips date_label's shape" $
+      compiledCodes
+        ( "agent lines(at: number, offset: integer) -> array[string] {\n"
+            <> "  let tomorrow = match (time.add_days(date = time.date_label(epoch_milliseconds = at, offset_minutes = offset), days = 1, offset_minutes = offset)) {\n"
+            <> "    case null -> \"(unreadable)\"\n"
+            <> "    case day -> day\n"
+            <> "  }\n"
+            <> "  [\n"
+            <> "    time.stamp(epoch_milliseconds = at, offset_minutes = offset),\n"
+            <> "    time.weekday_label(day = time.day_of_week(epoch_milliseconds = at, offset_minutes = offset)),\n"
+            <> "    time.offset_label(offset_minutes = offset),\n"
+            <> "    tomorrow,\n"
+            <> "  ]\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   describe "anonymous agent expressions" $ do
     it "types a predicate written inline at a higher-order call" $
       compiledCodes

@@ -109,6 +109,20 @@ spec = do
           length dataDeclaration.parameters `shouldBe` 2
         _ -> expectationFailure "expected one data"
 
+    -- `()` means NO parameters and `f()` means NO arguments — the parser inserts nothing. The whole
+    -- zero-argument story rests on that literal reading (an object type names only what it requires,
+    -- so a nullary agent still fits a `(value: null)` slot); a sugar that filled in a `value` here
+    -- would silently change what `agent main() -> string` and `record.empty()` mean.
+    it "parses an empty parameter list as no parameters, and a bare call as no arguments" $ do
+      module' <- parseClean "agent thunk() -> integer { 1 }\nagent caller() -> integer { thunk() }"
+      case module'.declarations of
+        [DeclarationAgent thunk, DeclarationAgent caller] -> do
+          length thunk.parameters `shouldBe` 0
+          case caller.body.returnExpression of
+            Just (ExpressionCall call) -> length call.arguments `shouldBe` 0
+            _ -> expectationFailure "expected a bare call"
+        _ -> expectationFailure "expected two agents"
+
     it "rejects a newline before an agent's body brace (no Allman braces)" $
       shouldFail "agent main() -> integer\n{ 1 }"
 

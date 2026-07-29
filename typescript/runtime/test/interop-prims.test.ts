@@ -169,6 +169,37 @@ describe("prelude.json", () => {
     expect(JSON.parse(fileText.value)).toEqual({ $katari_ref: "blob-x", $katari_semantic_kind: "file" });
   });
 
+  test("a data value's rendered TEXT leads with its `$katari_constructor` tag (what `reflection.constructor_of` reads)", async () => {
+    // `prelude.reflection.constructor_of` is plain Katari: a constructor tag is out of band on a value
+    // (never a field, so no `record.get` reaches it), and its one observable appearance is this text.
+    // That agent scans for the exact `{"$katari_constructor":"` lead and takes the name up to the next
+    // quote — so the ORDER and the SPELLING here, not merely the parsed shape, are its contract.
+    const data: Value = {
+      kind: "record",
+      fields: { message: str("nope") },
+      ctor: createAgentName("prelude.http.auth_error"),
+    };
+    const text = await run("prelude.json.stringify", { value: data });
+    if (text.kind !== "string") throw new Error("expected a string");
+    expect(text.value.startsWith('{"$katari_constructor":"')).toBe(true);
+    expect(text.value.slice('{"$katari_constructor":"'.length).split('"')[0]).toEqual(
+      "prelude.http.auth_error",
+    );
+
+    // A plain record never leads with the tag, so the same scan answers "not a data value".
+    const plain = await run("prelude.json.stringify", {
+      value: { kind: "record", fields: { message: str("nope") } },
+    });
+    if (plain.kind !== "string") throw new Error("expected a string");
+    expect(plain.value.startsWith('{"$katari_constructor":"')).toBe(false);
+
+    // And WHY the text is the route: the tag is not a FIELD. `record.get` (hence `json.field`, hence a
+    // `match` arm) reads own fields only, so reaching for the reserved key on a live data value answers
+    // `null` — the shape an app that dug for the magic key by hand was actually getting.
+    const dug = await run("prelude.record.get", { target: data, key: str("$katari_constructor") });
+    expect(dug).toEqual({ kind: "null" });
+  });
+
   const POINT: JSONSchema = {
     type: "object",
     properties: { x: { type: "integer" }, y: { type: "integer" } },

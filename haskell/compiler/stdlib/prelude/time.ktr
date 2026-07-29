@@ -342,6 +342,129 @@ agent from_rfc3339(value: string) -> number | null {
   }
 }
 
+// ── civil LABELS: the five renders a program shows a person or a model ────────────────────────────
+//
+// `to_rfc3339` is the WIRE render — exact, sortable, and unreadable at a glance. What an app actually
+// puts in front of a person (an operator's clock line) or a model (the "today is" a turn is injected
+// with) is a handful of small civil labels, and every app that had a calendar wrote the same five: a
+// weekday's three letters, an offset's `±HH:MM`, a `YYYY-MM-DD` date, the two joined into a stamp, and
+// a date advanced by whole days. They are here for the ordinary reason — one implementation, one set of
+// edge cases (a negative offset's sign, a day index out of range, a daylight-saving step) — and because
+// getting `add_days` subtly wrong is invisible until a weekly task drifts off its weekday.
+//
+// THERE IS NO PATTERN LANGUAGE, deliberately. A `strftime` would be a second, stringly-typed grammar
+// with its own escaping rules and its own errors, and these five labels are what the demand actually
+// was; a program wanting a sixth composes it from `to_civil`'s fields the way these do.
+//
+// Every label takes `offset_minutes` explicitly, exactly like the arithmetic above — and composing it
+// with `zone_offset` per instant is what makes a named zone's rendering DST-correct.
+
+@"The three-letter English label of an ISO weekday — 1 (Monday) through 7 (Sunday), the numbering
+`day_of_week` answers. Anything outside 1..7 is `\"???\"`, so this is TOTAL: the parameter's type is
+`integer` rather than a closed set, and a label that silently reads \"Mon\" for a bad index would hide
+the arithmetic mistake that produced it.
+
+A LABEL rather than the number, because \"Sat\" is what a model reads as a weekend without being told
+the numbering, and a person reading a clock line does not want to count."
+agent weekday_label(@"The ISO weekday, 1 (Monday) to 7 (Sunday); anything else answers \"???\"." day: integer) -> string {
+  match (day) {
+    case 1 -> "Mon"
+    case 2 -> "Tue"
+    case 3 -> "Wed"
+    case 4 -> "Thu"
+    case 5 -> "Fri"
+    case 6 -> "Sat"
+    case 7 -> "Sun"
+    case _ -> "???"
+  }
+}
+
+@"An offset east of UTC as its `±HH:MM` label — the suffix that makes a rendered wall clock unambiguous,
+so a model reading one can convert it against a timestamp it wrote itself. UTC renders `+00:00` rather
+than `Z`: this is a label for a PERSON beside a civil time, where a sign lines up with every other row
+and a lone letter does not. (`to_rfc3339`, which renders for the WIRE, spells UTC `Z` as RFC3339
+requires — the two are different audiences, not an inconsistency.) A non-whole-hour offset renders
+faithfully (Asia/Kathmandu's 345 is `+05:45`)."
+agent offset_label(@"The offset in minutes EAST of UTC — exactly what `zone_offset` answers." offset_minutes: integer) -> string {
+  agent pad(value: integer, width: integer) -> string {
+    string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
+  }
+  // The sign is taken from the signed value and the magnitude rendered separately, so `-330` reads
+  // `-05:30` rather than the `-5:-30` a component-wise render of a negative offset produces.
+  let sign = if (offset_minutes < 0) { "-" } else { "+" }
+  let magnitude = math.abs(value = offset_minutes)
+  f"${sign}${pad(value = math.floor(value = magnitude / 60), width = 2)}:${pad(value = magnitude % 60, width = 2)}"
+}
+
+@"The instant's civil DATE at @offset_minutes@ (default UTC) as `YYYY-MM-DD` — the date half of
+`to_rfc3339` without the clock, the zone or the `T`.
+
+This is the shape to DATE things with, and the reason is ordering: ISO order is string order, so dates
+in this form sort correctly with `array.sort`, compare with `<`, and group by prefix — a store key
+`entries/2026-07-26` sits under `entries/2026-07` for free. A year outside 0..9999 renders every digit
+(and a leading `-` for a negative one) rather than truncating, which loses the sort property but keeps
+the date honest; the ordinary range is unaffected."
+agent date_label(
+  @"The instant, in epoch milliseconds." epoch_milliseconds: number,
+  @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
+) -> string {
+  agent pad(value: integer, width: integer) -> string {
+    string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
+  }
+  let fields = to_civil(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes)
+  let year = if (fields.year < 0) { "-" ++ pad(value = 0 - fields.year, width = 4) } else { pad(value = fields.year, width = 4) }
+  f"${year}-${pad(value = fields.month, width = 2)}-${pad(value = fields.day, width = 2)}"
+}
+
+@"The instant as a wall clock reads it at @offset_minutes@ (default UTC) —
+`2026-07-26 (Sun) 14:32 +09:00`: the civil date, the weekday, the time to the minute, and the offset,
+in one line.
+
+The whole point is that a reader needs NO arithmetic. A model asked \"how many days until the 31st\" or
+\"is that this week\" has the date AND the weekday in front of it, and a person handed the offset can
+tell at a glance whether the clock is theirs. Seconds are deliberately absent: this is the line an app
+injects into a turn or posts to an operator, where a second's precision is noise. Reach for
+`to_rfc3339` when the reader is a machine."
+agent stamp(
+  @"The instant, in epoch milliseconds." epoch_milliseconds: number,
+  @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
+) -> string {
+  agent pad(value: integer, width: integer) -> string {
+    string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
+  }
+  let fields = to_civil(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes)
+  let weekday = weekday_label(day = day_of_week(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes))
+  let date = date_label(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes)
+  f"${date} (${weekday}) ${pad(value = fields.hour, width = 2)}:${pad(value = fields.minute, width = 2)} ${offset_label(offset_minutes = offset_minutes)}"
+}
+
+@"A civil DATE (`YYYY-MM-DD`) advanced by @days@ whole days at @offset_minutes@, answering a date in the
+same shape — the arithmetic a recurring schedule needs (\"the same weekday next week\", \"three days
+before the due date\"), without the caller touching a calendar. @days@ may be negative.
+
+The date is read at NOON local, not midnight, and that is the load-bearing detail. A day is 86400000
+milliseconds here, but a civil day at a zone's daylight-saving boundary is an hour longer or shorter;
+anchored at midnight, adding whole days lands an hour either side of it and the render falls onto the
+previous or next date — a weekly task quietly walking off its weekday, one hour at a time. Noon is
+twelve hours from either edge, so the same arithmetic cannot cross a date boundary.
+
+TOTAL: a @date@ that is not a `YYYY-MM-DD` civil date answers `null` rather than throwing — the string
+is the whole explanation, so there is nothing a payload could add (the same reason `from_rfc3339`'s
+failure is a `null`). Validated, not clamped: February 30th is `null`, not silently March 2nd."
+agent add_days(
+  @"The starting civil date, `YYYY-MM-DD` — exactly what `date_label` renders." date: string,
+  @"How many whole days to add; may be negative." days: integer,
+  @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
+) -> string | null {
+  // The parse and the render are the SAME pair `date_label` / `from_rfc3339` already own: the date is
+  // completed into an RFC3339 instant at noon with the offset's own label as the zone, and the answer is
+  // re-rendered by `date_label` — so a date this agent accepts is exactly a date it produces.
+  match (from_rfc3339(value = f"${date}T12:00:00${offset_label(offset_minutes = offset_minutes)}")) {
+    case null -> null
+    case instant -> date_label(epoch_milliseconds = instant + days * 86400000, offset_minutes = offset_minutes)
+  }
+}
+
 // ── the zone database: the one offset arithmetic cannot derive ────────────────────────────────────
 //
 // A named zone's offset is a lookup, not a computation: the IANA rules are political, revised several

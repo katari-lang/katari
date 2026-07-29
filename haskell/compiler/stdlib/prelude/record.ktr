@@ -9,6 +9,28 @@ primitive agent get[T](target: record[T], key: string) -> T | null
 @"A copy of the record with @value@ under @key@ (replacing an existing entry)."
 primitive agent set[T](target: record[T], key: string, value: T) -> record[T]
 
+@"A copy of the record with @value@ under @key@ WHEN @value@ is present, and @target@ unchanged when it
+is `null` — the canonical form of a CONDITIONALLY built optional field. An omitted key and a key holding
+`null` are different documents at every boundary that matters (a REST API reads the first as \"leave it
+alone\" and the second as \"set it to nothing\"), so the choice between them cannot be made by writing
+`null` into the record; it has to be made by not writing the key. Spelled by hand that is a four-line
+`match` per field, and a request object with six optional parameters is twenty-four lines of identical
+plumbing whose only variation is a key name — which is exactly where a wrong key or a wrong source
+variable hides. Chained, the whole build is one expression per field:
+`set_if(target = set_if(target = empty(), key = \"cursor\", value = cursor), key = \"limit\", value = limit)`.
+To store an explicit JSON null instead, call `set` — this agent reads `null` as ABSENCE, which is the
+Katari-wide meaning of the value and the reason the two operations stay separate."
+agent set_if[T](
+  @"The record being built." target: record[T],
+  @"The key to set when @value@ is present." key: string,
+  @"The value, or `null` to leave @target@ exactly as it is." value: T | null,
+) -> record[T] {
+  match (value) {
+    case null -> target
+    case present -> set(target = target, key = key, value = present)
+  }
+}
+
 @"A copy of the record without @key@ (unchanged when the key is absent)."
 primitive agent remove[T](target: record[T], key: string) -> record[T]
 

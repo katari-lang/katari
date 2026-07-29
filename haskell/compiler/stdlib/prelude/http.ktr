@@ -25,7 +25,8 @@
 // `fetch_error`, which bubbles from the call site to the nearest handler — so a caller can `use handler {
 // request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
 // control retry. `auth_error` / `api_error` (at the foot of this module) are the CLASSIFIED reading of a
-// non-2xx that an authenticated API integration wants instead of the bare status.
+// non-2xx that an authenticated API integration wants instead of the bare status — `classify_status` is
+// the one classifier that produces them.
 
 // `post_json` parses its reply back to a value. The `json` module qualifier is shadowed HERE by this
 // module's own `json` body variant (below), so import `parse` / `parse_error` by name to reach them.
@@ -165,10 +166,11 @@ agent get(
 // ─── the classified failure of an AUTHENTICATED API call ──────────────────────────────────────────────
 //
 // `fetch_error` and `status_error` above are what the TRANSPORT can say: one for a request that never
-// completed, one for a reply that arrived carrying a non-2xx status. Neither answers the question a package
-// wrapping an authenticated API actually has to answer at that boundary — WHO HAS TO ACT. The two variants
-// below draw exactly that line, and nothing else: `auth_error` is the failure that may need a HUMAN before
-// any retry can succeed, `api_error` is every failure that cannot.
+// completed, one for a reply that arrived carrying a non-2xx status. `status_error` stays exactly as it is,
+// the raw layer's fact — `post_json` throws it and nothing here changes that. Neither answers the question
+// a package wrapping an authenticated API actually has to answer at that boundary — WHO HAS TO ACT. The two
+// variants below draw exactly that line, and nothing else: `auth_error` is the failure that may need a
+// HUMAN before any retry can succeed, `api_error` is every failure that cannot.
 //
 // It lives in the stdlib because it was already the same sum in every package that had one. `gmail` and
 // `google_calendar` each declared this pair, at the same statuses, with the same paragraph in each doc, and
@@ -177,30 +179,84 @@ agent get(
 // vocabulary: a converter matches `http.auth_error` once and covers every API behind it, and the next
 // package inherits the classification instead of re-deciding where the line goes.
 //
+// Both variants CARRY THE STATUS and a caller-written `context`. The status is what makes the vocabulary
+// composable rather than merely shared: a retry policy asks `status` whether a failure is worth repeating
+// (408 / 429 / 5xx) instead of pattern-matching an English sentence, and a classifier that dropped the
+// number forced exactly that. The `context` is the caller's own name for the call, kept out of `message` so
+// a renderer can show either half alone and the server's body is never edited to make room for a prefix.
+//
 // (Packages whose failures are NOT an HTTP status — a gateway's own protocol, a websocket's login — keep
 // their own sums; this is the vocabulary of a REST call's status code, not a synonym for "an error".)
 
-@"An authenticated API call was rejected over WHO IS CALLING: the endpoint answered 401 or 403, so the
-CREDENTIAL is what failed — revoked, expired past what its holder believed, or scoped too narrowly for this
-call. Retrying with the SAME credential cannot succeed; the recovery is a fresh RESOLUTION of it, which is
-why the ordinary composition is a `replay` converter that signals `replay.interrupted`: the re-run resolves
-the credential again, and one the runtime cannot refresh parks the run on a `prelude.oauth.authorize`
-escalation — a human's re-authorization prompt — rather than failing. That is the whole line this variant
-draws: an `auth_error` may need a HUMAN before any retry can work, an `api_error` never does.
+@"An authenticated API call was rejected over WHO IS CALLING: the endpoint answered @status@ — 401 or
+403 — so the CREDENTIAL is what failed: revoked, expired past what its holder believed, or scoped too
+narrowly for this call. Retrying with the SAME credential cannot succeed; the recovery is a fresh
+RESOLUTION of it, which is why the ordinary composition is a `replay` converter that signals
+`replay.interrupted`: the re-run resolves the credential again, and one the runtime cannot refresh parks
+the run on a `prelude.oauth.authorize` escalation — a human's re-authorization prompt — rather than
+failing. That is the whole line this variant draws: an `auth_error` may need a HUMAN before any retry can
+work, an `api_error` never does.
 
 (403 is read as auth even though some APIs also spend it on quota exhaustion. The access-rejection reading
 is the one worth composing a re-resolution around, and a quota 403 that is replayed simply fails again.)
-@message@ carries the status and the server's body."
-data auth_error(message: string)
 
-@"An authenticated API call failed for anything OTHER than the credential: a non-2xx status that is not
-401/403 — a malformed request, a resource that is not there, a rate limit, a server error. Nothing about the
-caller's identity is in question, so backing off and replaying the call AS IT STANDS is the whole recovery
-for the transient half, and the other half (a 400 the service is simply refusing) will keep failing until
-the ARGUMENT changes. Which is why @message@ carries the server's own body verbatim: it is the diagnosis,
-and a model handed this error reads it and adjusts. @message@ carries the status and the server's body."
-data api_error(message: string)
+@context@ says WHICH call failed in the caller's own words, and @message@ carries the server's own body —
+the two halves a human needs, kept apart so a renderer can show either without splitting a string."
+data auth_error(
+  @"The rejecting status: 401 or 403." status: integer,
+  @"Which call failed, in the caller's own words — for a human reading the error (e.g. \"gmail.send\")." context: string,
+  @"The response body, or the reason the caller has instead." message: string,
+)
+
+@"An authenticated API call failed for anything OTHER than the credential: a non-2xx @status@ that is not
+401/403 — a malformed request, a resource that is not there, a rate limit, a server error. Nothing about
+the caller's identity is in question, so backing off and replaying the call AS IT STANDS is the whole
+recovery for the transient half, and the other half (a 400 the service is simply refusing) will keep
+failing until the ARGUMENT changes.
+
+WHICH half a given failure is, is read off @status@ and nowhere else: 408 / 429 / 5xx are the transient
+ones a retry policy should back off and repeat, every other status is a refusal that will repeat forever.
+That is the whole reason the status RIDES on the error instead of being folded into a sentence — a retry
+policy downstream reads a number, never a message.
+
+@context@ says WHICH call failed in the caller's own words; @message@ carries the server's own body
+verbatim, because it is the diagnosis and a model handed this error reads it and adjusts."
+data api_error(
+  @"The failing non-2xx status." status: integer,
+  @"Which call failed, in the caller's own words — for a human reading the error (e.g. \"tavily.search\")." context: string,
+  @"The response body, or the reason the caller has instead." message: string,
+)
 
 // An authenticated API call's failure, classified: the credential's problem, or the call's. (Type synonyms
 // take no docs; a package classifies into it at the ONE boundary where its responses are read.)
 type api_failure = auth_error | api_error
+
+@"Classify a non-2xx @status@ into the shared vocabulary: 401 and 403 are `auth_error` (a credential
+problem no retry with the same credential can fix), EVERY other status is `api_error`. @context@ and
+@message@ ride onto whichever variant comes out, unchanged.
+
+This is the ONE place the line is drawn, and that is the point. The classification used to be re-decided
+per package — `gmail`, `google_calendar`, `tavily` and every OAuth REST integration written after them each
+carried a private copy of the same two-arm `match`, so \"Google's 401\" and \"Anthropic's 401\" wore
+different types and an app composing two of them wrote one `replay` converter per package to say the same
+thing twice. With one classifier the vocabulary is one vocabulary: a converter matches `http.auth_error`
+once and covers every API behind it.
+
+The STATUS IS RETAINED on the way out, deliberately. A caller downstream decides whether to back off and
+repeat (408 / 429 / 5xx) or to give up (a 400 the service is refusing), and that decision is a number
+comparison on `api_error.status` — never a substring search through a human sentence, which is what the
+statusless vocabulary forced. Reach for this at the ONE boundary where a package reads its responses; it
+answers a VALUE, so the caller chooses whether to throw it, fold it, or attach it to an outcome."
+agent classify_status(
+  @"The response's non-2xx status code." status: integer,
+  @"Which call failed, in the caller's own words — for a human reading the error." context: string,
+  @"The response body, or the reason the caller has instead." message: string,
+) -> api_failure {
+  // 401 and 403 are the only statuses about the CALLER rather than the CALL; everything else — including a
+  // 407 proxy challenge, which is the network's credential and not the API's — is the call's own failure.
+  if (status == 401 || status == 403) {
+    auth_error(status = status, context = context, message = message)
+  } else {
+    api_error(status = status, context = context, message = message)
+  }
+}

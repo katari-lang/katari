@@ -41,6 +41,35 @@ agent main_root() -> string with store.exclusive {
   f"root visits=${string.to_string(value = visits)}"
 }
 
+@"Entry: the two halves of the store's defence of a NAME. A name a model or a user proposed becomes a
+path segment, so `a/b` is two directories and `..` climbs out of the workspace a facility exists to
+confine — and the geometry every other agent here relies on is only as sound as the strings put into it.
+
+`store.safe_segment` is the TOTAL half: it canonicalises a proposal (trimmed, lower-cased) or answers
+`null`, which is an ordinary outcome the app renders back to whoever proposed the name. `store.scope`
+is the other half: a path that is not made of such segments PANICS, because a program that opened a
+workspace on unvalidated input has a DEFECT — there is no other directory it could have meant, and
+answering a value would let the run keep writing under the bad prefix. The panic is caught here only to
+show it; a real program validates first and never reaches it."
+agent guarded_names() -> string with store.get | store.set | store.delete | store.list {
+  let accepted = match (store.safe_segment(name = "  Scribe  ")) {
+    case null -> "(rejected)"
+    case name -> name
+  }
+  let refused = match (store.safe_segment(name = "../escape")) {
+    case null -> "(rejected)"
+    case name -> name
+  }
+  let defect = {
+    use handler {
+      request panic(msg: string) { break f"panic caught: ${msg}" }
+    }
+    use store.scope(path = "..")
+    "unreachable"
+  }
+  f"accepted=${accepted} | refused=${refused} | ${defect}"
+}
+
 @"Entry: open a workspace, bump a durable counter twice, write and read a memo, and list the
 workspace. The declared row lists all four store operations because `store.workspace` re-performs
 every one outward (prefixed) to the runtime — even the ones this body does not use."

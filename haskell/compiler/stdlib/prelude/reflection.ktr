@@ -70,6 +70,50 @@ type lists its fields under `required`, a data value nests under `$katari_constr
 nowhere in the signature, so it can never be inferred."
 primitive agent schema_of[T]() -> unknown
 
+// ── constructor_of: a VALUE's own tag, for a program that only has `unknown` ──────────────────────
+//
+// `get_metadata` answers what a CALLABLE is; this answers what a VALUE is. The two are different
+// questions and only the first had an agent: a supervisor holding a caught throw, a converter reading a
+// crash payload, a tool loop rendering an AI's reply all hold an `unknown` whose SHAPE they cannot
+// enumerate — the whole point of a supervisor is that it survives errors nobody declared — and the one
+// stable fact such a value carries is the name of the `data` constructor that built it.
+//
+// A `match` cannot ask that question: a `case my_error(...)` arm requires the type to be NAMED in source,
+// which is precisely what the caller does not have. So the name was read as a magic string instead, and
+// every app that needed it grew its own copy of the wire key. This is that key's one home.
+
+@"The name of the `data` constructor that built @value@ — the fully qualified name (`prelude.http.auth_error`),
+or `null` when @value@ is not a `data` value at all (a bare string, a number, a plain record, an array).
+
+Reach for it where the SHAPE is genuinely unknown and only the IDENTITY is needed: a supervisor deciding
+whether this crash is a repeat of the last one, a converter routing an uncaught payload, a log line that
+should say WHAT failed without pretending to know its fields. Comparing rendered messages instead is the
+trap this replaces — a message quoting an id or an instant never equals the previous one, so a standing
+outage reads as a fresh failure every time.
+
+It is an IDENTITY, not a render: the answer is stable across two values of the same constructor however
+differently their fields read, and it is not a sentence to show anyone. To SEE a value, use
+`json.stringify`; to READ its fields, match on it or `json.validate` it into a type you name."
+agent constructor_of(@"The value to identify; any value, and a non-`data` one answers `null`." value: unknown) -> string | null {
+  // The constructor tag is OUT OF BAND on a value — it is not a field, so no `record.get` and no `match`
+  // can reach it. Its one observable appearance is the wire form `json.stringify` renders (a data value
+  // becomes `{"$katari_constructor": name, "$katari_value": {...}}`, the tag first), so the tag is read
+  // back out of that text here — ONCE, in the stdlib, instead of in every app that needs an identity.
+  // Total by construction: anything that is not that exact shape answers `null`, and a constructor name
+  // is a qualified identifier, so the name never contains the quote this scans for.
+  let tag_prefix = "{\"$katari_constructor\":\""
+  let rendered = json.stringify(value = value)
+  if (!string.starts_with(value = rendered, search = tag_prefix)) {
+    null
+  } else {
+    let tail = string.slice(value = rendered, start = string.length(value = tag_prefix), end = string.length(value = rendered))
+    match (string.index_of(value = tail, search = "\"")) {
+      case null -> null
+      case end -> string.slice(value = tail, start = 0, end = end)
+    }
+  }
+}
+
 @"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not
 conform to its input schema (`message` names the offending path). Thrown by `call_agent`."
 data call_error(@"The non-callable kind, or the offending path of the schema mismatch." message: string)
