@@ -47,7 +47,7 @@ katari run playground.errors.main                        # => 7 is odd — no ha
 katari run playground.ffi.main --arg '{"name":"world"}'  # => Hello, world! | bytes=13 | compute(20)=41 | fallback_port=8080
 katari run playground.interactive.main                   # blocks on two questions — answer them:
 katari ls escalations                                    #    …or answer from the console's Escalations inbox
-katari answer <escalation-id> '"be careful"'
+katari answer <escalation-id> --value '"be careful"'     #    (omit --value to be prompted for it)
 ```
 
 `playground.interactive.main` is the delegation-tree showcase: while it waits, the run page in the

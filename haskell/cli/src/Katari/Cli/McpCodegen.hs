@@ -33,10 +33,11 @@
 -- @json.validation_error@ on a mismatch); any other tool instantiates @T@ to @unknown@ (the raw reply as a
 -- document value), so the wrapper is one @mcp.call[...]@ call either way.
 --
--- The body uses ONE uniform construction shape: the arguments object is folded field by field over
--- @record.set@ (@arguments_0@ .. @arguments_n@), an optional parameter folding through a @match@
--- whose @null@ arm skips the key — so an omitted argument and an explicit JSON null are never
--- conflated (@null@ is the Katari absence marker; a JSON null is a literal @null@ inside the tree).
+-- The body uses ONE uniform construction shape: the arguments object is folded field by field
+-- (@arguments_0@ .. @arguments_n@), a required parameter through @record.set@ and an optional one
+-- through @record.set_if@, whose @null@ arm skips the key — so an omitted argument and an explicit JSON
+-- null are never conflated (@null@ is the Katari absence marker; a JSON null is a literal @null@ inside
+-- the tree). Both are one line, so a tool's body reads as its parameter list.
 --
 -- Tool and parameter names are mangled to valid Katari identifiers deterministically (snake_case,
 -- invalid characters to @_@, a leading digit prefixed, a reserved word suffixed, collisions bumped
@@ -535,23 +536,38 @@ toolAgentLines context tool =
         [indent 1 "let arguments_0 = record.empty()"]
           <> concat (zipWith parameterFoldLines [0 ..] parameters)
 
--- | One parameter's fold step: @arguments_i@ -> @arguments_(i+1)@. A required parameter folds
--- unconditionally; an optional one matches @null@ (absent — the key is omitted) against @present@.
--- The value is inserted AS-IS — a value is already a document, so no @json.encode@ wire step is needed
--- for a mapped or a fallback parameter alike.
+-- | One parameter's fold step: @arguments_i@ -> @arguments_(i+1)@, ONE line either way. A required
+-- parameter folds through @record.set@; an optional one through @record.set_if@, whose @null@ arm leaves
+-- the record untouched — so an omitted argument and an explicit JSON null are never conflated, and the
+-- distinction is made by the stdlib rather than by a @match@ re-spelt per parameter (a six-optional tool
+-- was twenty-four lines of identical plumbing whose only variation was a key name). The value is inserted
+-- AS-IS — a value is already a document, so no @json.encode@ wire step is needed for a mapped or a
+-- fallback parameter alike.
 parameterFoldLines :: Int -> ResolvedParameter -> List Text
 parameterFoldLines slot parameter =
   let source = "arguments_" <> Text.pack (show slot)
       target = "arguments_" <> Text.pack (show (slot + 1))
-      insert subject = "record.set(target = " <> source <> ", key = \"" <> escapeDocText parameter.originalName <> "\", value = " <> subject <> ")"
-   in if parameter.optional
-        then
-          [ indent 1 ("let " <> target <> " = match (" <> parameter.identifier <> ") {"),
-            indent 2 ("case null -> " <> source),
-            indent 2 ("case present -> " <> insert "present"),
-            indent 1 "}"
-          ]
-        else [indent 1 ("let " <> target <> " = " <> insert parameter.identifier)]
+      -- @record.set_if@ is instantiated EXPLICITLY. Its element type appears only under a union
+      -- (@value: T | null@), which the solver cannot decompose into a lower bound on @T@, so an
+      -- uninstantiated call against the @record.empty()@ seed would solve @T@ to @never@ and reject
+      -- every value. @unknown@ is the right instantiation here regardless: the fold's product is
+      -- @mcp.call@'s @arguments: unknown@ tree, and a mapped parameter widens into it losslessly.
+      setter = if parameter.optional then "record.set_if[unknown]" else "record.set"
+   in [ indent
+          1
+          ( "let "
+              <> target
+              <> " = "
+              <> setter
+              <> "(target = "
+              <> source
+              <> ", key = \""
+              <> escapeDocText parameter.originalName
+              <> "\", value = "
+              <> parameter.identifier
+              <> ")"
+          )
+      ]
 
 -- | The tool declaration's parameter list: @name: T@, or @name: T | null ?= null@ when optional
 -- (defaulting to @null@ marks absence — the fold omits the key, so absent and JSON null never

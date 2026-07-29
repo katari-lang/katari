@@ -60,7 +60,8 @@ more — see [`examples/playground`](examples/playground) and its
 
 - **Agents, effects, and handlers.** An agent is a function with a JSON schema for its input and
   output. A `request` declares an effect; a `use handler` block implements it. Effect rows
-  (`with ask`, `with prelude.throw[T]`) are part of every signature and checked by the compiler.
+  (`with ask`, `with prelude.throw[T]`) are inferred from an agent's body when omitted, and checked
+  against it when written.
 - **Delegation and escalation.** Calling an agent is a *delegation*; performing a request with no
   handler in scope is an *escalation* that surfaces as an open question, answerable from the
   console or with `katari answer`.

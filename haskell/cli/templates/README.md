@@ -22,6 +22,9 @@ questions to their operator, and the runtime keeps every run durable.
    export $(grep '^KATARI_API_KEY=' .env)
    ```
 
+   If port 3000 is already taken, set `KATARI_PORT` in `.env` and point `[runtime].url` in
+   `katari.toml` at the same port.
+
 2. Deploy this project:
 
    ```sh

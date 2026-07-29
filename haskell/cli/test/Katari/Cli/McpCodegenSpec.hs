@@ -151,14 +151,8 @@ golden =
       "@\"Fetch one issue.\\nSlow on \\\"cold\\\" repos.\"",
       "agent get_issue(filter: unknown | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.validation_error] {",
       "  let arguments_0 = record.empty()",
-      "  let arguments_1 = match (filter) {",
-      "    case null -> arguments_0",
-      "    case present -> record.set(target = arguments_0, key = \"filter\", value = present)",
-      "  }",
-      "  let arguments_2 = match (labels) {",
-      "    case null -> arguments_1",
-      "    case present -> record.set(target = arguments_1, key = \"labels\", value = present)",
-      "  }",
+      "  let arguments_1 = record.set_if[unknown](target = arguments_0, key = \"filter\", value = filter)",
+      "  let arguments_2 = record.set_if[unknown](target = arguments_1, key = \"labels\", value = labels)",
       "  let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = owner)",
       "  let arguments_4 = record.set(target = arguments_3, key = \"repo\", value = repo)",
       "  mcp.call[connection, get_issue_output](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"get-issue\", arguments = arguments_4)",
@@ -294,8 +288,8 @@ spec = describe "katari mcp pull codegen" $ do
       rendered <- render goldenFixture
       -- (a) `labels` maps (array[string]) and `filter` is an enum fallback — both insert the value AS-IS,
       -- because a value is already a document (there is no `json.encode` wire step for either).
-      rendered `shouldSatisfy` Text.isInfixOf "key = \"labels\", value = present"
-      rendered `shouldSatisfy` Text.isInfixOf "key = \"filter\", value = present"
+      rendered `shouldSatisfy` Text.isInfixOf "key = \"labels\", value = labels"
+      rendered `shouldSatisfy` Text.isInfixOf "key = \"filter\", value = filter"
       -- No `json.encode` embedding anywhere in the generated CODE (the header comment may mention it).
       rendered `shouldSatisfy` (not . Text.isInfixOf "value = json.encode")
 
