@@ -33,8 +33,9 @@
 --     needs the registry. Because it is authoritative, it is first checked against @katari.toml@
 --     ("Katari.Project.Reconcile"): any disagreement is a 'Katari.Project.Error.ResolveLockOutOfSync'
 --     and the load stops there, since compiling a closure the manifest no longer asks for would
---     report success about the wrong package set. A locked package whose source tree is absent from
---     the cache is 'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP, @katari
+--     report success about the wrong package set. A locked package whose source tree the cache cannot
+--     vouch for — absent, or present without the sentinel 'Katari.Project.Cache.cachedPackageDir'
+--     requires — is 'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP, @katari
 --     check@, @katari build@ and @katari apply@ use, so none of them blocks on the network. It takes
 --     a 'SourceOverlay' that feeds the LSP's unsaved buffers into the root package.
 module Katari.Project.Resolve
@@ -46,7 +47,6 @@ module Katari.Project.Resolve
     assembleProject,
     lockfileFromResolved,
     compileInputSources,
-    checkPinnedSha,
   )
 where
 
@@ -60,7 +60,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName (..), covers)
-import Katari.Project.Cache (CachePaths, ensureCacheDirs, packageDir, projectCachePaths)
+import Katari.Project.Cache (CachePaths, cachedPackageDir, ensureCacheDirs, packageDir, projectCachePaths)
 import Katari.Project.Config
   ( DependenciesSection (..),
     GitOverride (..),
@@ -90,9 +90,8 @@ import Katari.Project.Error
     OutOfNamespaceInfo (..),
     PackageNameInfo (..),
     ProjectError (..),
-    ShaMismatchInfo (..),
   )
-import Katari.Project.Fetch (GitRef (..), fetchGitTarball)
+import Katari.Project.Fetch (ExpectedSha (..), GitRef (..), fetchGitTarball)
 import Katari.Project.Lockfile
   ( GitSource (..),
     LockedSource (..),
@@ -106,7 +105,7 @@ import Katari.Project.Reconcile (closureMismatches, manifestMismatches)
 import Katari.Project.Snapshot (Snapshot (..), SnapshotEntry (..), loadSnapshotFromUrl)
 import Katari.Stdlib (isReservedModuleName)
 import Network.HTTP.Client (Manager)
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (isAbsolute, (</>))
 
 -- | One loaded package: its config and on-disk module sources, plus how it was sourced ('Nothing'
@@ -179,23 +178,14 @@ loadPathPackage baseDir name location = do
   unless hasConfig $ throwError (ResolveMissingConfig MissingConfigInfo {dependency = name, path = location})
   loadResolvedPackage canonical (LockedPath PathLock {location = location})
 
--- | Fetch a git ref into the cache and load it. @cacheSha@ skips the download on a cache hit;
--- @requiredSha@ (a snapshot pin) is verified against the fetched content.
-loadGitPackage :: ResolveContext -> Text -> GitRef -> Maybe Text -> Maybe Text -> ResolveM ResolvedPackage
-loadGitPackage context name ref cacheSha requiredSha = do
-  (directory, sha) <- liftE (fetchGitTarball context.manager context.cache name ref cacheSha)
-  either throwError pure (checkPinnedSha name requiredSha sha)
+-- | Fetch a git ref into the cache and load it. What the caller knows about the content hash — a
+-- snapshot pin, or at most a prior lockfile hint — travels as one 'ExpectedSha', because the fetch is
+-- where both the cache lookup and the pin check now happen: verifying after the fact would mean the
+-- tarball had already been unpacked onto the disk it was meant to protect.
+loadGitPackage :: ResolveContext -> Text -> GitRef -> ExpectedSha -> ResolveM ResolvedPackage
+loadGitPackage context name ref expectedSha = do
+  (directory, sha) <- liftE (fetchGitTarball context.manager context.cache name ref expectedSha)
   loadResolvedPackage directory (LockedGit GitSource {url = ref.url, rev = ref.rev, sha = sha})
-
--- | Verify a fetched tarball's content hash against the pin that required it (a registry snapshot's
--- @sha256@). 'Nothing' means no pin to check against (a git override, trusted on first use). Pure, so
--- this supply-chain guard is testable without performing a real fetch.
-checkPinnedSha :: Text -> Maybe Text -> Text -> Either ProjectError ()
-checkPinnedSha name requiredSha actualSha = case requiredSha of
-  Just expected
-    | actualSha /= expected ->
-        Left (ResolveShaMismatch ShaMismatchInfo {dependency = name, expected = expected, actual = actualSha})
-  _ -> Right ()
 
 -- ===========================================================================
 -- Network resolution (npm install)
@@ -266,7 +256,7 @@ locateDependency context name = case Map.lookup name context.rootConfig.override
   Just (OverridePath override) -> loadPathPackage context.rootDir name override.path
   Just (OverrideGit override) ->
     let ref = GitRef {url = override.url, rev = override.rev}
-     in loadGitPackage context name ref (cacheHint context name ref) Nothing
+     in loadGitPackage context name ref (UnpinnedSha (cacheHint context name ref))
   Nothing -> resolveSnapshotDependency context name
 
 -- | A git override's content hash is unknown until fetched, but if the prior lockfile pinned the
@@ -281,11 +271,12 @@ resolveSnapshotDependency context name = do
   snapshot <- requireSnapshot context name
   case Map.lookup name snapshot.packages of
     Nothing -> throwError (ResolveUnresolvedDependency DependencyInfo {dependency = name})
-    -- The pin's sha is both the cache hint (skip download if held) and the required hash (verify).
-    -- The entry's version label is not consulted: the pin is what a snapshot resolves on.
+    -- The pin's sha is both the cache key (skip the download if it is held) and the required hash
+    -- (verify what is downloaded), which is exactly what 'PinnedSha' means. The entry's version label
+    -- is not consulted: the pin is what a snapshot resolves on.
     Just entry ->
       let pin = entry.source
-       in loadGitPackage context name GitRef {url = pin.url, rev = pin.rev} (Just pin.sha) (Just pin.sha)
+       in loadGitPackage context name GitRef {url = pin.url, rev = pin.rev} (PinnedSha pin.sha)
 
 -- | The registry snapshot, loaded at most once. A dependency that needs the snapshot but has no
 -- @[dependencies].registry@ to load it from is simply unresolvable.
@@ -376,10 +367,15 @@ loadLockedPackage :: FilePath -> CachePaths -> Text -> LockedSource -> ResolveM 
 loadLockedPackage rootDir cache name lockedSource = case lockedSource of
   LockedPath lock -> loadPathPackage rootDir name lock.location
   LockedGit lock -> do
-    let directory = packageDir cache name lock.sha
-    exists <- liftIO (doesDirectoryExist directory)
-    unless exists $ throwError (ResolvePackageNotCached NotCachedInfo {dependency = name, expectedPath = directory})
-    loadResolvedPackage directory lockedSource
+    -- Not merely "the directory is there": an offline load compiles and deploys whatever it finds here,
+    -- so it asks the cache the same question a fetch does, and an entry the cache does not vouch for is
+    -- a miss. The offline answer to a miss is to send the user to @katari lock@, which re-fetches and
+    -- re-certifies it — the same healing the network path performs for itself.
+    cached <- liftIO (cachedPackageDir cache name lock.sha)
+    case cached of
+      Nothing ->
+        throwError (ResolvePackageNotCached NotCachedInfo {dependency = name, expectedPath = packageDir cache name lock.sha})
+      Just directory -> loadResolvedPackage directory lockedSource
 
 -- ===========================================================================
 -- Assembly / projection

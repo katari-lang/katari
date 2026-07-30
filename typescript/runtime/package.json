@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/runtime",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Runtime server for Katari Language",
   "type": "module",
   "main": "dist/index.mjs",
@@ -42,6 +42,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.30",
     "postgres": "^3.4.9",
+    "undici": "^7.28.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

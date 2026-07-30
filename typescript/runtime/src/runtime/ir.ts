@@ -59,7 +59,11 @@ export class SnapshotRegistry implements IrSource {
       snapshot,
       module,
       block: (blockId: BlockId): BlockInformation => {
-        const information = ir.blocks[blockId];
+        // `Object.hasOwn` rather than a bare index: `blocks` and `entries` are decoded from `jsonb`, so they
+        // carry `Object.prototype`, and the id being looked up comes from the caller. Without the own-property
+        // check, `"constructor"` resolves to `Object` instead of being absent — and in `locate` below that
+        // means `entry.private` reads `undefined`, quietly passing the private-agent gate.
+        const information = Object.hasOwn(ir.blocks, blockId) ? ir.blocks[blockId] : undefined;
         if (information === undefined) {
           throw new Error(`block ${blockId} not found in ${module}@${snapshot}`);
         }
@@ -73,7 +77,8 @@ export class SnapshotRegistry implements IrSource {
     name: QualifiedName,
   ): { module: string; blockId: BlockId; private: boolean } {
     const module = moduleOfName(name);
-    const entry = this.moduleIr(snapshot, module).entries[name];
+    const entries = this.moduleIr(snapshot, module).entries;
+    const entry = Object.hasOwn(entries, name) ? entries[name] : undefined;
     if (entry === undefined) {
       throw new Error(`callable "${name}" not found in snapshot ${snapshot}`);
     }

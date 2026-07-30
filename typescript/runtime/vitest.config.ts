@@ -7,7 +7,11 @@ export default defineConfig({
     // secrets.
     env: {
       KATARI_SECRET_KEY: "r75FbGEeJdHhNknc0999YH3+Kzggi0MExVVFU9TSi7U=",
-      KATARI_API_KEY: "test-api-key",
+      // A retired key is configured throughout so the rotation path (decrypt with an older key, encrypt with
+      // the newest) is exercised by the suite rather than only by the one test that names it.
+      KATARI_SECRET_KEY_PREVIOUS: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      // At least 32 characters, matching the floor the schema enforces on a real deployment.
+      KATARI_API_KEY: "test-api-key-0000000000000000000000",
     },
   },
 });

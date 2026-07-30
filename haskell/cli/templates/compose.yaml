@@ -25,13 +25,21 @@ services:
       KATARI_API_KEY: ${KATARI_API_KEY:?set KATARI_API_KEY in .env (see .env.example)}
       # At-rest encryption key for secret values (base64, 32 bytes). The runtime refuses to boot
       # without it — set it in `.env` (see above).
+      # Keep this value across every redeploy: it seals every stored secret, and regenerating it makes
+      # them permanently unreadable.
       KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (see .env.example)}
+      # Everything here runs on one machine, so let programs reach it. In a real deployment leave this
+      # off — it is what stops a program-chosen url reaching your internal network or the cloud metadata
+      # service. See docs/deploying.md.
+      KATARI_EGRESS_ALLOW_PRIVATE: ${KATARI_EGRESS_ALLOW_PRIVATE:-true}
       # Blob bytes → the SeaweedFS store below. Repoint at a cloud bucket by dropping
       # BLOB_S3_ENDPOINT and setting real AWS credentials; then delete the seaweedfs service.
       BLOB_S3_BUCKET: katari-blobs
       BLOB_S3_ENDPOINT: http://seaweedfs:8333
       BLOB_S3_FORCE_PATH_STYLE: "true"
       BLOB_S3_CREATE_BUCKET: "true"
+      # For the local SeaweedFS below only. DELETE THESE TWO LINES on AWS: they would override the task
+      # role and break S3 with a confusing 403. The runtime uses the default AWS credential chain.
       AWS_ACCESS_KEY_ID: katari
       AWS_SECRET_ACCESS_KEY: katari
     depends_on:

@@ -245,13 +245,14 @@ parseKatariTomlWith binding path text = case decodeWith tomlDecoder text of
   Left tomlError -> validationError ConfigParseError path (renderTOMLError tomlError)
   Right (rawConfig :: RawConfig) -> validateConfig binding path rawConfig
 
--- | Apply the cross-field rules a 'Decoder' cannot express: the source dir stays inside the project,
+-- | Apply the cross-field rules a 'Decoder' cannot express: every source dir stays inside the project,
 -- every declared dependency name is a valid identifier (so it is safe to use as a cache-directory and
 -- import name), and each override names a declared dependency (under 'OverridesBindDeclared') and is
 -- path XOR git.
 validateConfig :: OverrideBinding -> FilePath -> RawConfig -> Either ProjectError ProjectConfig
 validateConfig binding path rawConfig = do
-  validateSourceDir path rawConfig.package.src
+  validateSourceDir "[package].src" path rawConfig.package.src
+  validateSidecarRoots path rawConfig.sidecar
   mapM_ (requireValidPackageName ConfigValidationError path) rawConfig.dependencies.packages
   validatedOverrides <-
     traverse (validateOverride binding path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
@@ -264,13 +265,32 @@ validateConfig binding path rawConfig = do
         overrides = Map.fromList validatedOverrides
       }
 
--- | Reject a @[package].src@ that is absolute or escapes the project via a @..@ segment. 'scanSources'
--- joins this onto the project root, so an unconstrained value would let a package pull in @.ktr@ files
--- from anywhere on disk; the assembly's namespace check validates module /names/, not file origins.
-validateSourceDir :: FilePath -> FilePath -> Either ProjectError ()
-validateSourceDir path src =
-  when (isAbsolute src || ".." `elem` splitDirectories src) $
-    validationError ConfigValidationError path ("[package].src must be a relative path inside the project (got " <> Text.pack src <> ")")
+-- | Reject a declared source directory that is absolute or escapes the package via a @..@ segment.
+-- Every consumer joins such a value onto the package root with 'System.FilePath.</>', which /drops its
+-- left operand/ when the right is absolute, so an unconstrained value does not merely widen the scan —
+-- it relocates it anywhere on disk. The assembly's namespace check validates module /names/, not file
+-- origins, so this is the only thing keeping a package's declared directories inside the package.
+--
+-- @field@ is the TOML key being checked, so the two callers ('validateConfig' for @[package].src@ and
+-- 'validateSidecarRoots' for @[sidecar].sourceRoots@) report the same rule in the same words while
+-- naming the key the reader has to edit.
+validateSourceDir :: Text -> FilePath -> FilePath -> Either ProjectError ()
+validateSourceDir field path sourceDirectory =
+  when (isAbsolute sourceDirectory || ".." `elem` splitDirectories sourceDirectory) $
+    validationError ConfigValidationError path (field <> " must be a relative path inside the project (got " <> Text.pack sourceDirectory <> ")")
+
+-- | Constrain every @[sidecar].sourceRoots@ entry exactly as @[package].src@ is constrained.
+--
+-- These are the roots @katari apply@ hands to the FFI bundler, whose output the runtime then executes,
+-- and resolution is root-authoritative only for /where a package comes from/ — a package's own
+-- @katari.toml@ still decides its layout. So an unvalidated entry here let any package in the closure,
+-- a transitive dependency included, have the developer's own machine scanned and whatever was found
+-- uploaded. It is validated at parse time rather than at the bundler's call site so that every reader
+-- of a @katari.toml@ — @check@, @build@, the LSP — agrees on which configs are well-formed.
+validateSidecarRoots :: FilePath -> Maybe SidecarSection -> Either ProjectError ()
+validateSidecarRoots path sidecar = case sidecar of
+  Nothing -> Right ()
+  Just section -> mapM_ (validateSourceDir "[sidecar].sourceRoots" path) section.sourceRoots
 
 -- | Require a name to be a valid package identifier, phrasing the failure as the caller's own
 -- validation error. Shared by the config, lockfile, and snapshot validators: each gates a name that

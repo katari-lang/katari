@@ -41,6 +41,7 @@ import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry, InstanceKind } from "./engine/types.js";
 import { type CredentialStore, decodeStoredCredential } from "./external/credentials.js";
+import { createGuardedFetch } from "./external/egress-guard.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
 import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
@@ -122,6 +123,20 @@ export const blobStore = createBlobStore(config.blobS3);
 // the blob client appends only the resource path.
 const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 
+// The one `fetch` every PROGRAM-initiated outbound request goes through — `http.fetch` and the MCP client
+// both. It refuses a destination that resolves to a loopback / private / link-local address, because those
+// URLs are program-chosen public strings and can therefore carry whatever an LLM or a webhook payload put in
+// them (see `external/egress-guard.ts`). Deliberately NOT installed as undici's global dispatcher: the
+// runtime's own S3 client legitimately talks to a private endpoint (the compose blob store), and the guard
+// is about what a program may reach, not what the runtime may.
+const guardedFetch = createGuardedFetch(
+  {
+    allowPrivateAddresses: config.egress.allowPrivateAddresses,
+    allowedHosts: config.egress.allowedHosts,
+  },
+  config.http.connectTimeoutMs,
+);
+
 // The shared prim runner: the pure built-ins (preloaded) plus the host-registered effectful ones (env
 // reads the project's `env_entries` store). One registry serves every project actor; the per-call
 // `PrimContext` supplies the project a given env read runs for.
@@ -173,13 +188,15 @@ const registry = new ProjectRegistry({
   prims,
   blobs: blobStore,
   externalFactory: () =>
-    new SnapshotFfiTransport(
-      loadSidecarBundle,
-      nodeSidecarMaterialize(runtimeBaseUrl, config.apiKey),
-    ),
+    new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize(runtimeBaseUrl)),
   // The built-in http client: a fresh in-runtime `fetch` transport per project actor (its own completion
-  // sink). The api root performs `http.fetch` requests through it.
-  httpFactory: () => new FetchHttpTransport(),
+  // sink). The api root performs `http.fetch` requests through it. Every actor dials through the ONE shared
+  // guarded fetch, so its connection pool is reused and the egress policy cannot differ between projects.
+  httpFactory: () =>
+    new FetchHttpTransport(guardedFetch, {
+      timeoutMs: config.http.timeoutMs,
+      maxResponseBytes: config.http.maxResponseBytes,
+    }),
   // The built-in MCP client: the SDK-backed transport, one per project actor (its own connections).
   // Its blob producer bridges a tool result's binary content (an image block) into a project blob owned
   // by the mcp call's instance — the exact ownership + ascent path an FFI handler's mid-call upload
@@ -188,6 +205,9 @@ const registry = new ProjectRegistry({
   // credential store resolves `mcp.oauth(...)` names against the project's `credentials` table.
   mcpFactory: (projectId) =>
     new SdkMcpTransport({
+      // The same guard `http.fetch` dials through: an MCP server descriptor's url is just as
+      // program-chosen, so it is the same SSRF surface and gets the same check.
+      fetch: guardedFetch,
       produceBlob: async (delegation, bytes, contentType) => {
         try {
           const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
@@ -229,9 +249,25 @@ async function resolveCapabilityToken(
   return row ?? null;
 }
 
-/** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
+/** Resolve the snapshot a run pins: the explicit one, or the project's live head.
+ *
+ *  An explicitly named snapshot is checked to BELONG to the project. Without that check a caller could start
+ *  a run in project A pinned to project B's snapshot, and the IR loader resolves a snapshot's modules against
+ *  the snapshot's own project — so B's code would execute inside A's actor, reading A's env secrets, A's
+ *  store, and A's credentials. Every sibling query already scopes this way (`loadSidecarBundle`,
+ *  `snapshotRepository.findSnapshot`); the run-start path was the one that did not. */
 async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<string> {
-  if (snapshotId !== undefined) return snapshotId;
+  if (snapshotId !== undefined) {
+    const [owned] = await db
+      .select({ id: snapshots.id })
+      .from(snapshots)
+      .where(and(eq(snapshots.id, snapshotId), eq(snapshots.projectId, projectId)))
+      .limit(1);
+    if (owned === undefined) {
+      throw new NotFoundError(`no snapshot ${snapshotId} in this project`);
+    }
+    return snapshotId;
+  }
   const [project] = await db
     .select({ head: projects.headSnapshotId })
     .from(projects)

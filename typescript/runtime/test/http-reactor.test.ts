@@ -6,6 +6,7 @@
 // response), the unhandled-error path (→ a run-failing `throw[http.fetch_error]`), and the at-most-once
 // recovery contract (an interrupted request is never re-sent — it fails on restart).
 
+import { createLocalFetch } from "../src/runtime/external/egress-guard.js";
 import { createServer } from "node:http";
 import {
   createAgentName,
@@ -652,7 +653,7 @@ describe("http reactor — private body sink (real transport over loopback)", ()
     const loopback = await startLoopback();
     try {
       const actor = makeActor(
-        new FetchHttpTransport(),
+        new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }),
         new InMemoryPersistence(),
         postSecretBodyIr(loopback.url),
       );
@@ -683,7 +684,7 @@ describe("http reactor — private body sink (real transport over loopback)", ()
     const loopback = await startLoopback();
     try {
       const actor = makeActor(
-        new FetchHttpTransport(),
+        new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }),
         new InMemoryPersistence(),
         postPublicBodyIr(loopback.url),
       );
@@ -826,7 +827,7 @@ describe("http reactor — file request bodies (real transport over loopback)", 
   test("json body: a file leaf becomes base64 in place, the rest of the tree unchanged", async () => {
     const loopback = await startRawLoopback();
     try {
-      const actor = await actorWithFile(new FetchHttpTransport());
+      const actor = await actorWithFile(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }));
       // { name: "avatar", data: <file> } — only `data` should become base64 on the wire.
       const tree: Value = { kind: "record", fields: { name: string("avatar"), data: fileRef } };
       const body = dataValue("prelude.http.json", { value: tree });
@@ -844,7 +845,7 @@ describe("http reactor — file request bodies (real transport over loopback)", 
   test("binary body: the file's raw bytes, its content type the Content-Type", async () => {
     const loopback = await startRawLoopback();
     try {
-      const actor = await actorWithFile(new FetchHttpTransport());
+      const actor = await actorWithFile(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }));
       const body = dataValue("prelude.http.binary", { content: fileRef });
       const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
       await result;
@@ -859,7 +860,7 @@ describe("http reactor — file request bodies (real transport over loopback)", 
   test("multipart body: RFC 7578 parts, the file part carrying the raw bytes", async () => {
     const loopback = await startRawLoopback();
     try {
-      const actor = await actorWithFile(new FetchHttpTransport());
+      const actor = await actorWithFile(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }));
       const parts: Value = {
         kind: "array",
         elements: [
@@ -1020,7 +1021,7 @@ describe("http reactor — fetch_file response (real transport over loopback)", 
     try {
       const persistence = new StoringPersistence();
       const blobs = new InMemoryBlobStore();
-      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const actor = makeActor(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }), persistence, FETCH_FILE_IR, blobs);
       const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
 
       const file = fileRefOf(await result, 200);
@@ -1046,7 +1047,7 @@ describe("http reactor — fetch_file response (real transport over loopback)", 
     });
     try {
       const blobs = new InMemoryBlobStore();
-      const actor = makeActor(new FetchHttpTransport(), new InMemoryPersistence(), FETCH_FILE_IR, blobs);
+      const actor = makeActor(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }), new InMemoryPersistence(), FETCH_FILE_IR, blobs);
       const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
 
       const file = fileRefOf(await result, 404);
@@ -1062,7 +1063,7 @@ describe("http reactor — fetch_file response (real transport over loopback)", 
     try {
       const persistence = new StoringPersistence();
       const blobs = new InMemoryBlobStore();
-      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const actor = makeActor(new FetchHttpTransport(createLocalFetch(), { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 }), persistence, FETCH_FILE_IR, blobs);
       const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
 
       const file = fileRefOf(await result, 200);

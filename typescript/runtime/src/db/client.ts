@@ -7,8 +7,16 @@ import * as schema from "./schema.js";
  * postgres.js connects lazily: constructing the pool does not require a
  * reachable database, so the server can boot and `/api/v1/health` responds even
  * when Postgres is down. Queries surface a clear connection error until it is up.
+ *
+ * TLS is on by default for any non-loopback database (`config.databaseSsl`): postgres.js itself defaults to
+ * no encryption, which is fine for a sibling container on a compose network and quietly wrong for a managed
+ * database, which would otherwise carry every secret's ciphertext, every run payload, and the connection
+ * password across the network in the clear.
  */
-const queryClient = postgres(config.databaseUrl, { max: 10 });
+const queryClient = postgres(config.databaseUrl, {
+  max: 10,
+  ssl: config.databaseSslForPostgresJs,
+});
 
 export const db = drizzle(queryClient, { schema });
 export type Database = typeof db;

@@ -29,8 +29,9 @@
 --      (@a7cc1e51@ sorts before @bcc95cb3@ yet is the newer cut). The index therefore carries each
 --      cut's timestamp as data, and 'newestSnapshot' orders on that.
 --
--- Downstream ("Katari.Project.Resolve") looks up each dep, fetches the tarball at the pinned
--- @(repo, ref)@ via "Katari.Project.Fetch", and verifies the download against the @sha256@ pin.
+-- Downstream ("Katari.Project.Resolve") looks up each dep and fetches the tarball at the pinned
+-- @(repo, ref)@ via "Katari.Project.Fetch", which verifies the download against the @sha256@ pin before
+-- any of it reaches the disk.
 module Katari.Project.Snapshot
   ( Snapshot (..),
     SnapshotEntry (..),

@@ -8,12 +8,40 @@ import { mountAdminWeb } from "./middleware/admin-web.js";
 import { bearerAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
+import { RequestLimiter, rateLimit } from "./middleware/rate-limit.js";
 import { requestContext } from "./middleware/request-context.js";
 import { mcpServeRoutes } from "./modules/mcp/mcp.routes.js";
 import { oauthCallbackRoutes } from "./modules/oauth/oauth.routes.js";
 import { inboundRoutes } from "./modules/webhook/webhook.routes.js";
 import { apiRoutes } from "./routes.js";
 import type { AppEnv } from "./types/app-env.js";
+
+/**
+ * The console's Content-Security-Policy. The console is served from the SAME origin as the API and holds the
+ * bearer token in `localStorage`, so any script execution on this origin is a credential theft — the policy
+ * is what keeps an injected URL or a future console bug from being one.
+ *
+ * `script-src 'self'` is strict: the console's one inline script (the pre-paint theme switch) was moved to
+ * `/theme-init.js` so no `'unsafe-inline'` or hash is needed. `style-src` does allow inline, because React's
+ * `style={{...}}` attributes are inline styles and there is no way around that short of rewriting them.
+ * `connect-src 'self'` is what actually blunts an exfiltration attempt: a script that does run cannot post
+ * the token anywhere off-origin.
+ *
+ * The Google Fonts origins are the one third-party exception. Self-hosting the fonts would remove it and is
+ * worth doing; until then they are named explicitly rather than covered by a wildcard.
+ */
+const CONTENT_SECURITY_POLICY = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'"],
+  styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+  fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+  imgSrc: ["'self'", "data:", "blob:"],
+  connectSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  baseUri: ["'self'"],
+  frameAncestors: ["'none'"],
+  formAction: ["'self'"],
+};
 
 /**
  * Application factory. Builds a fully wired Hono app: global middleware, the
@@ -25,29 +53,57 @@ export function createApp() {
 
   // Global middleware (order matters: context first so logging/ids are set).
   app.use("*", requestContext);
-  app.use("*", secureHeaders());
+  app.use("*", secureHeaders({ contentSecurityPolicy: CONTENT_SECURITY_POLICY }));
   // `X-Total-Count` (the paged-list total) must be exposed, or a cross-origin console cannot read it off
   // the response — same-origin (the baked-in console) can already, but a separately-hosted one needs this.
   app.use("*", cors({ origin: config.corsOrigin, exposeHeaders: ["X-Total-Count"] }));
 
+  // One limiter shared by the two things worth counting: requests to the unauthenticated capability
+  // surfaces, and failed authentication. Both are attempts that cost the runtime a database round trip and
+  // cost the caller nothing, which is the asymmetry a limiter exists to remove.
+  const limiter = new RequestLimiter(config.limits.rateLimitPerMinute);
+
   // Bearer auth on every request (KATARI_API_KEY is required at boot). It exempts /api/v1/health and the
   // console's static assets — see `auth.ts`.
-  app.use("*", bearerAuth(config.apiKey));
+  app.use("*", bearerAuth(config.apiKey, limiter));
 
   // Boundaries.
   app.onError(errorHandler);
   app.notFound(notFound);
 
-  // A shared body-size cap on the public capability surfaces (`/inbound`, `/mcp`): they accept
-  // unauthenticated POST bodies (the token is the only capability), so an unbounded read is a trivial
-  // memory-exhaustion vector. One rule for both surfaces — 1 MiB is ample for a webhook payload or an MCP
-  // JSON-RPC message; a larger delivery is rejected with 413 before its body is buffered.
+  // Body-size caps. Every surface that accepts a body has one: an unbounded read is a trivial
+  // memory-exhaustion vector, and because one process hosts every project, exhausting it is an availability
+  // problem for all of them rather than just for the caller.
+  //
+  // Three tiers, because the surfaces differ in what a legitimate body looks like:
+  //   - the public capability endpoints (`/inbound`, `/mcp`) — 1 MiB is ample for a webhook delivery or an
+  //     MCP JSON-RPC message, and these accept UNAUTHENTICATED bodies, so they get the tightest cap;
+  //   - file uploads — deliberately generous, since uploading a real file is the point;
+  //   - everything else under `/api` — a deploy buffers its body roughly three times over (raw text, the
+  //     screening parse, the validator's), so the cap here is about that multiple, not about the body alone.
   const capabilityBodyLimit = bodyLimit({
     maxSize: 1024 * 1024,
     onError: (c) => c.json({ error: "the request body is too large" }, 413),
   });
+  const uploadBodyLimit = bodyLimit({
+    maxSize: config.limits.maxUploadBytes,
+    onError: (c) => c.json({ error: "the uploaded file is too large" }, 413),
+  });
+  const apiBodyLimit = bodyLimit({
+    maxSize: config.limits.maxRequestBytes,
+    onError: (c) => c.json({ error: "the request body is too large" }, 413),
+  });
   app.use("/inbound/*", capabilityBodyLimit);
   app.use("/mcp/*", capabilityBodyLimit);
+  // The upload rules are registered before the general one so the more specific cap wins on those paths.
+  app.use("/api/v1/projects/:projectId/files", uploadBodyLimit);
+  app.use("/api/v1/projects/:projectId/ffi/:delegation/blobs", uploadBodyLimit);
+  app.use("/api/*", apiBodyLimit);
+
+  // Rate-limit the surfaces that carry no bearer token at all.
+  app.use("/inbound/*", rateLimit(limiter));
+  app.use("/mcp/*", rateLimit(limiter));
+  app.use("/oauth/*", rateLimit(limiter));
 
   // The public inbound-webhook endpoints (`webhook.inbound`'s minted URLs). Outside `/api`, so
   // `bearerAuth` passes them through — the unguessable token is the capability (see `webhook.routes.ts`).

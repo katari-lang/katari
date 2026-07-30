@@ -14,11 +14,18 @@ export const oauthClientParamSchema = projectIdParamSchema.extend({ name: z.stri
  *  clear flag is contradictory and rejected. `scopes` and `authorizationParameters` (extra
  *  provider-specific authorize-URL parameters — plain configuration, returned by the GET) default to
  *  empty. */
+/** A URL that may actually be dialled or navigated to: http(s) only. */
+const httpUrl = z.url({ protocol: /^https?$/ });
+
 export const oauthClientBodySchema = z
   .object({
     issuer: z.string().min(1),
-    authorizeEndpoint: z.url(),
-    tokenEndpoint: z.url(),
+    // Constrained to http(s) rather than left as a bare `z.url()`. A `javascript:` authorize endpoint
+    // would be handed straight to the console, which navigates a popup to it — executing on the origin
+    // that holds the bearer token; a `file:` or internal token endpoint would be fetched WITH the client
+    // secret in an Authorization header. Neither is a URL any real provider uses.
+    authorizeEndpoint: httpUrl,
+    tokenEndpoint: httpUrl,
     clientId: z.string().min(1),
     clientSecret: z.string().min(1).optional(),
     clearSecret: z.boolean().default(false),

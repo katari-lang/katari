@@ -5,13 +5,15 @@
 import { Hono } from "hono";
 import { describe, expect, test } from "vitest";
 import { bearerAuth } from "../src/middleware/auth.js";
+import { RequestLimiter } from "../src/middleware/rate-limit.js";
 import type { AppEnv } from "../src/types/app-env.js";
 
 const KEY = "s3cr3t-token";
 
 function appWithAuth() {
   const app = new Hono<AppEnv>();
-  app.use("*", bearerAuth(KEY));
+  // A limit high enough that these tests never trip it — the limiter has its own suite.
+  app.use("*", bearerAuth(KEY, new RequestLimiter(10_000)));
   app.get("/api/v1/health", (c) => c.json({ ok: true }));
   app.get("/api/v1/projects", (c) => c.json({ ok: true }));
   app.get("/", (c) => c.text("console shell"));

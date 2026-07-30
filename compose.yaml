@@ -41,6 +41,10 @@ services:
       # dockerized runtime exercises the same S3 path as production. `forcePathStyle` is required for
       # a non-AWS endpoint; s3mock ignores the AWS creds but the SDK still needs some present to sign.
       # The runtime creates the bucket on boot (idempotent), since s3mock is ephemeral.
+      # The dev stack runs everything on one machine, so let programs reach it. In a deployment this must
+      # stay off: it is what stops a program-chosen url reaching the internal network or the cloud
+      # metadata service. See docs/deploying.md.
+      KATARI_EGRESS_ALLOW_PRIVATE: "true"
       BLOB_S3_BUCKET: katari-blobs
       BLOB_S3_ENDPOINT: http://s3mock:9090
       BLOB_S3_FORCE_PATH_STYLE: "true"

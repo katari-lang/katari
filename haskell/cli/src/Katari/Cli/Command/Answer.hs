@@ -25,7 +25,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), answerEscalation, listEscalations, oauthTargetDescription, startOauthEscalationFlow)
-import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, withRuntimeContext)
+import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, isBrowsableUrl, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), printText, progress)
 import Katari.Cli.Pick (resolveEscalation)
@@ -147,12 +147,21 @@ data AuthorizationOutcome
 -- | Best-effort open of the authorization URL in the user's browser: @open@ on macOS, @xdg-open@
 -- elsewhere. The URL is already printed, so a headless box (no opener on PATH) or a spawn failure is
 -- fine to swallow — it must not derail the wait. The opener's streams are discarded so it stays silent.
+--
+-- Only a browsable URL is spawned. This value is whatever the runtime put in its JSON, and @xdg-open@ /
+-- @open@ are not browsers — they launch whatever the desktop has registered for the scheme, so a
+-- compromised runtime answering @file:\/\/\/...@ or a custom scheme would be choosing a program to run
+-- on the developer's machine. (The argv list already rules out shell injection; the scheme is the part
+-- that was unchecked.) Refusing costs the user nothing but a click, since line for line the URL was
+-- printed just above.
 openInBrowser :: Text -> IO ()
-openInBrowser targetUrl = do
-  let opener = if os == "darwin" then "open" else "xdg-open"
-      spawn = createProcess (proc opener [Text.unpack targetUrl]) {std_in = NoStream, std_out = NoStream, std_err = NoStream}
-  _ <- (try spawn :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)))
-  pure ()
+openInBrowser targetUrl
+  | not (isBrowsableUrl targetUrl) = pure ()
+  | otherwise = do
+      let opener = if os == "darwin" then "open" else "xdg-open"
+          spawn = createProcess (proc opener [Text.unpack targetUrl]) {std_in = NoStream, std_out = NoStream, std_err = NoStream}
+      _ <- (try spawn :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)))
+      pure ()
 
 -- | Poll the open escalations until this one is gone (answered by the OAuth redirect callback), then
 -- list once more and dispatch on what is there: a new open oauth escalation for the same server /

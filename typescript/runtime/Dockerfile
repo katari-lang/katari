@@ -8,10 +8,16 @@
 # @katari-lang/types), so compose sets:
 #   build: { context: ., dockerfile: typescript/runtime/Dockerfile }
 #
+# The base image is pinned by DIGEST, not just by tag: `node:22-slim` is mutable, so two builds of the
+# same git tag would otherwise not be the same image. The rest of the release pipeline goes to some
+# lengths for reproducibility (version verification, sha256 sidecars on the tarballs, npm provenance), and
+# a floating base would be the one place that reasoning breaks. The tag is kept alongside it so a human
+# can see which version the digest names; refresh both together.
 ARG NODE_VERSION=22
+ARG NODE_DIGEST=sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 # ---------- base: pnpm via corepack ----------
-FROM node:${NODE_VERSION}-slim AS base
+FROM node:${NODE_VERSION}-slim@${NODE_DIGEST} AS base
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -49,7 +55,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm --filter @katari-lang/runtime deploy --prod --legacy /prod
 
 # ---------- runtime: minimal, non-root ----------
-FROM node:${NODE_VERSION}-slim AS runtime
+FROM node:${NODE_VERSION}-slim@${NODE_DIGEST} AS runtime
 ENV NODE_ENV=production \
     PORT=3000
 WORKDIR /app

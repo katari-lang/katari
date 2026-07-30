@@ -51,6 +51,11 @@ export const fileRoutes = new Hono<AppEnv>()
       headers: {
         ...(file.contentType === null ? {} : { "Content-Type": file.contentType }),
         "Content-Length": String(file.size),
+        // The stored content type is whatever the UPLOADER sent, and this route shares an origin with the
+        // admin console, which holds the bearer token. `attachment` means a `text/html` blob is saved rather
+        // than rendered, so an uploaded document can never execute as a page on the console's origin. It
+        // costs nothing here: the console's own download path already forces a save.
+        "Content-Disposition": "attachment",
       },
     });
   })

@@ -10,6 +10,7 @@
 // tested here: the park/retry loop itself (the reactor's — see mcp-authorize-escalation.test.ts) and a
 // real IdP round-trip (the interactive flow is runtime-hosted and exercised in authorization-flow).
 
+import { createLocalFetch } from "../src/runtime/external/egress-guard.js";
 import {
   createServer,
   type IncomingMessage,
@@ -654,7 +655,7 @@ describe("SdkMcpTransport descriptor decoding", () => {
       },
     ],
   ])("%s fails as the typed server_error (wire drift, still catchable)", async (_label, bad) => {
-    const transport = new SdkMcpTransport({ credentials: memoryStore() });
+    const transport = new SdkMcpTransport({ credentials: memoryStore(), fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({ kind: "listTools", delegation: delegation(), descriptor: bad });
     typedThrowMessage(await next(), "prelude.mcp.server_error");
@@ -664,7 +665,7 @@ describe("SdkMcpTransport descriptor decoding", () => {
   test("an oauth descriptor naming a missing credential parks before any network I/O", async () => {
     // The url points nowhere reachable on purpose: the pre-flight `resolveToken` must decide this BEFORE
     // any SDK machinery touches the network, and the completion carries the descriptor's identity.
-    const transport = new SdkMcpTransport({ credentials: memoryStore() });
+    const transport = new SdkMcpTransport({ credentials: memoryStore(), fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -681,7 +682,7 @@ describe("SdkMcpTransport descriptor decoding", () => {
 
 describe("the two auth variants over a live server", () => {
   test("a headers descriptor rides its values as request headers", async () => {
-    const transport = new SdkMcpTransport({ credentials: memoryStore() });
+    const transport = new SdkMcpTransport({ credentials: memoryStore(), fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -698,7 +699,7 @@ describe("the two auth variants over a live server", () => {
     const store = memoryStore({
       github: { ...CREDENTIAL, resourceUrl: url },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -715,7 +716,7 @@ describe("the two auth variants over a live server", () => {
 
 describe("a 401-everything server splits by the auth variant", () => {
   test("headers + 401 is the typed auth_error (the same material will not start working)", async () => {
-    const transport = new SdkMcpTransport({ credentials: memoryStore() });
+    const transport = new SdkMcpTransport({ credentials: memoryStore(), fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -734,7 +735,7 @@ describe("a 401-everything server splits by the auth variant", () => {
     const store = memoryStore({
       github: { ...CREDENTIAL, refreshToken: null, resourceUrl: unauthorizedUrl },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -817,7 +818,7 @@ describe("a 401 gets a silent refresh-and-retry before anything parks", () => {
         resourceUrl: guardedUrl,
       },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -848,7 +849,7 @@ describe("a 401 gets a silent refresh-and-retry before anything parks", () => {
         resourceUrl: guardedUrl,
       },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -873,7 +874,7 @@ describe("a 401 gets a silent refresh-and-retry before anything parks", () => {
         resourceUrl: guardedUrl,
       },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",
@@ -896,7 +897,7 @@ describe("a 401 gets a silent refresh-and-retry before anything parks", () => {
         resourceUrl: guardedUrl,
       },
     });
-    const transport = new SdkMcpTransport({ credentials: store });
+    const transport = new SdkMcpTransport({ credentials: store, fetch: createLocalFetch() });
     const next = completionQueue(transport);
     transport.dispatch({
       kind: "listTools",

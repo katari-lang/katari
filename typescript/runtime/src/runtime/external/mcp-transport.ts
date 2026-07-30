@@ -36,12 +36,14 @@ import {
   StreamableHTTPClientTransport,
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { DelegationId } from "../ids.js";
 import {
   CredentialAuthorizationRequired,
   type CredentialStore,
   resolveToken,
 } from "./credentials.js";
+import type { GuardedFetch } from "./egress-guard.js";
 
 /** One mcp operation to perform, already lowered to plain Json (secret header values revealed at the
  *  reactor boundary — an MCP server is an allowed sink, like an http auth header). Each variant carries
@@ -327,6 +329,10 @@ export interface SdkMcpTransportDependencies {
    *  the store the resolution refreshes through and the authorize-retry loop re-reads after an escalation
    *  is answered. */
   credentials: CredentialStore;
+  /** The `fetch` every connection dials through — the shared egress guard (see `egress-guard.ts`). A server
+   *  descriptor's `url` is as program-chosen as `http.fetch`'s, so an MCP connection is exactly the same
+   *  SSRF surface and gets exactly the same check. */
+  fetch: GuardedFetch;
 }
 
 /** The production transport: the official MCP SDK behind a lazy, descriptor-keyed client cache.
@@ -344,10 +350,12 @@ export class SdkMcpTransport implements McpTransport {
   private readonly controllers = new Map<DelegationId, AbortController>();
   private readonly produceBlob?: McpBlobProducer;
   private readonly credentials: CredentialStore;
+  private readonly guardedFetch: GuardedFetch;
 
   constructor(dependencies: SdkMcpTransportDependencies) {
     this.produceBlob = dependencies.produceBlob;
     this.credentials = dependencies.credentials;
+    this.guardedFetch = dependencies.fetch;
   }
 
   onComplete(sink: (completion: McpCompletion) => void): void {
@@ -587,12 +595,15 @@ export class SdkMcpTransport implements McpTransport {
   private async connectionOptions(
     auth: DescriptorAuth,
     key: string,
-  ): Promise<{ requestInit?: RequestInit }> {
+  ): Promise<{ requestInit?: RequestInit; fetch: FetchLike }> {
+    // Every branch dials through the guard, so a descriptor cannot reach an internal address whichever way
+    // it authenticates. It is spread in first so an auth branch can never accidentally drop it.
+    const dialer = { fetch: toFetchLike(this.guardedFetch) };
     switch (auth.kind) {
       case "headers":
         return Object.keys(auth.headers).length > 0
-          ? { requestInit: { headers: auth.headers } }
-          : {};
+          ? { ...dialer, requestInit: { headers: auth.headers } }
+          : dialer;
       case "oauth": {
         const resolution = await resolveToken(this.credentials, auth.name);
         if (resolution.kind === "needsAuthorize") {
@@ -602,10 +613,24 @@ export class SdkMcpTransport implements McpTransport {
           );
         }
         this.bearerTokens.set(key, resolution.token);
-        return { requestInit: { headers: { Authorization: `Bearer ${resolution.token}` } } };
+        return {
+          ...dialer,
+          requestInit: { headers: { Authorization: `Bearer ${resolution.token}` } },
+        };
       }
     }
   }
+}
+
+/** Present the guarded fetch as the SDK's `FetchLike`.
+ *
+ *  The two signatures describe the SAME runtime function — Node's global `fetch` IS undici, so its `Response`
+ *  and undici's are one class — but they are declared by two different type packages (`@types/node`'s DOM
+ *  lib and `undici`'s own), and TypeScript has no way to know that. The conversion is therefore sound but
+ *  unprovable, so it is done exactly once, here, behind a name that says what it is, rather than being
+ *  smeared across every call site. */
+function toFetchLike(guarded: GuardedFetch): FetchLike {
+  return guarded as unknown as FetchLike;
 }
 
 /** A stable cache key for a server descriptor: the url plus the auth IDENTITY — the key-sorted header

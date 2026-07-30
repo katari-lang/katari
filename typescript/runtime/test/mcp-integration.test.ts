@@ -5,6 +5,7 @@
 // descriptor-keyed connect) ↔ reactor-side `$tool` minting under a provide scope ↔ emit-site dynamic
 // dispatch (schema validation, context riding the external target) ↔ the reactor round-trip.
 
+import { createLocalFetch } from "../src/runtime/external/egress-guard.js";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
@@ -226,7 +227,7 @@ describe("the built-in mcp path through the actor", () => {
       blobs: new InMemoryBlobStore(),
       external: new StubFfiTransport(),
       http: new StubHttpTransport(),
-      mcp: new SdkMcpTransport({ credentials: UNUSED_CREDENTIALS }),
+      mcp: new SdkMcpTransport({ credentials: UNUSED_CREDENTIALS, fetch: createLocalFetch() }),
       persistence: new InMemoryPersistence(),
     });
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, {

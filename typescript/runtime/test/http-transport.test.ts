@@ -5,6 +5,8 @@
 // reports an error — at-most-once), and an
 // abort with no live request synthesises a `cancelled` (so a recovered cancelling call can be confirmed).
 
+import type { RequestInit, Response as UndiciResponse } from "undici";
+import { Response } from "undici";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   FetchHttpTransport,
@@ -16,9 +18,13 @@ import type { BlobId, DelegationId } from "../src/runtime/ids.js";
 const DELEGATION = "http-delegation-1" as DelegationId;
 
 /** A `fetch` stub that records its calls and returns a fixed response. */
-function fetchStub(response: () => Promise<Response>) {
-  return vi.fn((_input: string | URL | Request, _init?: RequestInit): Promise<Response> => response());
+function fetchStub(response: () => Promise<UndiciResponse>) {
+  return vi.fn((_url: string | URL, _init?: RequestInit): Promise<UndiciResponse> => response());
 }
+
+/** Generous ceilings: these tests are about the request/response mapping, not about the limits. The
+ *  limit behaviour has its own test below. */
+const LIMITS = { timeoutMs: 30_000, maxResponseBytes: 8 * 1024 * 1024 };
 
 /** Dispatch one call and resolve with the completion the transport feeds back to its sink. */
 function dispatchOnce(transport: FetchHttpTransport, call: HttpCall): Promise<HttpCompletion> {
@@ -45,8 +51,7 @@ afterEach(() => {
 describe("FetchHttpTransport", () => {
   test("performs a GET (no body) and maps any response to a { status, body } result", async () => {
     const fetchMock = fetchStub(() => Promise.resolve(new Response("pong", { status: 200 })));
-    vi.stubGlobal("fetch", fetchMock);
-    const transport = new FetchHttpTransport();
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completion = await dispatchOnce(
       transport,
@@ -70,8 +75,7 @@ describe("FetchHttpTransport", () => {
 
   test("sends the body and headers for a POST, including an explicit empty body", async () => {
     const fetchMock = fetchStub(() => Promise.resolve(new Response("", { status: 201 })));
-    vi.stubGlobal("fetch", fetchMock);
-    const transport = new FetchHttpTransport();
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     await dispatchOnce(
       transport,
@@ -87,7 +91,7 @@ describe("FetchHttpTransport", () => {
     expect(new Headers(postInit?.headers).get("authorization")).toBe("Bearer sk-123");
 
     // A POST with a deliberately empty body still sends a body (Content-Length: 0), not a bodyless request.
-    const emptyTransport = new FetchHttpTransport();
+    const emptyTransport = new FetchHttpTransport(fetchMock, LIMITS);
     await dispatchOnce(
       emptyTransport,
       requestCall({ url: "https://example.test/items", method: "POST", headers: {}, body: "" }),
@@ -96,11 +100,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("a non-2xx response is a result, not an error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response("nope", { status: 404 }))),
-    );
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => Promise.resolve(new Response("nope", { status: 404 })));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completion = await dispatchOnce(
       transport,
@@ -117,11 +118,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("a request that produces no response is an error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.reject(new Error("getaddrinfo ENOTFOUND"))),
-    );
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => Promise.reject(new Error("getaddrinfo ENOTFOUND")));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completion = await dispatchOnce(
       transport,
@@ -131,11 +129,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("a malformed request argument is an error, not an unhandled rejection", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response("", { status: 200 }))),
-    );
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => Promise.resolve(new Response("", { status: 200 })));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completion = await dispatchOnce(transport, requestCall({ url: 42, method: "GET" }));
     expect(completion.outcome.kind).toBe("error");
@@ -143,8 +138,7 @@ describe("FetchHttpTransport", () => {
 
   test("recovering an unknown call reports an error WITHOUT re-sending the request (at-most-once)", async () => {
     const fetchMock = fetchStub(() => Promise.resolve(new Response("ok", { status: 200 })));
-    vi.stubGlobal("fetch", fetchMock);
-    const transport = new FetchHttpTransport();
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completion = await new Promise<HttpCompletion>((resolve) => {
       transport.onComplete(resolve);
@@ -158,9 +152,8 @@ describe("FetchHttpTransport", () => {
   test("recovering a request the transport still has in flight leaves it alone (a warm reset)", async () => {
     // A fetch that resolves only when the test releases it, so the request is verifiably in flight.
     let release: (response: Response) => void = () => {};
-    const fetchMock = fetchStub(() => new Promise<Response>((resolve) => (release = resolve)));
-    vi.stubGlobal("fetch", fetchMock);
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => new Promise<UndiciResponse>((resolve) => (release = resolve)));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     const completions: HttpCompletion[] = [];
     transport.onComplete((completion) => completions.push(completion));
@@ -183,11 +176,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("aborting a call with no live request synthesises a cancelled confirmation", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response("", { status: 200 }))),
-    );
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => Promise.resolve(new Response("", { status: 200 })));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
 
     // No dispatch preceded this abort (a recovery abort of a call whose request died with the process).
     const completion = await new Promise<HttpCompletion>((resolve) => {
@@ -200,14 +190,11 @@ describe("FetchHttpTransport", () => {
   test("a fetch_file captures the response bytes into a file handle through the wired producer", async () => {
     // Arbitrary non-UTF-8 bytes, so a text read would corrupt them — the whole reason to capture to a blob.
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() =>
+    const fetchMock = fetchStub(() =>
         Promise.resolve(new Response(bytes, { status: 200, headers: { "content-type": "image/png" } })),
-      ),
-    );
+      );
     const produced: { delegation: DelegationId; bytes: Uint8Array; contentType: string }[] = [];
-    const transport = new FetchHttpTransport();
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
     transport.useBlobProducer(async (delegation, given, contentType) => {
       produced.push({ delegation, bytes: given, contentType });
       return "produced-blob-1" as BlobId;
@@ -237,12 +224,9 @@ describe("FetchHttpTransport", () => {
 
   test("a fetch_file with no response Content-Type stores the octet-stream fallback", async () => {
     // A Response built from raw bytes carries no Content-Type, so the transport supplies the RFC 2046 default.
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }))),
-    );
+    const fetchMock = fetchStub(() => Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 })));
     let seenContentType: string | undefined;
-    const transport = new FetchHttpTransport();
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
     transport.useBlobProducer(async (_delegation, _bytes, contentType) => {
       seenContentType = contentType;
       return "produced-blob-2" as BlobId;
@@ -256,11 +240,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("a fetch_file whose call already vanished is an error (the producer dropped the bytes)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 }))),
-    );
-    const transport = new FetchHttpTransport();
+    const fetchMock = fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 })));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS);
     // A `null` producer result models the owning call having resolved / been cancelled before the download.
     transport.useBlobProducer(async () => null);
 
@@ -272,11 +253,8 @@ describe("FetchHttpTransport", () => {
   });
 
   test("a fetch_file with no wired producer fails loudly (an error, not a silent empty result)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 }))),
-    );
-    const transport = new FetchHttpTransport(); // no producer wired
+    const fetchMock = fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 })));
+    const transport = new FetchHttpTransport(fetchMock, LIMITS); // no producer wired
 
     const completion = await dispatchOnce(
       transport,

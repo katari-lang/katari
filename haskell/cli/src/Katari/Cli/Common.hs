@@ -19,6 +19,8 @@ module Katari.Cli.Common
     exitInterrupted,
     resolveProjectRoot,
     resolveRuntimeUrl,
+    isLoopbackUrl,
+    isBrowsableUrl,
     requireProjectId,
     resolveIdPrefix,
     PrefixError (..),
@@ -118,15 +120,78 @@ resolveProjectRoot subcommand override = do
     Nothing -> dieIn subcommand "no katari.toml found in this or any parent directory"
 
 -- | Resolve the runtime URL the CLI talks to: the @--url@ override, then @KATARI_API_URL@, then the
--- @[runtime].url@ from @katari.toml@. Shared by every command that reaches the runtime.
-resolveRuntimeUrl :: Maybe Text -> Text -> IO Text
-resolveRuntimeUrl override fallback = case override of
-  Just url -> pure url
-  Nothing -> do
-    environmentUrl <- lookupEnv "KATARI_API_URL"
-    pure $ case environmentUrl of
-      Just environmentValue | not (null environmentValue) -> Text.pack environmentValue
-      _ -> fallback
+-- @[runtime].url@ from @katari.toml@ ('Nothing' when the command runs outside a project). Exits with
+-- code 2 when the chain yields nothing.
+--
+-- Every command that reaches the runtime comes through here, which is what makes it the right place for
+-- the plaintext-transport warning: a caller that resolved its own URL would be a caller that could skip
+-- it.
+resolveRuntimeUrl :: Text -> OutputContext -> Maybe Text -> Maybe Text -> IO Text
+resolveRuntimeUrl subcommand output override fallback = do
+  environmentUrl <- lookupEnv "KATARI_API_URL"
+  let fromEnvironment = case environmentUrl of
+        Just environmentValue | not (null environmentValue) -> Just (Text.pack environmentValue)
+        _ -> Nothing
+  url <- case override <|> fromEnvironment <|> fallback of
+    Just resolved -> pure resolved
+    Nothing -> dieIn subcommand "no --url given, KATARI_API_URL unset, and no surrounding katari.toml's [runtime].url found"
+  warnPlaintextRuntimeUrl output url
+  pure url
+
+-- | Warn when the runtime URL carries everything in cleartext: the @KATARI_API_KEY@ bearer token on
+-- every request, @env set --secret@ values, the compiled IR, the sidecar bundle, uploaded files.
+--
+-- Loopback is exempt because that traffic never reaches a network — and because @http:\/\/localhost:8000@
+-- is the documented local flow (@katari init@ writes it, @docker compose up@ serves it), which a warning
+-- on every command would train users to ignore, taking the remote case with it. It stays a warning
+-- rather than a refusal for the same reason the dependency path can afford to be strict and this one
+-- cannot: a plaintext runtime behind a private tunnel or inside a VPN is a real deployment, and the
+-- CLI is not in a position to tell it from an exposed one.
+warnPlaintextRuntimeUrl :: OutputContext -> Text -> IO ()
+warnPlaintextRuntimeUrl output url =
+  when (httpScheme `Text.isPrefixOf` url && not (isLoopbackUrl url)) $
+    warn
+      output
+      ( "the runtime URL "
+          <> url
+          <> " is plaintext http://, so the KATARI_API_KEY bearer token, any --secret values, and the "
+          <> "uploaded program travel unencrypted; use https:// unless the runtime is reached over a "
+          <> "private tunnel"
+      )
+
+-- | Whether a URL's host is the local machine. Only the three spellings a runtime is actually reached
+-- by locally count (@katari init@'s template, docker's published port, an IPv6 stack): a wider guess
+-- would be a way to have a warning suppressed by a hostname that merely resolves to a loopback address
+-- today.
+isLoopbackUrl :: Text -> Bool
+isLoopbackUrl url = urlHost url `elem` ["localhost", "127.0.0.1", "[::1]"]
+
+-- | The host of an @http(s)://@ URL, lowercased and without its port — @""@ when there is no authority
+-- to read. An IPv6 literal keeps its brackets, since that is how it is written in a URL and how
+-- 'isLoopbackUrl' spells it.
+urlHost :: Text -> Text
+urlHost url = Text.toLower (dropPort authority)
+  where
+    afterScheme = Text.drop (Text.length schemeSeparator) (snd (Text.breakOn schemeSeparator url))
+    authority = Text.takeWhile (`notElem` ['/', '?', '#']) afterScheme
+    schemeSeparator = "://"
+    -- A ':' inside brackets belongs to an IPv6 literal, so only a ':' after the closing one is a port.
+    dropPort candidate = case Text.breakOnEnd "]" candidate of
+      ("", withoutBrackets) -> Text.takeWhile (/= ':') withoutBrackets
+      (brackets, afterBrackets) -> brackets <> Text.takeWhile (/= ':') afterBrackets
+
+-- | The plaintext scheme, spelled once so 'warnPlaintextRuntimeUrl' and 'Katari.Cli.Command.Answer'
+-- (which decides whether a runtime-supplied URL may be handed to the desktop's opener) agree on it.
+httpScheme, httpsScheme :: Text
+httpScheme = "http://"
+httpsScheme = "https://"
+
+-- | Whether a URL is one the CLI may hand to the desktop's URL handler: ordinary web transport, either
+-- TLS-protected or aimed at this machine. Callers use it to gate spawning a browser on a URL that came
+-- off the wire; see 'Katari.Cli.Command.Answer.openInBrowser' for why that gate exists.
+isBrowsableUrl :: Text -> Bool
+isBrowsableUrl url =
+  httpsScheme `Text.isPrefixOf` url || (httpScheme `Text.isPrefixOf` url && isLoopbackUrl url)
 
 -- | Resolve a project name to its runtime id, exiting with code 2 (and an actionable hint) when the
 -- project is not deployed. The runtime keys management routes by id while the CLI speaks names.
@@ -196,17 +261,11 @@ withRuntimeContext subcommand global projectOverride = do
   projectId <- requireProjectId subcommand client projectName
   pure RuntimeContext {client = client, projectId = projectId, projectName = projectName, output = output}
 
--- | Build the runtime client from the URL chain (@--url@, then @KATARI_API_URL@, then the config's
--- @[runtime].url@) and the environment's auth token, with @--verbose@ tracing attached.
+-- | Build the runtime client from the URL chain ('resolveRuntimeUrl') and the environment's auth token,
+-- with @--verbose@ tracing attached.
 makeRuntimeClient :: Text -> GlobalOptions -> OutputContext -> Maybe ProjectConfig -> IO RuntimeClient
 makeRuntimeClient subcommand global output config = do
-  environmentUrl <- lookupEnv "KATARI_API_URL"
-  let fromEnvironment = case environmentUrl of
-        Just value | not (null value) -> Just (Text.pack value)
-        _ -> Nothing
-  url <- case global.url <|> fromEnvironment <|> fmap (\projectConfig -> projectConfig.runtime.url) config of
-    Just resolved -> pure resolved
-    Nothing -> dieIn subcommand "no --url given, KATARI_API_URL unset, and no surrounding katari.toml's [runtime].url found"
+  url <- resolveRuntimeUrl subcommand output global.url (fmap (\projectConfig -> projectConfig.runtime.url) config)
   token <- requireRuntimeAuth subcommand
   manager <- newTlsManager
   pure (withTrace (verboseLog output) (newRuntimeClient manager url (Just token)))

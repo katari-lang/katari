@@ -3,6 +3,7 @@ module Katari.Project.ConfigSpec (spec) where
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import GHC.List (List)
 import Katari.Project.Config
   ( DependenciesSection (..),
     GitOverride (..),
@@ -11,10 +12,11 @@ import Katari.Project.Config
     PathOverride (..),
     ProjectConfig (..),
     RuntimeSection (..),
+    SidecarSection (..),
     isValidPackageName,
     parseKatariToml,
   )
-import Katari.Project.Error (ProjectError (..))
+import Katari.Project.Error (FileErrorInfo (..), ProjectError (..))
 import Test.Hspec
 
 -- | A well-formed @katari.toml@ exercising the optional fields, a dependency list, and a path
@@ -36,10 +38,31 @@ validToml =
       "path = \"../my_fork\""
     ]
 
+-- | A minimal @katari.toml@ declaring the given @[sidecar].sourceRoots@ and nothing else of interest.
+sidecarToml :: List Text -> Text
+sidecarToml sourceRoots =
+  Text.unlines
+    [ "[package]",
+      "name = \"hello\"",
+      "[runtime]",
+      "url = \"http://x\"",
+      "[sidecar]",
+      "sourceRoots = [" <> Text.intercalate ", " ["\"" <> root <> "\"" | root <- sourceRoots] <> "]",
+      "[dependencies]",
+      "packages = []"
+    ]
+
 isConfigValidationError :: ProjectError -> Bool
 isConfigValidationError projectError = case projectError of
   ConfigValidationError _ -> True
   _ -> False
+
+-- | The message of a validation failure, so a test can assert on what the reader is told and not only
+-- on which constructor was returned.
+validationMessage :: Either ProjectError a -> Maybe Text
+validationMessage result = case result of
+  Left (ConfigValidationError info) -> Just info.message
+  _ -> Nothing
 
 isConfigParseError :: ProjectError -> Bool
 isConfigParseError projectError = case projectError of
@@ -148,6 +171,33 @@ spec = do
                 "packages = []"
               ]
       parseKatariToml "katari.toml" toml `shouldSatisfy` either isConfigValidationError (const False)
+
+    -- The sidecar roots are handed to the FFI bundler, whose output the runtime executes, and they are
+    -- read out of a DEPENDENCY's katari.toml as readily as the root's. An absolute entry is the sharp
+    -- case: '</>' drops its left operand, so the join against the package root does not widen the scan,
+    -- it relocates it — which is how a published package would have a developer's home directory
+    -- bundled and uploaded.
+    it "rejects a [sidecar].sourceRoots entry that is an absolute path" $
+      parseKatariToml "katari.toml" (sidecarToml ["/home/dev"])
+        `shouldSatisfy` either isConfigValidationError (const False)
+
+    it "rejects a [sidecar].sourceRoots entry that escapes the package via .." $
+      parseKatariToml "katari.toml" (sidecarToml ["../../elsewhere"])
+        `shouldSatisfy` either isConfigValidationError (const False)
+
+    -- Every entry is checked, not just the first: the bundler reads the head of the list today, but a
+    -- rule that only holds for position zero is one refactor away from holding nowhere.
+    it "rejects a [sidecar].sourceRoots entry that escapes even when a valid entry precedes it" $
+      parseKatariToml "katari.toml" (sidecarToml ["sidecar", "/etc"])
+        `shouldSatisfy` either isConfigValidationError (const False)
+
+    it "names the offending key so the reader knows which line to edit" $
+      validationMessage (parseKatariToml "katari.toml" (sidecarToml ["/home/dev"]))
+        `shouldSatisfy` maybe False (Text.isInfixOf "[sidecar].sourceRoots")
+
+    it "accepts sidecar roots that stay inside the package" $ case parseKatariToml "katari.toml" (sidecarToml ["src", "ffi/handlers"]) of
+      Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+      Right config -> fmap (.sourceRoots) config.sidecar `shouldBe` Just ["src", "ffi/handlers"]
 
     it "rejects an override that names no declared dependency" $ do
       let toml =

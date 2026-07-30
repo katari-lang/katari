@@ -11,7 +11,12 @@
 // at-most-once guarantee is why http is a reactor, not a core-inline prim.
 
 import { FILE_KEY, type Json, SEMANTIC_KIND_KEY } from "@katari-lang/types";
+// The request / response types come from undici rather than the DOM lib: the transport dials through
+// undici's `fetch` so it can install the egress guard as the connection's dispatcher, and mixing the two
+// families of `Headers` / `Response` would only need casts to paper over.
+import { Headers, type RequestInit, type Response } from "undici";
 import type { BlobId, DelegationId } from "../ids.js";
+import { BlockedDestinationError, type GuardedFetch, readBodyWithLimit } from "./egress-guard.js";
 import { type HttpBlobResolver, materializeBody } from "./http-body.js";
 
 /** One http request to perform. `argument` is the call's argument as plain Json — `{ url, method, headers,
@@ -101,8 +106,21 @@ const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
  *  unrecorded, so a downloaded-then-reuploaded file round-trips with a definite type). */
 const RESPONSE_FALLBACK_CONTENT_TYPE = "application/octet-stream";
 
+/** What bounds one request: the destination guard it dials through, and the ceilings a single call may not
+ *  exceed. Injected rather than read from `config` here so the transport stays unit-testable against a fake
+ *  fetch and a small limit. */
+export interface HttpLimits {
+  timeoutMs: number;
+  maxResponseBytes: number;
+}
+
 /** The production transport: an in-runtime `fetch`. The result (any HTTP response) or an error (no response)
- *  is delivered to the sink off the dispatching turn. */
+ *  is delivered to the sink off the dispatching turn.
+ *
+ *  Every request goes through the injected `GuardedFetch`, which refuses a destination that resolves to a
+ *  loopback / private / link-local address (see `egress-guard.ts`) — the url is a program-chosen public
+ *  `string`, so without that check an LLM's output or a webhook payload could aim the runtime at the
+ *  deployment's internal network or the cloud metadata service. */
 export class FetchHttpTransport implements HttpTransport {
   private sink: ((completion: HttpCompletion) => void) | null = null;
   private readonly controllers = new Map<DelegationId, AbortController>();
@@ -115,7 +133,12 @@ export class FetchHttpTransport implements HttpTransport {
    *  fails loudly. May also be supplied at construction, for a standalone transport. */
   private produce: HttpBlobProducer | null;
 
-  constructor(resolve: HttpBlobResolver | null = null, produce: HttpBlobProducer | null = null) {
+  constructor(
+    private readonly guardedFetch: GuardedFetch,
+    private readonly limits: HttpLimits,
+    resolve: HttpBlobResolver | null = null,
+    produce: HttpBlobProducer | null = null,
+  ) {
     this.resolve = resolve;
     this.produce = produce;
   }
@@ -179,10 +202,15 @@ export class FetchHttpTransport implements HttpTransport {
   /** Perform the request, mapping any response to a `result` and a non-completing request to an `error`. The
    *  argument parse is inside the try so a malformed request is an `error` outcome, not an unhandled rejection. */
   private async perform(call: HttpCall, signal: AbortSignal): Promise<HttpCompletion["outcome"]> {
+    // The caller's cancellation and the call's own deadline are separate reasons to stop, and they settle
+    // differently — a cancel is a `cancelled` outcome, a timeout is a failure the program can catch. Combine
+    // them for the request, then tell them apart in the catch by asking which one fired.
+    const deadline = AbortSignal.timeout(this.limits.timeoutMs);
+    const combined = AbortSignal.any([signal, deadline]);
     try {
       const request = parseRequest(call.argument);
       const headers = new Headers(request.headers);
-      const init: RequestInit = { method: request.method, headers, signal };
+      const init: RequestInit = { method: request.method, headers, signal: combined };
       // A body-less method (GET / HEAD) must not carry a body; every other method materialises the request
       // body sum HERE, at the send boundary — a `file` leaf's bytes are read from the blob store now, never
       // earlier, so the value plane / DB / trace only ever held the handle. An explicit empty text body
@@ -200,7 +228,7 @@ export class FetchHttpTransport implements HttpTransport {
           headers.set("content-type", contentType.value);
         }
       }
-      const response = await fetch(request.url, init);
+      const response = await this.guardedFetch(request.url, init);
       // Response headers ride along (names lowercased by the platform; repeated headers arrive joined
       // with ", ") — how a program reads a session token, a rate-limit hint, a redirect location.
       const responseHeaders: { [name: string]: Json } = {};
@@ -208,20 +236,37 @@ export class FetchHttpTransport implements HttpTransport {
         responseHeaders[name] = value;
       });
       // `fetch_file` captures the whole body as a downloaded blob (returning its handle); `fetch` reads it
-      // as text. Both hold the response in memory, so neither caps the body size — same policy. `await` so a
-      // capture failure (an unwired producer, a body-read error) is caught below, not left an unhandled
-      // rejection (a bare `return promise` would escape this try).
+      // as text. Both hold the response in memory, so both read it through the same byte ceiling — the
+      // process is shared by every project, so one oversized download must not be able to exhaust it.
+      // `await` so a capture failure (an unwired producer, a body-read error) is caught below, not left an
+      // unhandled rejection (a bare `return promise` would escape this try).
       if (call.responseKind === "file") {
         return await this.captureResponseFile(call.delegation, response, responseHeaders);
       }
-      const body = await response.text();
+      const bytes = await readBodyWithLimit(response, this.limits.maxResponseBytes);
       return {
         kind: "result",
-        value: { status: response.status, headers: responseHeaders, body },
+        value: {
+          status: response.status,
+          headers: responseHeaders,
+          body: new TextDecoder().decode(bytes),
+        },
       };
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        return { kind: "cancelled" };
+      // Only the CALLER's cancellation is a `cancelled`; the deadline firing is a request that never
+      // completed, which is the same shape as a DNS failure and is what the program's `fetch_error` handler
+      // exists for.
+      if (signal.aborted) return { kind: "cancelled" };
+      if (deadline.aborted) {
+        return {
+          kind: "error",
+          message: `the request exceeded the ${this.limits.timeoutMs}ms timeout (KATARI_HTTP_TIMEOUT_MS)`,
+        };
+      }
+      // A refused destination is a deliberate policy decision, not a network fault — say so plainly, since
+      // the operator reading it needs to know it was the runtime and not the remote end that said no.
+      if (error instanceof BlockedDestinationError) {
+        return { kind: "error", message: error.message };
       }
       return { kind: "error", message: error instanceof Error ? error.message : String(error) };
     }
@@ -243,7 +288,7 @@ export class FetchHttpTransport implements HttpTransport {
     if (this.produce === null) {
       throw new Error("http.fetch_file: a file response needs a blob producer, but none was wired");
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = await readBodyWithLimit(response, this.limits.maxResponseBytes);
     const contentType = response.headers.get("content-type") ?? RESPONSE_FALLBACK_CONTENT_TYPE;
     const blobId = await this.produce(delegation, bytes, contentType);
     if (blobId === null) {

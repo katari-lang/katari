@@ -7,6 +7,7 @@ import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName (..))
+import Katari.Project.Cache (markPackageVerified, packageDir, projectCachePaths)
 import Katari.Project.Config
   ( DependenciesSection (..),
     PackageSection (..),
@@ -21,7 +22,6 @@ import Katari.Project.Resolve
     ResolvedPackage (..),
     ResolvedProject (..),
     assembleProject,
-    checkPinnedSha,
     compileInputSources,
     loadProjectOffline,
     lockfileFromResolved,
@@ -101,15 +101,41 @@ isCycle projectError = case projectError of
   ResolveCycle _ -> True
   _ -> False
 
-isShaMismatch :: ProjectError -> Bool
-isShaMismatch projectError = case projectError of
-  ResolveShaMismatch _ -> True
-  _ -> False
-
 isLockOutOfSync :: ProjectError -> Bool
 isLockOutOfSync projectError = case projectError of
   ResolveLockOutOfSync _ -> True
   _ -> False
+
+isNotCached :: ProjectError -> Bool
+isNotCached projectError = case projectError of
+  ResolvePackageNotCached _ -> True
+  _ -> False
+
+-- | The content hash the fixture lock pins @lib@ at. Nothing recomputes it, so any well-formed hash
+-- will do.
+lockedSha :: Text
+lockedSha = Text.replicate 64 "a"
+
+-- | A project under @\<tmp>\/app@ whose single dependency @lib@ is locked to a git source — the shape
+-- an offline load answers out of the content-addressed cache. The manifest declares @lib@ and pins no
+-- snapshot, which is what the lock records, so the two are in sync and the load reaches the cache.
+writeLockedGitProject :: FilePath -> IO ()
+writeLockedGitProject tmp = do
+  createDirectoryIfMissing True (tmp </> "app")
+  TextIO.writeFile (tmp </> "app" </> "katari.toml") (projectToml "app" ["lib"] [])
+  TextIO.writeFile
+    (tmp </> "app" </> "katari.lock")
+    ( Text.unlines
+        [ "[lock]",
+          "version = 1",
+          "",
+          "[packages.lib]",
+          "source = \"git\"",
+          "url = \"https://github.com/x/lib\"",
+          "rev = \"v1.0.0\"",
+          "sha256 = \"" <> lockedSha <> "\""
+        ]
+    )
 
 -- | A minimal @katari.toml@ for an on-disk fixture: a package name, its declared dependencies, and
 -- path overrides for them.
@@ -214,16 +240,6 @@ spec = do
       let project = (projectWith (rootPackageWith ["app"]) []) {snapshotCompilerVersion = Just "0.2.0"}
       (lockfileFromResolved project).katariCompiler `shouldBe` Just "0.2.0"
 
-  describe "checkPinnedSha" $ do
-    it "accepts a fetched hash that matches its pin" $
-      checkPinnedSha "lib" (Just "deadbeef") "deadbeef" `shouldBe` Right ()
-
-    it "rejects a fetched hash that disagrees with its pin (tampered content)" $
-      checkPinnedSha "lib" (Just "deadbeef") "0badf00d" `shouldSatisfy` either isShaMismatch (const False)
-
-    it "accepts when there is no pin to verify against (git override, trust on first use)" $
-      checkPinnedSha "lib" Nothing "anything" `shouldBe` Right ()
-
   describe "resolveProject" $
     it "rejects a dependency cycle" $
       withSystemTempDirectory "katari-resolve" $ \tmp -> do
@@ -285,3 +301,30 @@ spec = do
         case result of
           Left projectError -> expectationFailure ("expected success, got " <> show projectError)
           Right resolved -> resolved.snapshotCompilerVersion `shouldBe` Just "9.9.9"
+
+    -- An offline load is what @check@, @build@ and @apply@ run, so whatever it accepts out of
+    -- .katari/packages/ is compiled and deployed. A directory sitting at the content-addressed path is
+    -- not on its own evidence that its content was ever hashed — a repository can commit one — so it
+    -- has to be re-fetched rather than trusted, which offline means telling the user to run `katari lock`.
+    it "refuses a cached git package the cache never recorded extracting" $
+      withSystemTempDirectory "katari-offline" $ \tmp -> do
+        writeLockedGitProject tmp
+        createDirectoryIfMissing True (packageDir (projectCachePaths (tmp </> "app")) "lib" lockedSha </> "src")
+        TextIO.writeFile
+          (packageDir (projectCachePaths (tmp </> "app")) "lib" lockedSha </> "katari.toml")
+          (projectToml "lib" [] [])
+        result <- loadProjectOffline emptyOverlay (tmp </> "app")
+        result `shouldSatisfy` either isNotCached (const False)
+
+    it "loads a cached git package the cache recorded extracting" $
+      withSystemTempDirectory "katari-offline" $ \tmp -> do
+        writeLockedGitProject tmp
+        let cache = projectCachePaths (tmp </> "app")
+        createDirectoryIfMissing True (packageDir cache "lib" lockedSha </> "src")
+        TextIO.writeFile (packageDir cache "lib" lockedSha </> "katari.toml") (projectToml "lib" [] [])
+        TextIO.writeFile (packageDir cache "lib" lockedSha </> "src" </> "lib.ktr") "agent noop() -> null { null }"
+        markPackageVerified cache "lib" lockedSha
+        result <- loadProjectOffline emptyOverlay (tmp </> "app")
+        case result of
+          Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+          Right resolved -> Map.keys resolved.depPackages `shouldBe` ["lib"]

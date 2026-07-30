@@ -214,6 +214,20 @@ take a newer staging only when you ask for one.
 - [`examples/playground`](examples/playground) — one project, several independently runnable
   modules, each demonstrating a core feature.
 
+## Running it for real
+
+The flow above is the local one. Before you put a runtime on a network, read:
+
+- [`docs/deploying.md`](docs/deploying.md) — the operations guide: how to supply the two keys without
+  leaking them into a task definition, why `KATARI_SECRET_KEY` must be kept forever (and how to rotate it),
+  database TLS, the single-instance requirement and what it means for rolling deploys, and what a program is
+  allowed to reach over the network.
+- [`SECURITY.md`](SECURITY.md) — the trust model, how to report a vulnerability, and the limitations that
+  are known rather than undiscovered.
+
+The short version: `KATARI_API_KEY` is equivalent to shell access on the runtime host, because deploying a
+snapshot runs code there. Treat it that way.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

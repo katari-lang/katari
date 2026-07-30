@@ -13,6 +13,7 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/types";
+import { mintSidecarToken, revokeSidecarToken } from "../../lib/sidecar-tokens.js";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import {
   type FfiCall,
@@ -153,22 +154,67 @@ export class SnapshotFfiTransport implements FfiTransport {
   }
 }
 
-/** The production materialization, parameterized by the runtime's own base URL and the API bearer token:
- *  write the bundle's ESM to a per-snapshot temp file and spawn it with `node`, handing the process ONLY the
- *  env the blob side channel needs — the runtime URL to reach, the project id to scope its blobs, and the API
- *  key to authenticate the blob upload / download it makes back to the runtime (the blob routes are under
- *  `/api` and require the bearer, exactly like any other caller). The sidecar does not inherit the runtime's
- *  environment. `node` is spawned by its absolute path (`process.execPath`, the runtime's own interpreter),
- *  so it resolves without an inherited `PATH` and the sidecar runs the same node version. A snapshot's bundle
- *  is immutable, so the file is written once per snapshot per process. */
-export function nodeSidecarMaterialize(runtimeBaseUrl: string, apiKey: string): Materialize {
+/** The production materialization, parameterized by the runtime's own base URL: write the bundle's ESM to a
+ *  per-snapshot temp file and spawn it with `node`, handing the process ONLY the env the blob side channel
+ *  needs — the runtime URL to reach, the project id to scope its blobs, and a token to authenticate the blob
+ *  upload / download it makes back (the blob routes are under `/api` and require a bearer, like any other
+ *  caller).
+ *
+ *  That token is minted for THIS sidecar and nothing else: it opens the two blob paths of this one project
+ *  and expires when the process is torn down (`lib/sidecar-tokens.ts`). It is emphatically not the runtime's
+ *  master `KATARI_API_KEY`, which is what used to be handed over here — a sidecar runs the user's own FFI
+ *  handlers, and on a project with third-party dependencies that means someone else's JavaScript, which could
+ *  simply read the master key out of its environment and act as the operator on every project.
+ *
+ *  The file is written with `wx` (create-exclusive) and mode 0600 so a pre-planted symlink at the predictable
+ *  path cannot redirect the write, and nothing else on the host can read the bundle. A snapshot's bundle is
+ *  immutable, so an existing file from this same runtime is simply reused.
+ *
+ *  The sidecar does not inherit the runtime's environment. `node` is spawned by its absolute path
+ *  (`process.execPath`, the runtime's own interpreter), so it resolves without an inherited `PATH` and the
+ *  sidecar runs the same node version. */
+export function nodeSidecarMaterialize(runtimeBaseUrl: string): Materialize {
   return async (bundle, snapshot, projectId) => {
     const path = join(tmpdir(), `katari-sidecar-${snapshot}.mjs`);
-    await writeFile(path, bundle.entry);
-    return subprocessSidecar(process.execPath, [path], {
+    await writeBundleOnce(path, bundle.entry);
+    const token = mintSidecarToken(projectId);
+    const spawner = subprocessSidecar(process.execPath, [path], {
       KATARI_RUNTIME_URL: runtimeBaseUrl,
       KATARI_PROJECT_ID: projectId,
-      KATARI_API_KEY: apiKey,
+      // The name the `@katari-lang/port` blob client reads. Its VALUE is now the scoped token above; the
+      // variable keeps its name so a sidecar bundle needs no knowledge of which credential it holds.
+      KATARI_API_KEY: token,
     });
+    // The capability must not outlive the process it was minted for, by either route out: the process
+    // exiting on its own (`onClose`) or the transport killing it (`kill`).
+    return (handlers) => {
+      const handle = spawner({
+        onMessage: handlers.onMessage,
+        onClose: (reason) => {
+          revokeSidecarToken(token);
+          handlers.onClose(reason);
+        },
+      });
+      return {
+        send: handle.send,
+        kill: () => {
+          revokeSidecarToken(token);
+          handle.kill();
+        },
+      };
+    };
   };
+}
+
+/** Write the bundle unless this runtime already wrote it. `wx` fails rather than following a symlink someone
+ *  else planted at the predictable path, and 0600 keeps the bundle unreadable to other users on the host. An
+ *  `EEXIST` is the ordinary case (the same snapshot spawning again), and a snapshot's bundle is immutable, so
+ *  the existing file is by definition the right one. */
+async function writeBundleOnce(path: string, entry: string): Promise<void> {
+  try {
+    await writeFile(path, entry, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code !== "EEXIST") throw error;
+  }
 }

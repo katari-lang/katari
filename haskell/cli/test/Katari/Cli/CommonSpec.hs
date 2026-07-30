@@ -1,6 +1,6 @@
 module Katari.Cli.CommonSpec (spec) where
 
-import Katari.Cli.Common (PrefixError (..), isPreludeName, resolveIdPrefix, resolveNodeHelperInvocation)
+import Katari.Cli.Common (PrefixError (..), isBrowsableUrl, isLoopbackUrl, isPreludeName, resolveIdPrefix, resolveNodeHelperInvocation)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink)
 import System.Environment (setEnv, unsetEnv)
 import System.FilePath ((</>))
@@ -40,6 +40,38 @@ spec = do
 
     it "treats a name with no module as an application name" $
       isPreludeName "prelude" `shouldBe` False
+
+  -- The host test behind the plaintext-runtime warning and behind the gate on what may be handed to the
+  -- desktop's URL opener. Both read the authority out of the URL themselves, so the parsing is what
+  -- these cases pin down.
+  describe "isLoopbackUrl" $ do
+    it "recognises the local runtime in the spellings it is reached by" $ do
+      isLoopbackUrl "http://localhost:8000" `shouldBe` True
+      isLoopbackUrl "http://127.0.0.1:8000/api/v1" `shouldBe` True
+      isLoopbackUrl "http://[::1]:8000" `shouldBe` True
+      isLoopbackUrl "http://LOCALHOST:8000" `shouldBe` True
+
+    it "does not mistake a remote host for the local one" $ do
+      isLoopbackUrl "https://runtime.example.com" `shouldBe` False
+      isLoopbackUrl "http://localhost.evil.example" `shouldBe` False
+      -- A host may only appear in the authority; putting it in the path or the userinfo must not count.
+      isLoopbackUrl "http://evil.example/localhost" `shouldBe` False
+      isLoopbackUrl "http://evil.example?host=localhost" `shouldBe` False
+
+  describe "isBrowsableUrl" $ do
+    it "accepts the web URLs an authorization flow legitimately produces" $ do
+      isBrowsableUrl "https://accounts.example.com/o/oauth2/auth?client_id=x" `shouldBe` True
+      isBrowsableUrl "http://localhost:8000/oauth/authorize" `shouldBe` True
+
+    -- The value comes off the wire, and the opener launches whatever the desktop registered for the
+    -- scheme, so anything that is not ordinary web transport is refused and merely printed.
+    it "refuses a scheme that would launch something other than a browser" $ do
+      isBrowsableUrl "file:///home/dev/.ssh/id_ed25519" `shouldBe` False
+      isBrowsableUrl "vscode://file/etc/passwd" `shouldBe` False
+      isBrowsableUrl "javascript:alert(1)" `shouldBe` False
+
+    it "refuses plaintext http to a remote host" $
+      isBrowsableUrl "http://evil.example/authorize" `shouldBe` False
 
   -- The helper-spawn resolution `katari apply` (katari-bundle) and `katari mcp pull` (katari-mcp)
   -- share. The helper name below is chosen to never exist on a real PATH, so the fallthrough cases

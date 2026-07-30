@@ -12,15 +12,9 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@200;300;400;500;600;700&family=Lexend:wght@200..700&family=Lexend+Tera:wght@900&family=Noto+Sans+JP:wght@200;300;400;500;600;700&display=swap"
     />
-    <script>
-      // Apply the stored theme before first paint so a dark preference never flashes light.
-      const stored = localStorage.getItem("katari-console.theme");
-      const dark =
-        stored === "dark" ||
-        ((stored === null || stored === "system") &&
-          window.matchMedia("(prefers-color-scheme: dark)").matches);
-      document.documentElement.dataset.theme = dark ? "dark" : "light";
-    </script>
+    <!-- Blocking on purpose: the theme must be applied before first paint. External rather than inline so
+         the console can be served under a strict `script-src 'self'` policy. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

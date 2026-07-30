@@ -110,7 +110,7 @@ run options = do
 
   -- 3. Connect to the runtime and diff the build against its current head.
   let config = resolved.rootPackage.config :: ProjectConfig
-  url <- resolveRuntimeUrl options.global.url config.runtime.url
+  url <- resolveRuntimeUrl "apply" context options.global.url (Just config.runtime.url)
   token <- requireRuntimeAuth "apply"
   manager <- newTlsManager
   let client = withTrace (verboseLog context) (newRuntimeClient manager url (Just token))

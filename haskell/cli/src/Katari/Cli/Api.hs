@@ -114,6 +114,7 @@ import Network.HTTP.Client
     httpLbs,
     method,
     parseRequest,
+    redirectCount,
     requestBody,
     requestHeaders,
     responseBody,
@@ -878,7 +879,7 @@ uploadFile client projectId path contentType = do
     then case Aeson.eitherDecode responseBytes of
       Right (SuccessEnvelope uploaded) -> pure uploaded
       Left message -> throwIO (RuntimeDecodeError (Text.pack message))
-    else throwIO (RuntimeHttpError status (extractErrorMessage responseBytes))
+    else throwIO (httpStatusError status responseBytes)
 
 -- | Stream a file's bytes to the given handle. This endpoint returns raw bytes with no envelope, so
 -- it bypasses 'requestJson'; a non-2xx still carries the JSON error envelope and is raised as usual.
@@ -899,7 +900,7 @@ downloadFileTo client projectId fileId sink = do
          in copyChunks
       else do
         body <- brReadAll (responseBody response)
-        throwIO (RuntimeHttpError status (extractErrorMessage (LazyByteString.fromStrict body)))
+        throwIO (httpStatusError status (LazyByteString.fromStrict body))
   where
     brReadAll reader = go []
       where
@@ -933,7 +934,7 @@ requestJson client httpMethod path body = do
     then case Aeson.eitherDecode responseBytes of
       Right value -> pure value
       Left message -> throwIO (RuntimeDecodeError (Text.pack message))
-    else throwIO (RuntimeHttpError status (extractErrorMessage responseBytes))
+    else throwIO (httpStatusError status responseBytes)
 
 -- | Perform a request whose 2xx body carries nothing the caller needs (a 204 No Content, or an
 -- envelope left unread), translating every failure mode into a 'RuntimeError'. Only the status class
@@ -951,10 +952,17 @@ requestDiscardingBody client httpMethod path body = do
   let status = statusCode (responseStatus response)
   client.trace ("-> " <> Text.pack (show status))
   unless (status >= 200 && status < 300) $
-    throwIO (RuntimeHttpError status (extractErrorMessage (responseBody response)))
+    throwIO (httpStatusError status (responseBody response))
 
--- | Assemble the underlying 'Request': base URL + API prefix + path, the JSON body when given, and
--- the @Content-Type@ / @Authorization@ headers.
+-- | Assemble the underlying 'Request': base URL + API prefix + path, the JSON body when given, the
+-- @Content-Type@ / @Authorization@ headers, and no redirect following.
+--
+-- The redirect setting is a security control, not a preference. @http-client@ replays a request's
+-- headers verbatim at the redirect target (its @shouldStripHeaderOnRedirect@ defaults to stripping
+-- nothing) and follows up to ten hops by default, so a runtime that answered @302 Location:
+-- https://attacker.example/@ would be handing @KATARI_API_KEY@ to that host. The runtime API is a fixed
+-- endpoint with a fixed prefix and no legitimate redirect anywhere in it, so there is nothing to lose by
+-- refusing: a 3xx arrives at the caller as a status like any other and 'httpStatusError' says why.
 buildRequest :: RuntimeClient -> Text -> Text -> Maybe LazyByteString.ByteString -> IO Request
 buildRequest client httpMethod path body = do
   request <- parseRequest (Text.unpack (client.baseUrl <> apiPrefix <> path))
@@ -965,12 +973,31 @@ buildRequest client httpMethod path body = do
     request
       { method = TextEncoding.encodeUtf8 httpMethod,
         requestHeaders = headers,
-        requestBody = RequestBodyLBS (fromMaybe "" body)
+        requestBody = RequestBodyLBS (fromMaybe "" body),
+        redirectCount = 0
       }
   where
     hasBody = case body of
       Just _ -> True
       Nothing -> False
+
+-- | The 'RuntimeError' a non-2xx status becomes.
+--
+-- A 3xx is phrased separately because it is the one status the runtime's error envelope does not
+-- explain: 'buildRequest' refuses to follow redirects, so what reaches here is a bare @302@ with an
+-- empty body, and "runtime returned HTTP 302: " would leave the reader with nothing to act on. The
+-- likely causes are both addressable — a URL pointing at a proxy or a scheme-upgrading front end
+-- rather than at the runtime, or a runtime that is not the one the user thinks it is.
+httpStatusError :: Int -> LazyByteString.ByteString -> RuntimeError
+httpStatusError status responseBytes
+  | status >= 300 && status < 400 =
+      RuntimeHttpError
+        status
+        ( "the server redirected the request, which katari does not follow here — the KATARI_API_KEY "
+            <> "bearer token must never be sent to whatever host a redirect names. Point --url / "
+            <> "KATARI_API_URL / [runtime].url at the runtime's own address."
+        )
+  | otherwise = RuntimeHttpError status (extractErrorMessage responseBytes)
 
 -- | Pull the @error.message@ out of the runtime's error envelope, falling back to the raw (UTF-8
 -- decoded) body when it is not in that shape.
