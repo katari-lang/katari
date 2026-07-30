@@ -86,9 +86,9 @@ main = do
           ( fullDesc
               <> header "katari — orchestration logic for AI agents"
               <> progDesc
-                "Use `katari <command> --help` for per-command options. Katari is under construction: \
-                \expect breaking changes between releases, and prefer hobby projects over production \
-                \workloads until v1.0.0."
+                "Use `katari <command> --help` for per-command options. Katari is released and \
+                \pre-1.0: a minor version may still ship breaking changes, so pin what you deploy \
+                \— katari.lock pins the packages, the image tag pins the runtime."
           )
       )
   let (subcommand, runCommand) = dispatch command'
