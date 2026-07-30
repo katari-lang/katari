@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/runtime",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Runtime server for Katari Language",
   "type": "module",
   "main": "dist/index.mjs",
