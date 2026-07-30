@@ -26,7 +26,9 @@ const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const PORT = 3517;
 const URL_BASE = `http://127.0.0.1:${PORT}`;
 const API = `${URL_BASE}/api/v1`;
-const API_KEY = "e2e-api-key";
+// At least 32 characters — the runtime enforces a floor on the API key, since that one token is the
+// whole of the API's authentication.
+const API_KEY = "e2e-api-key-000000000000000000000000";
 // The same fixed, throwaway at-rest key the runtime's own vitest config uses — not a real secret.
 const SECRET_KEY = "r75FbGEeJdHhNknc0999YH3+Kzggi0MExVVFU9TSi7U=";
 const DATABASE = "katari_e2e";
@@ -120,6 +122,9 @@ async function startServer(): Promise<Server> {
       BLOB_S3_CREATE_BUCKET: "true",
       AWS_ACCESS_KEY_ID: "s3mock",
       AWS_SECRET_ACCESS_KEY: "s3mock",
+      // Everything in this suite is on loopback — the playground's http examples included — so the
+      // outbound address guard has to be off, exactly as it is for local development.
+      KATARI_EGRESS_ALLOW_PRIVATE: "true",
     },
   });
   const logs: string[] = [];
