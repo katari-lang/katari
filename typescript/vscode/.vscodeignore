@@ -11,3 +11,6 @@ tests/**
 **/*.ts
 **/*.map
 katari-vscode.vsix
+# The icon ships as PNG (what the Marketplace and Open VSX render); the SVG is the source it is
+# rasterized from, so it belongs in the repository and not in the package.
+icon.svg

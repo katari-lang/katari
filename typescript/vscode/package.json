@@ -5,7 +5,8 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "publisher": "yukikurage",
+  "publisher": "katari-lang",
+  "icon": "icon.png",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/katari-lang/katari.git",
