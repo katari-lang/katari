@@ -19,13 +19,58 @@ import {
   dispatchCreate,
 } from "./thread-ops.js";
 
-/** Drive the instance bound to `ctx` until its internal queue is empty (one turn / quantum). */
+/** How many events one drain processes before it hands control back to the event loop.
+ *
+ *  A turn is normally short: an agent runs until it performs an effect, and the delegation that effect
+ *  opens empties the queue, so `drive` returns. An ordinary program — including a `forever` loop whose
+ *  body genuinely suspends — never comes near this threshold, so the yield costs it nothing.
+ *
+ *  The exception is a loop whose iterations never actually suspend. `forever` is a first-class,
+ *  documented construct, so this is an easy shape to write by accident: a body that only computes, or —
+ *  as this file's own test suite has long noted — one that delegates to a handler which resolves without
+ *  reaching real I/O. Such a loop enqueues its next iteration as fast as this loop consumes it, so the
+ *  queue never empties and `drive` never returns. Every `await` in it settles on a MICROTASK, and Node
+ *  drains microtasks completely before returning to the event loop, so without a yield the process stops
+ *  serving HTTP, stops firing timers, and stops responding to SIGTERM — for every project, not just the
+ *  offending one — until it is killed. On a platform that restarts an unhealthy container that is worse
+ *  than a hang: boot revives the in-flight run, which starts the same loop again, so it crash-loops.
+ *
+ *  What the yield buys is containment, not a bound. The loop still spins and the project whose program is
+ *  at fault stays stuck, but the fault stays local: the API keeps answering, other projects keep running,
+ *  and the process still shuts down cleanly. Bounding the WORK is a separate question and deliberately
+ *  not answered here — by step count alone a runaway is indistinguishable from a turn that legitimately
+ *  computes a lot, and failing the latter would break programs that are doing nothing wrong. */
+const STEPS_PER_YIELD = 1_000;
+
+/** Hand control back to the event loop.
+ *
+ *  `setImmediate`, not `await Promise.resolve()`: a resolved promise is a microtask, and Node drains the
+ *  whole microtask queue before it ever reaches the event loop — so awaiting one would yield to nothing
+ *  and leave the starvation exactly as it was. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+/** Drive the instance bound to `ctx` until its internal queue is empty (one turn / quantum).
+ *
+ *  Yielding mid-drain is safe with respect to the turn's atomicity: the actor serialises its own pump
+ *  (`Substrate.pump` returns early while a pump is in flight), so no second turn can start in the gap,
+ *  and nothing is persisted until this function returns. Events that arrive during a yield simply wait
+ *  their turn in the mailbox — which is the point. */
 export async function drive(ctx: StepContext): Promise<void> {
   const queue = ctx.buffers.internalQueue;
+  let stepsSinceYield = 0;
   while (queue.length > 0) {
     const event = queue.shift();
     if (event === undefined) break;
     await step(ctx, event);
+    stepsSinceYield += 1;
+    if (stepsSinceYield >= STEPS_PER_YIELD) {
+      stepsSinceYield = 0;
+      await yieldToEventLoop();
+    }
   }
 }
 

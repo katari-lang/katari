@@ -74,12 +74,30 @@ function foreverIr(): IRModule {
   };
 }
 
+/** `daemon_main() { forever { record {} } }` — an iteration that performs NO effect, so it completes
+ *  without suspending and the whole loop lives inside one `drive` call. This is the shape a program hits
+ *  by writing a `forever` body that only computes. */
+function pureForeverIr(): IRModule {
+  const module = foreverIr();
+  // Replace the iteration body: build a record and stop, with no `delegate` to suspend on.
+  module.blocks[3] = {
+    block: {
+      kind: "sequence",
+      result: 1210,
+      operations: [{ kind: "makeRecord", entries: [], output: 1210 }],
+    },
+    parameters: {},
+  };
+  return module;
+}
+
 function actorFor(options: {
   handlers: Record<string, FfiHandler>;
   persistence: StoringPersistence;
+  module?: IRModule;
 }): ProjectActor {
   const registry = new SnapshotRegistry();
-  const module = foreverIr();
+  const module = options.module ?? foreverIr();
   for (const name of Object.keys(module.entries)) {
     registry.set(SNAPSHOT, moduleOfName(createAgentName(name)), module);
   }
@@ -177,5 +195,38 @@ describe("the forever loop (engine)", () => {
     await eventually(() =>
       persistence.peekRun(run)?.state !== "running" || calls >= 6 ? true : undefined,
     );
+  });
+  // A `forever` whose iterations never actually suspend is the shape that used to take the whole process
+  // down: the loop enqueues its next iteration as fast as the drain consumes it, and because every hop is
+  // a microtask, Node never returns to the event loop. Nothing else in the process ran — no HTTP, no
+  // timers, not even SIGTERM — until it was killed, and boot-time revival of the run started it again.
+  //
+  // The handler here resolves without reaching real I/O, which is exactly the accident (the other tests
+  // in this file add a deliberate macrotask hop for precisely this reason). The loop must still spin, and
+  // the event loop must still get a turn.
+  test("a non-suspending iteration body does not starve the event loop", async () => {
+    const persistence = new StoringPersistence();
+    const actor = actorFor({
+      persistence,
+      module: pureForeverIr(),
+      // Never reached — the body performs no effect at all.
+      handlers: { probe: async () => null },
+    });
+    const { result } = actor.startRun(createAgentName("daemon_main"), SNAPSHOT, null);
+    const settled = result.then(
+      () => "settled" as const,
+      () => "settled" as const,
+    );
+
+    // A timer scheduled now must actually fire. Before the drain yielded, the loop consumed its own
+    // enqueues entirely in microtasks, so Node never returned to the event loop: this promise never
+    // settled and the process was unresponsive until it was killed.
+    const timer = new Promise<"timer">((resolve) => {
+      setTimeout(() => resolve("timer"), 50);
+    });
+
+    // The timer winning says both halves of the property at once: the event loop got a turn, AND the run
+    // is still spinning (it never settled), so the turn really did not end on its own.
+    await expect(Promise.race([settled, timer])).resolves.toBe("timer");
   });
 });
