@@ -6,9 +6,10 @@ server (TypeScript) executes and manages. Parallelism and concurrency are first-
 runtime persists every step of a run — so programs can run for a long time, park on a human
 question, and recover from a crash without losing their place.
 
-> **Status: pre-release, under active development.** This is the `scrap-and-build` line: the
-> language, IR, runtime APIs, and standard library all still change without notice, and there is
-> no stability guarantee yet. Expect breaking changes between commits.
+> **Status: 0.1 — released, pre-1.0.** The language, toolchain, and runtime are usable today and
+> releases are versioned, but the API surface is not frozen: minor versions may still ship breaking
+> changes, each recorded in the release notes. Pin the versions you deploy (the CLI's lockfile and
+> the runtime image tag both exist for exactly this).
 
 The project site is **[katari-lang.dev](https://katari-lang.dev)**. To use the CLI without building
 from source, install the published binary from npm:
@@ -191,6 +192,13 @@ take a newer staging only when you ask for one.
 
 ## Documentation and examples
 
+- [katari-lang.dev/docs](https://katari-lang.dev/docs) — the quickstart, the five-chapter
+  tutorial, concepts, and guides. The same docs are served to AI coding agents as an MCP server
+  at `katari-lang.dev/mcp`.
+- [`katari-lang/examples`](https://github.com/katari-lang/examples) — complete, deployable
+  example projects, one per use case (a release monitor, a Slack standup bot, a two-desk
+  community concierge, a Gmail-to-calendar butler), each pinned to a published registry snapshot
+  and compiled in CI.
 - [`docs/`](docs) — dated design notes covering the runtime domain model, the IR, generics
   inference, composability and reflection, MCP integration, and more.
 - [`examples/playground`](examples/playground) — one project, several independently runnable

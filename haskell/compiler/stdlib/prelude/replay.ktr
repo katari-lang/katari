@@ -112,7 +112,14 @@ agent immediate[R, F, effect E](
 `time.watch` alive): it never re-raises and never returns on its own. The backoff delay lives in the loop's
 own @delay@ var and grows by @factor@ per replay up to the cap (`math.min`), so the durable state stays flat
 across any number of replays. Written
-`use replay.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`."
+`use replay.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`.
+SUPERVISING A REGION: a converter cannot see a FIBER's failure. A fiber's panic is delivered to the region
+as the typed `region.crashed` event rather than unwinding past `region.watch`, so a resident whose work runs
+in fibers must perform `interrupted` from its `region.crashed` clause (installed inside this scope) — a
+`panic` converter alone catches only the failures raised on the block's own path. What the replay REBUILDS
+is what the block installs: state a handler above this `use` owns survives every attempt, so install a desk
+whose contents must outlive a reconnect above the scope, and whatever consumes that state on the same side
+of the boundary."
 agent forever[R, F, effect E](
   @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
   @"The per-replay delay multiplier (e.g. 2 doubles the delay each replay)." factor: number,
