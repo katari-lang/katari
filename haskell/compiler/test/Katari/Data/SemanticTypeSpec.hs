@@ -90,17 +90,69 @@ spec = do
             SubtypeErrorInfo
               { expected = SemanticGenericArgumentType SemanticTypeString,
                 actual = SemanticGenericArgumentType SemanticTypeInteger,
-                reason = "Number layers are incompatible"
+                reason = "The actual type can be a number, which the expected type does not admit"
               }
         )
-        `shouldBe` "K3001: Number layers are incompatible\n  expected: string\n  actual:   integer"
+        `shouldBe` "K3001: The actual type can be a number, which the expected type does not admit\n  expected: string\n  actual:   integer"
+    -- Two packages' same-named constructors are unreadable when both spell `auth_error`, so the pair of
+    -- lines is rendered under one style that qualifies exactly the colliding name and nothing else.
+    it "qualifies a name two modules claim, and leaves every other name bare" $
+      renderTypeError
+        ( TypeErrorSubtype $
+            SubtypeErrorInfo
+              { expected =
+                  SemanticGenericArgumentType
+                    ( SemanticTypeUnion
+                        [ SemanticTypeData slackAuthError mempty,
+                          SemanticTypeData httpAuthError mempty,
+                          SemanticTypeData httpBadTimezone mempty
+                        ]
+                    ),
+                actual = SemanticGenericArgumentType (SemanticTypeData httpBadTimezone mempty),
+                reason = "reason"
+              }
+        )
+        `shouldBe` "K3001: reason\n  expected: slack.auth_error | http.auth_error | bad_timezone\n  actual:   bad_timezone"
     it "renders a generic-arity error from its structured fields" $
       renderTypeError (TypeErrorGenericArity $ GenericArityErrorInfo {name = fooName, expected = ["T"], actual = []})
         `shouldBe` "K3008: Generic arguments do not match the declaration of test.foo\n  expected: [T]\n  actual:   []"
 
-  describe "severityOf" $
+  describe "severityOf" $ do
     it "classifies a type error as an error" $
       severityOf (CompilerErrorType (TypeErrorGenericArity GenericArityErrorInfo {name = fooName, expected = ["T"], actual = []})) `shouldBe` SeverityError
+
+    -- The one type diagnostic that does not fail the build. Asserted here as well as end-to-end, because
+    -- the whole design of K3028 rests on it: a discard is well-typed, and rejecting one would leave no way
+    -- to call an outcome-answering agent for its effect alone.
+    it "classifies a discarded value as a warning" $
+      severityOf (CompilerErrorType (TypeErrorDiscardedValue DiscardedValueErrorInfo {discarded = SemanticTypeString})) `shouldBe` SeverityWarning
+
+  -- The predicate behind K3028. Its cases are not "is this null" but "could a value of this type tell the
+  -- reader what happened", which is why the three container families and the callable answer False-to-the-
+  -- warning while a bare data type does not.
+  describe "answersNothing" $ do
+    it "holds for null and for never" $ do
+      answersNothing SemanticTypeNull `shouldBe` True
+      answersNothing SemanticTypeNever `shouldBe` True
+
+    it "holds for a container of nothings (a `for` / `parallel` run for effect)" $ do
+      answersNothing (SemanticTypeArray SemanticTypeNull) `shouldBe` True
+      answersNothing (SemanticTypeTuple [SemanticTypeNull, SemanticTypeNull]) `shouldBe` True
+      answersNothing (SemanticTypeRecord SemanticTypeNull) `shouldBe` True
+      answersNothing (SemanticTypeObject mempty) `shouldBe` True
+
+    it "fails for a container of answers — the array carries every one of them" $
+      answersNothing (SemanticTypeArray (SemanticTypeData fooName mempty)) `shouldBe` False
+
+    it "holds for a callable: a capability says what may happen next, never what did" $
+      answersNothing (SemanticTypeAgent SemanticTypeNull SemanticTypeNull SemanticEffectPure) `shouldBe` True
+
+    it "fails for a data type, even a nullary one — the author chose it over null" $
+      answersNothing (SemanticTypeData fooName mempty) `shouldBe` False
+
+    it "looks through an information-flow label, which says who may read, not whether there is anything to" $ do
+      answersNothing (SemanticTypeAttribute SemanticTypeNull SemanticAttributePrivate) `shouldBe` True
+      answersNothing (SemanticTypeAttribute SemanticTypeString SemanticAttributePrivate) `shouldBe` False
 
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}
@@ -121,3 +173,14 @@ calendarApiError = QualifiedName {moduleName = ModuleName "acme.google_calendar"
 
 holdApprove :: QualifiedName
 holdApprove = QualifiedName {moduleName = ModuleName "acme.hold", name = "approve_async"}
+
+-- Two packages' @auth_error@ plus one name only one of them declares: the exact shape a K3001 expected
+-- row had when it read @auth_error | auth_error | bad_timezone@.
+slackAuthError :: QualifiedName
+slackAuthError = QualifiedName {moduleName = ModuleName "slack", name = "auth_error"}
+
+httpAuthError :: QualifiedName
+httpAuthError = QualifiedName {moduleName = ModuleName "prelude.http", name = "auth_error"}
+
+httpBadTimezone :: QualifiedName
+httpBadTimezone = QualifiedName {moduleName = ModuleName "prelude.time", name = "bad_timezone"}

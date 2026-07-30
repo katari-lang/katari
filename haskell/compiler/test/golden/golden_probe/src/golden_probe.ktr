@@ -23,7 +23,33 @@ agent summarize(values: array[integer]) -> string {
   f"result: ${label}"
 }
 
+@"A line between two points."
+data edge(
+  @"Where the line starts." start: point,
+  @"Where the line ends." finish: point,
+)
+
+@"Name the shape. The parameter is a SUM, so its schema is an `anyOf` with one documented arm per
+constructor — the honest-schema property: every arm keeps its declaration's own text, every field keeps
+its `@` docstring, and a documented field of a documented type carries BOTH (the field's text leads).
+Nothing here is about the body; the fixture exists so the golden pins that wire shape."
+agent describe(@"The shape to name." shape: point | edge) -> string {
+  match (shape) {
+    case point(x => _px, y => _py) -> "point"
+    case edge(start => _origin, finish => _destination) -> "edge"
+  }
+}
+
+@"A signature broken across lines: the `with` row starts on its own line, and wraps again after a `|`.
+Both used to be K1001, which is what pushed row-heavy signatures past 200 characters on one line."
+agent broken_signature(value: integer) -> integer
+  with pick |
+    prelude.throw[string] {
+  pick(options = [value])
+}
+
 @"Entry point: summarize a fixed list of numbers."
 agent main(input: null) -> string {
-  summarize(values = [1, 2, 3])
+  let named = describe(shape = point(x = 1, y = 2))
+  f"${named}: ${summarize(values = [1, 2, 3])}"
 }

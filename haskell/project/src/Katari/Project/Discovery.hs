@@ -17,6 +17,7 @@ module Katari.Project.Discovery
     scanSources,
     scanSourcesFromDir,
     collectKtrFiles,
+    modulePathForModuleName,
   )
 where
 
@@ -29,7 +30,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
-import Katari.Data.ModuleName (ModuleName, moduleNameFromSegments)
+import Katari.Data.ModuleName (ModuleName, moduleNameFromSegments, renderModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..))
 import Katari.Project.Error (DuplicateModuleInfo (..), ProjectError (..))
 import System.Directory
@@ -40,10 +41,12 @@ import System.Directory
   )
 import System.FilePath
   ( dropExtension,
+    joinPath,
     makeRelative,
     splitDirectories,
     takeDirectory,
     takeExtension,
+    (<.>),
     (</>),
   )
 
@@ -130,6 +133,13 @@ scanSourcesFromDir overlay srcDir = do
 moduleNameForFile :: FilePath -> FilePath -> ModuleName
 moduleNameForFile srcRoot filePath =
   moduleNameFromSegments (map Text.pack (splitDirectories (dropExtension (makeRelative srcRoot filePath))))
+
+-- | The path a module's source file must have, relative to the source root — the inverse of
+-- 'moduleNameForFile' (@a.b@ -> @a/b.ktr@). The convention has one home, so a diagnostic that tells a
+-- reader where to put a file names exactly the path the scan would read that module back from.
+modulePathForModuleName :: ModuleName -> FilePath
+modulePathForModuleName moduleName =
+  joinPath (Text.unpack <$> Text.splitOn "." (renderModuleName moduleName)) <.> ktrExtension
 
 -- | Whether @path@ lies strictly inside directory @base@ (a descendant, not @base@ itself).
 isUnder :: FilePath -> FilePath -> Bool

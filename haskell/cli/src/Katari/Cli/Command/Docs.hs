@@ -16,7 +16,7 @@ where
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict qualified as Map
-import Katari.Cli.Common (assembleSourcesOrExit, cliVersion, compileResultOrExit, dieIn, resolveProjectRoot, writeOrExit)
+import Katari.Cli.Common (WarningScope (..), assembleSourcesOrExit, cliVersion, compileResultOrExit, dieIn, ownedSourceFiles, resolveProjectRoot, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Compile qualified as Compile
 import Katari.Docs (DocsDocument (..), extractModules, parsedExtraction, typedExtraction)
@@ -88,7 +88,7 @@ projectDocument options = do
       Left projectError -> dieIn "docs" (renderProjectError projectError)
       Right loaded -> pure loaded
   sources <- assembleSourcesOrExit "docs" resolved
-  result <- compileResultOrExit sources
+  result <- compileResultOrExit (WarningsOwnedBy (ownedSourceFiles resolved)) sources
   -- The reference covers the root package's own modules only: a dependency documents itself, so
   -- restating its modules here would duplicate every package's reference into its dependents'.
   let rootModuleNames = Map.keysSet resolved.rootPackage.sources

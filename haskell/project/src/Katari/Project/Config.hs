@@ -217,9 +217,11 @@ data OverrideBinding
   = -- | Every override must name a declared dependency — the normal rule; catches a typo'd override
     -- that would otherwise silently never apply.
     OverridesBindDeclared
-  | -- | An override may name a not-yet-declared dependency. Only for config /editors/ mid-flight:
-    -- @katari add X@ must load a config in which @[overrides.X]@ already exists but @X@ is not yet in
-    -- @packages@ — the exact inconsistency the command is about to fix.
+  | -- | An override may name a not-yet-declared dependency. Only for commands that speak about the
+    -- state right BEFORE a dependency is declared: @katari add X@ must load a config in which
+    -- @[overrides.X]@ already exists but @X@ is not yet in @packages@ — the exact inconsistency the
+    -- command is about to fix — and @katari ls packages@, which lists what @add@ would accept, must
+    -- not refuse to answer in a state @add@ itself works in.
     OverridesFloat
 
 -- | Read @katari.toml@ from disk, parse, and validate.

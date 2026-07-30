@@ -60,6 +60,7 @@ library:
     - Katari.Schema
     - Katari.Error
     - Katari.Panic
+    - Katari.Suggestion
     - Katari.Diagnostics
     - Katari.Primitive
     - Katari.Stdlib

@@ -24,7 +24,7 @@ import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), Variable
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
-import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
+import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType, answersNothing, renderSemanticEffect)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (diagnosticAt)
@@ -32,6 +32,7 @@ import Katari.Error
   ( ApplicationArityErrorInfo (..),
     CannotInferGenericErrorInfo (..),
     CompilerError (..),
+    DiscardedValueErrorInfo (..),
     ExpectedShapeErrorInfo (..),
     FinallyEffectErrorInfo (..),
     GenericAgentExpressionErrorInfo (..),
@@ -78,7 +79,7 @@ import Katari.Typechecker.Context
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, lacksNamesOfExpression, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
 import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, deepGenerics, metavarKinded, solveConstraints)
-import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (Normalizer, ObjectRole (..), boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union, withObjectRole)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -203,7 +204,10 @@ walkStatements statements continuation = case statements of
      in case statement of
           StatementLet letStmt -> runLetStatement letStmt rest continuation
           StatementAgent agentDeclaration -> runLocalAgentStatement agentDeclaration rest continuation
-          StatementExpression expression -> passThrough (StatementExpression . fst <$> synthExpression expression)
+          StatementExpression expression -> passThrough $ do
+            (typedExpression', statementType) <- synthExpression expression
+            warnOnDiscardedValue (sourceSpanOf expression) statementType
+            pure (StatementExpression typedExpression')
           StatementUse useStmt -> do
             (typedUse, useResultType) <- handleUseStatement useStmt
             (result, restTyped, _deadUseExit) <- walkStatements rest continuation
@@ -215,6 +219,28 @@ walkStatements statements continuation = case statements of
           StatementNext nextStmt -> jumpThrough (StatementNext <$> checkNextStatement nextStmt)
           StatementFinally finallyStmt -> passThrough (StatementFinally <$> checkFinallyStatement finallyStmt)
           StatementError s -> passThrough (pure (StatementError s))
+
+-- | Warn (K3028) when a statement's expression produced an answer and nothing reads it.
+--
+-- The admission test is 'answersNothing' on the statement's type, not @<: null@: @null@ and @never@ pass,
+-- and so does a container of them, because @for@ and @parallel@ are EXPRESSIONS — running either for its
+-- effects alone leaves an @array[null]@ / @[null, null]@ behind that no author ever meant to read (see
+-- 'answersNothing' for why descending is the right rule and not a carve-out). Anything that does answer
+-- something and is dropped is worth a word: in this house an outcome comes back as a sum (@sent | dropped@
+-- instead of @null@) precisely so the caller cannot report success for something that did not happen, and
+-- a type change alone never forced the existing call sites to face it.
+--
+-- Two structural facts keep this off honest code, and they are why the check lives HERE rather than in any
+-- @synth*@: statement position is a property of WHERE an expression sits, and 'walkStatements' is the only
+-- place that knows it. A block's trailing expression is 'Block.returnExpression' — a different field — so a
+-- block's own value is never read as a discard, and an @if@ / @match@ arm's last expression is a trailing
+-- expression too. A deliberate discard is spelled @let _ = ...@, which is a 'StatementLet' and never
+-- reaches here.
+warnOnDiscardedValue :: SourceSpan -> NormalizedType -> Checker ()
+warnOnDiscardedValue sourceSpan statementType = do
+  semantic <- denormalizeAt sourceSpan statementType
+  unless (answersNothing semantic) $
+    reportType sourceSpan (TypeErrorDiscardedValue DiscardedValueErrorInfo {discarded = semantic})
 
 -- | A @let@ binding: compute the value's type (against an annotation if present), bind, walk the
 -- rest in the extended scope, and produce the typed let statement.
@@ -1212,7 +1238,9 @@ checkArgumentShape sourceSpan functionAttribute function argumentType argumentAt
         if pureCall
           then (liftByAttribute liftAttribute function.argumentType, liftByAttribute liftAttribute function.returnType)
           else (function.argumentType, function.returnType)
-  runNormalizer sourceSpan (subtype argumentType effectiveParameter)
+  -- The role is message-only: it lets a parameter the call does not supply report as the missing
+  -- ARGUMENT the reader has to add, rather than as an optionality nobody wrote (see 'ObjectRole').
+  runNormalizer sourceSpan (withObjectRole ObjectRoleCallArguments (subtype argumentType effectiveParameter))
   pure effectiveReturn
 
 -- | Apply an agent value to an argument at a full call site: check the argument shape through the shared

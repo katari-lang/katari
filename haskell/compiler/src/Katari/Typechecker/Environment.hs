@@ -38,7 +38,7 @@ import Katari.Data.Variance (Variance (..), composeVariance, joinVariance)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
 import Katari.Typechecker.Elaborate (Elaborate, ElaborateContext, SynonymSignature (..), elaborate, elaborateAsType, emptyContext, runElaborate, withOwnGenerics)
-import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), normalizeConstructor, normalizeGenericArgument, normalizeType)
+import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, ObjectRole (..), SubtypingContext (..), normalizeConstructor, normalizeGenericArgument, normalizeType)
 
 -- | The read-only type-level environment the checker consults across the whole program:
 --
@@ -480,8 +480,8 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
           requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType, marker = collectedMarker item}) | (item, parameters) <- requestParameters],
           genericsInScope = mempty,
           world = bottomAttribute,
-          -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
-          comparingAgentParameters = False,
+          -- A comparison-local role each caller raises for itself; every entry starts at the ordinary one.
+          objectRole = ObjectRoleRecord,
           -- The env-build normalizes declarations, not agent bodies, so there is no handler geometry
           -- to enrich a message with here.
           laterHandlerInstallSites = mempty

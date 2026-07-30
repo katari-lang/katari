@@ -69,9 +69,9 @@ data JSONSchema where
   SchemaDescribed :: DescribedSchema -> JSONSchema
   deriving stock (Eq, Show)
 
--- | The body of a 'SchemaDescribed': the description and the schema it annotates. Serialisation
--- merges the description into the inner schema's object encoding, so a directly-nested
--- 'SchemaDescribed' collapses to the outermost description on the wire.
+-- | The body of a 'SchemaDescribed': the description and the schema it annotates. Serialisation merges
+-- the description into the inner schema's object encoding, joining any description already there
+-- ('mergedDescription') — so stacked overlays all reach the wire, outermost first.
 data DescribedSchema = DescribedSchema
   { description :: Text,
     schema :: JSONSchema
@@ -118,13 +118,28 @@ instance ToJSON JSONSchema where
     -- survive into the final AI-facing schema.
     SchemaGeneric genericId -> object [Key.fromText genericSentinelKey .= genericId]
     SchemaDescribed described -> case toJSON described.schema of
-      Object keyMap -> Object (KeyMap.insert "description" (String described.description) keyMap)
+      Object keyMap -> Object (KeyMap.insert "description" (String (mergedDescription described.description keyMap)) keyMap)
       -- Every shape above encodes as a JSON object, so this branch is unreachable today; keeping the
       -- inner encoding drops only the annotation, never the validation meaning.
       encoded -> encoded
     where
       typed :: Text -> Value
       typed typeName = object ["type" .= typeName]
+
+-- | The @description@ an overlay writes onto an inner encoding that may already carry one: the outer text
+-- first, then the inner, separated by a blank line.
+--
+-- Both texts are model-facing and say DIFFERENT things — the outer one names the slot the value sits in
+-- (this parameter, this field), the inner one is what the value's own @data@ declaration documents about
+-- the whole variant. Overwriting cost the AI the entire variant explanation at exactly the sites that are
+-- best documented (a documented field of a documented type), which is the "honest schema" property
+-- breaking silently. The outer text leads because it is the more specific of the two.
+--
+-- An inner text that is absent, or identical to the outer, adds nothing and is not repeated.
+mergedDescription :: Text -> KeyMap.KeyMap Value -> Text
+mergedDescription outer keyMap = case KeyMap.lookup "description" keyMap of
+  Just (String inner) | inner /= outer -> outer <> "\n\n" <> inner
+  _ -> outer
 
 instance ToJSON AdditionalProperties where
   toJSON additionalProperties = case additionalProperties of

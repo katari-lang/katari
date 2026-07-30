@@ -63,7 +63,7 @@ commandParser =
         <> command "status" (info (CommandStatus <$> Status.optionsParser) (progDesc "Show one run's state, outcome and open questions"))
         <> command "cancel" (info (CommandCancel <$> Cancel.optionsParser) (progDesc "Cancel a running run"))
         <> command "answer" (info (CommandAnswer <$> Answer.optionsParser) (progDesc "Answer a question a run escalated"))
-        <> command "ls" (info (CommandLs <$> Ls.optionsParser) (progDesc "List runs (default), agents, snapshots, projects, escalations, files or env"))
+        <> command "ls" (info (CommandLs <$> Ls.optionsParser) (progDesc "List runs (default), agents, snapshots, projects, escalations, files, env or packages"))
         <> command "env" (info (CommandEnv <$> Env.optionsParser) (progDesc "Manage the project's env entries (get / set / unset)"))
         <> command "file" (info (CommandFile <$> File.optionsParser) (progDesc "Upload / download project files"))
         <> command "mcp" (info (CommandMcp <$> Mcp.optionsParser) (progDesc "MCP integration (pull bindings; list / forget stored credentials)"))

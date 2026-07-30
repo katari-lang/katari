@@ -582,9 +582,10 @@ agentDeclarationWith annotation = agentFormWith annotation (Just <$> identifier)
 -- two forms cannot drift apart.
 --
 -- The signature is parsed in line mode so the body's @{@ must sit on the same line as the signature's
--- last token (generics / parameters still wrap freely inside their brackets). This rejects an Allman
--- @agent f() -> R \n { ... }@ uniformly — a top-level agent behaves like a local one and like the
--- @if@ / @for@ / @match@ control constructs, whose brace is already same-line.
+-- last token (generics / parameters still wrap freely inside their brackets; a @with@ row may start on
+-- its own line, and a @|@ may be followed by one). This rejects an Allman @agent f() -> R \n { ... }@
+-- uniformly — a top-level agent behaves like a local one and like the @if@ / @for@ / @match@ control
+-- constructs, whose brace is already same-line.
 agentFormWith :: Maybe (Located Text) -> Parser (Maybe (Located Text)) -> Parser (AgentDeclaration Parsed)
 agentFormWith annotation nameParser = do
   -- Only the signature is line-scoped (so the body brace must be same-line — generics / parameters
@@ -597,7 +598,11 @@ agentFormWith annotation nameParser = do
       generics <- genericParameters
       parameters <- fst <$> parens (commaSeparated parameterBinding)
       returnType <- optional (symbol "->" *> typeExpression)
-      effects <- optional (keyword "with" *> typeExpression)
+      -- The @with@ row may start on a later line ('breakableBefore'): an effect row is the one part of a
+      -- signature whose length is not the author's to shorten, and the examples' rows run past 200
+      -- characters on one line. The brace rule below is untouched — 'breakableBefore' consumes nothing
+      -- when no @with@ follows, so the newline is still there to reject an Allman body.
+      effects <- optional (breakableBefore (keyword "with") *> typeExpression)
       pure (privateSpan, agentSpan, name, generics, parameters, returnType, effects)
   body <- withLoopContext LoopContextNone block
   let startSpan = maybe (fromMaybe agentSpan privateSpan) (.sourceSpan) annotation

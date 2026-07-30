@@ -32,6 +32,8 @@ module Katari.Cli.Common
     warnCompilerMismatch,
     writeLockOrExit,
     assembleSourcesOrExit,
+    WarningScope (..),
+    ownedSourceFiles,
     compileResultOrExit,
     compileSourcesOrExit,
     writeOrExit,
@@ -46,6 +48,8 @@ import Data.FileEmbed (embedStringFile, makeRelativeToProject)
 import Data.List (isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -55,14 +59,14 @@ import Katari.Cli.Options (GlobalOptions (..))
 import Katari.Cli.Output (OutputContext (..), newOutputContext, progress, verboseLog, warn)
 import Katari.Compile qualified as Compile
 import Katari.Data.IR (IRModule)
-import Katari.Data.ModuleName (ModuleName (..), covers)
-import Katari.Diagnostics (hasErrors, renderDiagnostics)
+import Katari.Data.ModuleName (ModuleName (..), covers, renderModuleName)
+import Katari.Diagnostics (finalizeDiagnostics, hasErrors, partitionByOwnership, renderFinalizedDiagnostics)
 import Katari.Primitive (preludeModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), loadKatariToml)
 import Katari.Project.Discovery (configFilename, findProjectRoot)
 import Katari.Project.Error (renderProjectError)
 import Katari.Project.Lockfile (LockedSource, Lockfile (..), loadLockfile, lockfileFilename, writeLockfile)
-import Katari.Project.Resolve (ResolvedProject (..), assembleProject, compileInputSources, lockfileFromResolved, resolveProject)
+import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), assembleProject, compileInputSources, lockfileFromResolved, resolveProject)
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import System.Directory (canonicalizePath, doesFileExist, findExecutable, getCurrentDirectory)
@@ -327,6 +331,26 @@ assembleSourcesOrExit subcommand resolved = case assembleProject resolved of
   Left projectError -> dieIn subcommand (renderProjectError projectError)
   Right assembly -> pure (compileInputSources assembly)
 
+-- | Whose warnings a compile prints.
+--
+-- A warning inside a dependency is noise the user cannot act on: they did not write that package and
+-- cannot edit it, so the only thing it teaches them is to stop reading warnings. A package author
+-- still sees their own, because their package is the ROOT package when they check it. Errors are not
+-- scoped at all — they stop the build wherever they live, and the reader needs the location.
+data WarningScope
+  = -- | Print warnings about these source files only, and count the rest. The set is the root
+    --   package's own modules ('ownedSourceFiles').
+    WarningsOwnedBy (Set FilePath)
+  | -- | Print every warning, dependencies included (@katari check --dependency-warnings@).
+    WarningsEverywhere
+
+-- | The source-file names the compiler stamps on the root package's own diagnostics. A span's
+-- @filePath@ is the module's rendered name (@Katari.Parser.parseModule@ sets it from the module name,
+-- not from disk), so ownership is decided in module-name space and never in path space.
+ownedSourceFiles :: ResolvedProject -> Set FilePath
+ownedSourceFiles resolved =
+  Set.fromList [Text.unpack (renderModuleName moduleName) | moduleName <- Map.keys resolved.rootPackage.sources]
+
 -- | Run a disk write, turning an 'IOException' (permission denied, read-only filesystem, disk full,
 -- …) into a clean exit-2 (setup) error. Without this the failure escapes as an uncaught exception,
 -- which exits with code 1 — the code reserved for compile errors — so a wrapper / CI would
@@ -336,22 +360,48 @@ writeOrExit subcommand description action =
   action `catch` \(ioException :: IOException) ->
     dieIn subcommand (description <> ": " <> Text.pack (show ioException))
 
--- | Compile the assembled sources, print any diagnostics to stderr, and either exit with code 1 (on
--- an error-severity diagnostic) or return the full 'Compile.CompileResult'. Warnings are printed but
--- do not block. The full result exists for consumers that need more than the IR (docs reads the
--- typed ASTs next to the lowered modules).
-compileResultOrExit :: Map ModuleName Text -> IO Compile.CompileResult
-compileResultOrExit sources = do
+-- | Compile the assembled sources, print the diagnostics the 'WarningScope' admits to stderr, and
+-- either exit with code 1 (on an error-severity diagnostic) or return the full
+-- 'Compile.CompileResult'. Warnings are printed but do not block. The full result exists for
+-- consumers that need more than the IR (docs reads the typed ASTs next to the lowered modules).
+--
+-- Withheld warnings are counted, never merely dropped: one summary line is what makes the
+-- suppression visible (silence is indistinguishable from a clean dependency) and is the only place a
+-- reader can learn the flag that shows them. It costs one line rather than one line per warning,
+-- which is the whole difference between a note and the noise it replaces.
+compileResultOrExit :: WarningScope -> Map ModuleName Text -> IO Compile.CompileResult
+compileResultOrExit scope sources = do
   let result = Compile.compile Compile.CompileInput {Compile.sources = sources}
-      rendered = renderDiagnostics result.diagnostics
+      finalized = finalizeDiagnostics result.diagnostics
+      (shown, withheld) = case scope of
+        WarningsEverywhere -> (finalized, [])
+        WarningsOwnedBy ownedFiles -> partitionByOwnership ownedFiles finalized
+      rendered = renderFinalizedDiagnostics shown
   unless (Text.null rendered) $ TextIO.hPutStrLn stderr rendered
+  unless (null withheld) $ TextIO.hPutStrLn stderr (withheldWarningNote (length withheld))
   when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
   pure result
 
+-- | The one line a withheld set earns. It names @check@ regardless of which command withheld, because
+-- @check@ is where the flag lives: @build@ / @apply@ / @docs@ are not diagnostics commands, so
+-- carrying the same switch on each of them would advertise four ways to ask one question. The shape
+-- (a @note:@ prefix, no @file:line:column@, no K-code) keeps it out of the way of a machine reader
+-- scanning for diagnostics.
+--
+-- It rides with the diagnostics rather than through 'Katari.Cli.Output.progress', so @--quiet@ does
+-- not silence it: the house rule is that a warning is information the user should not lose, and a
+-- line whose whole job is to say "warnings exist and you are not seeing them" is that same
+-- information compressed.
+withheldWarningNote :: Int -> Text
+withheldWarningNote count =
+  "note: "
+    <> Text.pack (show count)
+    <> " warning(s) from dependency packages hidden; `katari check --dependency-warnings` shows them"
+
 -- | 'compileResultOrExit' narrowed to the lowered IR per module, the only artifact most commands
 -- consume.
-compileSourcesOrExit :: Map ModuleName Text -> IO (Map ModuleName IRModule)
-compileSourcesOrExit sources = (.loweredModules) <$> compileResultOrExit sources
+compileSourcesOrExit :: WarningScope -> Map ModuleName Text -> IO (Map ModuleName IRModule)
+compileSourcesOrExit scope sources = (.loweredModules) <$> compileResultOrExit scope sources
 
 -- | Where a spawned node helper (@katari-bundle@ during apply, @katari-mcp@ during @mcp pull@) comes
 -- from, as @Just (command, prefixArgs)@ in npm-convention order (a local install beats a global

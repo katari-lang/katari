@@ -14,7 +14,7 @@ import Katari.Project.Config
     RuntimeSection (..),
   )
 import Katari.Project.Discovery (SourceEntry (..), emptyOverlay)
-import Katari.Project.Error (ProjectError (..))
+import Katari.Project.Error (ProjectError (..), renderProjectError)
 import Katari.Project.Lockfile (GitSource (..), LockedSource (..), Lockfile (..), PathLock (..))
 import Katari.Project.Resolve
   ( ProjectAssembly (..),
@@ -156,6 +156,18 @@ spec = do
     it "rejects a module outside the dependency's namespace" $ do
       let project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "lib" ["other"] Nothing)]
       assembleProject project `shouldSatisfy` either isOutOfNamespace (const False)
+
+    -- Every newcomer meets this on their second file, so the message has to carry the edit: the file to
+    -- move and where to move it, both spelled under the package's own source directory.
+    it "names the file to move and its destination" $ do
+      let project = projectWith (rootPackageWith ["mistake"]) []
+      case assembleProject project of
+        Left projectError ->
+          renderProjectError projectError
+            `shouldBe` "Package app provides module mistake, which is outside its app namespace.\n\
+                       \  A module's name is its path under the source directory (a/b.ktr is module a.b), and a package may only provide app itself and its app. descendants.\n\
+                       \  Fix: move src/mistake.ktr to src/app/mistake.ktr, so the module becomes app.mistake."
+        Right _ -> expectationFailure "expected an out-of-namespace failure"
 
     it "rejects a dependency whose [package].name disagrees with its key" $ do
       let project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "different" ["lib"] Nothing)]

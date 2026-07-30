@@ -79,3 +79,29 @@ spec = describe "JSONSchema FromJSON" $ do
   it "merges a description into the inner schema's encoding" $
     toJSON (SchemaDescribed DescribedSchema {description = "The city name.", schema = SchemaString})
       `shouldBe` object ["type" .= ("string" :: String), "description" .= ("The city name." :: String)]
+
+  -- An overlay used to OVERWRITE a description already on the inner encoding, which is how a documented
+  -- field of a documented type lost the whole of its type's explanation: a twelve-word field label
+  -- silently replaced a variant's paragraph, at exactly the best-documented sites.
+  it "joins an overlay with the description already on the inner encoding, outermost first" $
+    toJSON
+      ( SchemaDescribed
+          DescribedSchema
+            { description = "Where the line starts.",
+              schema = SchemaDescribed DescribedSchema {description = "point: A point in the plane.", schema = SchemaString}
+            }
+      )
+      `shouldBe` object
+        [ "type" .= ("string" :: String),
+          "description" .= ("Where the line starts.\n\npoint: A point in the plane." :: String)
+        ]
+
+  it "does not repeat a description identical to the one it overlays" $
+    toJSON
+      ( SchemaDescribed
+          DescribedSchema
+            { description = "The city name.",
+              schema = SchemaDescribed DescribedSchema {description = "The city name.", schema = SchemaString}
+            }
+      )
+      `shouldBe` object ["type" .= ("string" :: String), "description" .= ("The city name." :: String)]

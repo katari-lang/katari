@@ -171,6 +171,16 @@ assignEquals = void (try (string "=" <* notFollowedBy (oneOf ['=', '>']))) <* mu
 keyword :: Text -> Parser SourceSpan
 keyword text = snd <$> lexeme (try (string text <* notFollowedBy identifierContinue))
 
+-- | Let the token @opener@ matches begin on a LATER line: any newline before it is insignificant. Used
+-- for a clause a long signature wants to wrap before ('with').
+--
+-- The whole thing is a 'try', which is what makes it safe next to a rule that reads the same newline as
+-- a separator: when @opener@ does not match, NOTHING is consumed — not even the newline — so the
+-- signature's line scope still rejects an Allman body brace ('Katari.Parser.Expression.agentFormWith').
+-- Only a clause that actually appears may break before itself.
+breakableBefore :: Parser a -> Parser a
+breakableBefore opener = try (multilineSpace *> opener)
+
 isIdentifierStart :: Char -> Bool
 isIdentifierStart character = isLetter character || character == '_'
 

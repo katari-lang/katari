@@ -170,8 +170,10 @@ toJSONSchema dataDefinitions = convert Set.empty
               substitution = buildSubstitution definition.parameterGenericIds arguments
               expandedFields = Map.toAscList definition.fields
               -- A documented field carries its own docstring. The overlay sits outside whatever
-              -- description the field's type already contributed, and the wire encoding keeps the
-              -- outermost, so the more specific text — this declaration's, about this field — wins.
+              -- description the field's type already contributed, and the wire encoding JOINS the two
+              -- outermost-first ('Katari.Data.JSONSchema.mergedDescription'), so the more specific text —
+              -- this declaration's, about this field — leads, and the field type's own explanation of
+              -- itself still reaches the model instead of being overwritten.
               fieldProperties =
                 [ ( fieldName,
                     describedWith

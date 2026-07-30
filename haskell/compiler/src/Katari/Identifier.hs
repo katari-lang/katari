@@ -174,7 +174,9 @@ addImportItem moduleName moduleInterface item =
       ImportItemValue -> maybe unknown (\resolution -> pure [variableBinding item.name item.sourceSpan resolution]) symbol.variable
       ImportItemType -> maybe unknown (\resolution -> pure [typeBinding item.name item.sourceSpan resolution]) symbol.typeLevel
   where
-    unknown = reportUnknownImportName item.sourceSpan moduleName item.name >> pure []
+    -- Every export is a candidate regardless of namespace: an `import` item names one of them, and a
+    -- name that exists only in the other namespace is still what the reader meant to reach.
+    unknown = reportUnknownImportName item.sourceSpan moduleName item.name (Map.keys moduleInterface.exports) >> pure []
 
 ---------------------------------------------------------------------------------------------------
 -- Duplicate top-level names

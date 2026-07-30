@@ -44,7 +44,7 @@ import Katari.Cli.Api
     updateProject,
     withTrace,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveNodeHelperInvocation, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch)
+import Katari.Cli.Common (WarningScope (..), assembleSourcesOrExit, compileSourcesOrExit, dieIn, ownedSourceFiles, requireRuntimeAuth, resolveNodeHelperInvocation, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch)
 import Katari.Cli.Options (GlobalOptions (..), directoryOption, globalOptionsParser)
 import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
@@ -105,7 +105,7 @@ run options = do
 
   -- 2. Compile.
   sources <- assembleSourcesOrExit "apply" resolved
-  loweredModules <- compileSourcesOrExit sources
+  loweredModules <- compileSourcesOrExit (WarningsOwnedBy (ownedSourceFiles resolved)) sources
   when (Map.null loweredModules) $ dieIn "apply" "the project produced no modules to deploy"
 
   -- 3. Connect to the runtime and diff the build against its current head.

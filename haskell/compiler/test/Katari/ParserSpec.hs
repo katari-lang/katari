@@ -126,6 +126,48 @@ spec = do
     it "rejects a newline before an agent's body brace (no Allman braces)" $
       shouldFail "agent main() -> integer\n{ 1 }"
 
+    -- A signature is line-scoped so the body brace must be same-line, which used to make the ONE part of
+    -- a signature whose length is not the author's to shorten — the effect row — unwrappable: the
+    -- examples' rows run past 200 characters. The two break points below are now legal; the rejections
+    -- underneath them are the reason it is safe (nothing is consumed when no clause follows).
+    it "allows a newline before the `with` row" $ do
+      module' <- parseClean "agent main() -> integer\n  with tick { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> agent.effects `shouldSatisfy` isJust
+        _ -> expectationFailure "expected one agent"
+
+    it "allows a newline after a `|` inside the `with` row" $ do
+      module' <- parseClean "agent main() -> integer with tick |\n  tock { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.effects of
+          Just (TypeUnion union) -> length union.branches `shouldBe` 2
+          _ -> expectationFailure "expected a two-branch effect row"
+        _ -> expectationFailure "expected one agent"
+
+    it "allows both breaks at once (the row-heavy signature the examples wanted to wrap)" $ do
+      module' <- parseClean "agent main() -> integer\n  with tick |\n    tock |\n    chime { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.effects of
+          Just (TypeUnion union) -> length union.branches `shouldBe` 3
+          _ -> expectationFailure "expected a three-branch effect row"
+        _ -> expectationFailure "expected one agent"
+
+    it "allows a newline after a `|` in a return type" $ do
+      module' <- parseClean "agent main() -> integer |\n  string { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.returnType of
+          Just (TypeUnion union) -> length union.branches `shouldBe` 2
+          _ -> expectationFailure "expected a two-branch return type"
+        _ -> expectationFailure "expected one agent"
+
+    -- The Allman rejection above and this one are what 'breakableBefore' has to preserve: it consumes
+    -- NOTHING when the clause it speculates on is absent, so the newline is still there to be rejected.
+    it "still rejects an Allman body brace when the signature carries a `with` row" $
+      shouldFail "agent main() -> integer with tick\n{ 1 }"
+
+    it "still rejects an Allman body brace after a wrapped `with` row" $
+      shouldFail "agent main() -> integer\n  with tick | tock\n{ 1 }"
+
     it "parses a marker effect declaration" $ do
       module' <- parseClean "effect scoped[resource]"
       case module'.declarations of

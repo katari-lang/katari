@@ -11,7 +11,7 @@ import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Diagnostics (Diagnostics, reportAt)
-import Katari.Error (CompilerError (..), IdentifierError (..), UndefinedNameErrorInfo (..), compilerErrorCode)
+import Katari.Error (CompilerError (..), IdentifierError (..), UndefinedNameErrorInfo (..), compilerErrorCode, renderCompilerError)
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad
 import Katari.Parser (parseModule)
@@ -204,6 +204,35 @@ identifySpec = do
     it "reports a non-module qualifier (K2004)" $
       codesOf (identify emptyContext "data point(x: integer)\nagent main() -> point.field { 1 }") `shouldBe` ["K2004"]
 
+  -- Every unresolved-name error carries the near names from the namespace it failed in, because a
+  -- misspelling is the commonest way to reach one and the reader's next move is the corrected name.
+  describe "identifyModule (did you mean)" $ do
+    it "suggests an in-scope local for a misspelled bare name (K2001)" $
+      messagesOf (identify emptyContext "agent main() -> integer { let count = 1\n  cuont }")
+        `shouldBe` ["K2001: Nothing in scope is named `cuont`; did you mean `count`?"]
+
+    it "suggests a module member for a misspelled member (K2002)" $
+      messagesOf (identify contextWithLib "import lib\nagent main() -> integer { lib.duoble(x = 6) }")
+        `shouldBe` ["K2002: Module lib has no exported member `duoble`; did you mean `double`?"]
+
+    it "suggests an importable module for a misspelled import (K2005)" $
+      messagesOf (identify contextWithLib "import lbi\nagent main() -> integer { 1 }")
+        `shouldBe` ["K2005: Imported module does not exist: lbi; did you mean `lib`?"]
+
+    it "suggests an exported name for a misspelled import item (K2006)" $
+      messagesOf (identify contextWithLib "import { doubel } from lib\nagent main() -> integer { 1 }")
+        `shouldBe` ["K2006: Module lib does not export `doubel`; did you mean `double`?"]
+
+    -- Candidates come from the namespace the lookup failed in: proposing a type where a value is needed
+    -- would send the reader to a name that cannot resolve there either.
+    it "does not offer a type name for an undefined value" $
+      messagesOf (identify emptyContext "type pointt = integer\nagent main() -> integer { point }")
+        `shouldBe` ["K2001: Nothing in scope is named `point`. Check the spelling, or bring it into scope — a name from another module is written `module.name`, and `import` adds the module"]
+
+    it "suggests a state variable for a misspelled `with` target (K2007)" $
+      messagesOf (identify emptyContext "agent main() -> integer {\n  for (let x in [1], var total = 0) { next x with { totl = 1 } }\n}")
+        `shouldBe` ["K2007: `totl` is not a loop or handler state variable; did you mean `total`?"]
+
   describe "identifyModule (operator desugar)" $ do
     it "desugars a binary operator to a qualified prelude call (no primitive context needed)" $
       case operatorCall "agent main() -> integer { 1 + 2 }" of
@@ -390,6 +419,10 @@ diagnosticsOf = snd
 codesOf :: (Module Identified, Diagnostics) -> [Text]
 codesOf = map (compilerErrorCode . (.value)) . toList . snd
 
+-- | The rendered diagnostics without their source locations — the message text the reader acts on.
+messagesOf :: (Module Identified, Diagnostics) -> [Text]
+messagesOf = map (renderCompilerError . (.value)) . toList . snd
+
 agentNamed :: Text -> Module Identified -> Maybe (AgentDeclaration Identified)
 agentNamed name module' = listToMaybe [declaration | DeclarationAgent declaration <- module'.declarations, declaration.name == name]
 
@@ -438,4 +471,4 @@ someSpan = SourceSpan {filePath = "m.ktr", start = position, end = position}
     position = Position {line = 1, column = 1}
 
 someError :: CompilerError
-someError = CompilerErrorIdentifier (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = "x"})
+someError = CompilerErrorIdentifier (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = "x", suggestions = []})

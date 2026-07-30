@@ -105,6 +105,9 @@ tests:
     dependencies:
       - katari-cli
       - katari-compiler
+      # `ls packages` composes a project config, a registry snapshot and a lockfile; the row rules
+      # are only testable against those real types.
+      - katari-project
       - hspec
       - directory
       - filepath

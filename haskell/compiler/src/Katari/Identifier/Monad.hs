@@ -13,6 +13,7 @@ module Katari.Identifier.Monad where
 import Control.Monad (when)
 import Control.Monad.RWS.CPS (RWS, evalRWS)
 import Control.Monad.RWS.Class (MonadWriter, asks, gets, local, modify, state)
+import Data.Foldable (toList)
 import Data.List (find, foldl', sortOn)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -22,11 +23,12 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST (Module, ModuleQualifier (..), Phase (..), Reference (..), ReferenceKind (..), ReferenceResolution)
 import Katari.Data.Id (GenericId (..), LocalVariableId (..), TypeResolution (..), VariableResolution (..))
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.ModuleName (ModuleName, renderModuleName)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Position, SourceSpan (..), spanContains)
 import Katari.Diagnostics (Diagnostics, reportAt)
 import Katari.Error (CompilerError (..), DuplicateNameErrorInfo (..), IdentifierError (..), NotAModuleErrorInfo (..), UndefinedMemberErrorInfo (..), UndefinedNameErrorInfo (..), UndefinedStateVariableErrorInfo (..), UnknownImportModuleErrorInfo (..), UnknownImportNameErrorInfo (..))
+import Katari.Suggestion (nearestNames)
 
 ---------------------------------------------------------------------------------------------------
 -- Scope (the resolution environment)
@@ -334,13 +336,13 @@ resolveBareReference lookupName reportMissing sourceSpan name = do
 -- | Resolve a bare variable name, reporting K2001 when it is in no variable binding (a module name
 -- used as a value lands here too — it is not a value).
 resolveVariableReference :: SourceSpan -> Text -> Identifier (Reference Identified VariableReference)
-resolveVariableReference = resolveBareReference lookupVariable reportUndefinedName
+resolveVariableReference = resolveBareReference lookupVariable (reportUndefinedNameAmong (.variableBindings))
 
 -- | Resolve a bare (unqualified) type name, reporting K2001 when it is in no type binding. Generic
 -- parameters share the type namespace (bound by 'Katari.Identifier.Type.withGenericParameters'), so an
 -- in-scope generic resolves through here like any other bare type name.
 resolveTypeReference :: SourceSpan -> Text -> Identifier (Reference Identified TypeReference)
-resolveTypeReference = resolveBareReference lookupType reportUndefinedName
+resolveTypeReference = resolveBareReference lookupType (reportUndefinedNameAmong (.typeBindings))
 
 -- | Resolve a name in the module namespace, reporting K2004 when it is a value / type rather than a
 -- module, or K2001 when it is undefined entirely.
@@ -354,7 +356,7 @@ resolveModuleName sourceSpan name = do
       asType <- lookupType name
       if isJust asVariable || isJust asType
         then reportNotAModule sourceSpan name
-        else reportUndefinedName sourceSpan name
+        else reportUndefinedNameAmong (.moduleBindings) sourceSpan name
   pure resolution
 
 -- | Resolve a parsed @module.@ qualifier into its identified form and the module it names.
@@ -370,13 +372,13 @@ resolveModuleQualifier qualifier = do
 resolveVariableMember :: SourceSpan -> ModuleName -> Text -> Identifier (Maybe VariableResolution)
 resolveVariableMember sourceSpan moduleName name = do
   interface <- lookupModuleInterface moduleName
-  reportMember sourceSpan moduleName name (interface >>= memberVariable name)
+  reportMember sourceSpan moduleName name (exportedNames (isJust . (.variable)) interface) (interface >>= memberVariable name)
 
 -- | Resolve a member of @moduleName@ in the type namespace, reporting K2002 when absent.
 resolveTypeMember :: SourceSpan -> ModuleName -> Text -> Identifier (Maybe TypeResolution)
 resolveTypeMember sourceSpan moduleName name = do
   interface <- lookupModuleInterface moduleName
-  reportMember sourceSpan moduleName name (interface >>= memberType name)
+  reportMember sourceSpan moduleName name (exportedNames (isJust . (.typeLevel)) interface) (interface >>= memberType name)
 
 memberVariable :: Text -> ModuleInterface -> Maybe VariableResolution
 memberVariable name moduleInterface = Map.lookup name moduleInterface.exports >>= (.variable)
@@ -384,10 +386,16 @@ memberVariable name moduleInterface = Map.lookup name moduleInterface.exports >>
 memberType :: Text -> ModuleInterface -> Maybe TypeResolution
 memberType name moduleInterface = Map.lookup name moduleInterface.exports >>= (.typeLevel)
 
-reportMember :: SourceSpan -> ModuleName -> Text -> Maybe resolution -> Identifier (Maybe resolution)
-reportMember sourceSpan moduleName name = \case
+-- | The names a module exports that populate the namespace @inNamespace@ selects — the candidate set a
+-- @module.member@ suggestion is drawn from. An absent interface (an unknown module) offers none.
+exportedNames :: (ExportedSymbol -> Bool) -> Maybe ModuleInterface -> List Text
+exportedNames inNamespace maybeInterface =
+  [name | moduleInterface <- toList maybeInterface, (name, symbol) <- Map.toList moduleInterface.exports, inNamespace symbol]
+
+reportMember :: SourceSpan -> ModuleName -> Text -> List Text -> Maybe resolution -> Identifier (Maybe resolution)
+reportMember sourceSpan moduleName name candidates = \case
   Just resolution -> pure (Just resolution)
-  Nothing -> reportUndefinedMember sourceSpan moduleName name >> pure Nothing
+  Nothing -> reportUndefinedMember sourceSpan moduleName name candidates >> pure Nothing
 
 -- | Resolve a (possibly @module.@-qualified) name reference in one namespace, returning the identified
 -- qualifier (if any) and the resolved reference. A bare name goes through @resolveBare@ (K2001 if
@@ -415,7 +423,11 @@ resolveQualifiedReference resolveBare resolveMember moduleQualifier name referen
 -- | Resolve a @with@ modifier target: it must name an enclosing @for@ / @handler@ state variable, not
 -- an arbitrary in-scope local. Reports K2007 otherwise.
 resolveStateVariableReference :: SourceSpan -> Text -> Identifier (Reference Identified VariableReference)
-resolveStateVariableReference = resolveBareReference lookupStateVariable reportUndefinedStateVariable
+resolveStateVariableReference = resolveBareReference lookupStateVariable reportMissingStateVariable
+  where
+    reportMissingStateVariable sourceSpan name = do
+      states <- asks (\environment -> Map.keys environment.stateVariables)
+      reportUndefinedStateVariable sourceSpan name states
 
 -- Diagnostics -------------------------------------------------------------------------------------
 
@@ -424,11 +436,23 @@ resolveStateVariableReference = resolveBareReference lookupStateVariable reportU
 reportIdentifierError :: (MonadWriter Diagnostics m) => SourceSpan -> IdentifierError -> m ()
 reportIdentifierError sourceSpan = reportAt sourceSpan . CompilerErrorIdentifier
 
-reportUndefinedName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
-reportUndefinedName sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = name})
+-- | Report K2001 with the did-you-mean candidates drawn from @candidates@ — the names the reader could
+-- actually have meant here.
+reportUndefinedName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> List Text -> m ()
+reportUndefinedName sourceSpan name candidates =
+  reportIdentifierError sourceSpan (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = name, suggestions = nearestNames name candidates})
 
-reportUndefinedMember :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> m ()
-reportUndefinedMember sourceSpan moduleName name = reportIdentifierError sourceSpan (IdentifierErrorUndefinedMember UndefinedMemberErrorInfo {moduleName = moduleName, name = name})
+-- | Report K2001 for a bare name, with the candidates taken from the namespace it was looked up in
+-- (@selectNamespace@ picks that map out of the current scope). Suggesting across namespaces would
+-- propose a type where a value is needed, so each resolver passes its own.
+reportUndefinedNameAmong :: (Scope -> Map Text resolution) -> SourceSpan -> Text -> Identifier ()
+reportUndefinedNameAmong selectNamespace sourceSpan name = do
+  candidates <- asks (\environment -> Map.keys (selectNamespace environment.scope))
+  reportUndefinedName sourceSpan name candidates
+
+reportUndefinedMember :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> List Text -> m ()
+reportUndefinedMember sourceSpan moduleName name candidates =
+  reportIdentifierError sourceSpan (IdentifierErrorUndefinedMember UndefinedMemberErrorInfo {moduleName = moduleName, name = name, suggestions = nearestNames name candidates})
 
 reportDuplicateName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
 reportDuplicateName sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorDuplicateName DuplicateNameErrorInfo {name = name})
@@ -448,11 +472,21 @@ reportDuplicateLabels = go []
 reportNotAModule :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
 reportNotAModule sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorNotAModule NotAModuleErrorInfo {name = name})
 
-reportUnknownImportModule :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> m ()
-reportUnknownImportModule sourceSpan moduleName = reportIdentifierError sourceSpan (IdentifierErrorUnknownImportModule UnknownImportModuleErrorInfo {moduleName = moduleName})
+-- | Report K2005, suggesting from every importable module name — the candidates are whole dotted names
+-- ('renderModuleName'), because that is what an @import@ line spells.
+reportUnknownImportModule :: SourceSpan -> ModuleName -> Identifier ()
+reportUnknownImportModule sourceSpan moduleName = do
+  known <- asks (\environment -> renderModuleName <$> Map.keys environment.moduleInterfaces)
+  reportIdentifierError
+    sourceSpan
+    ( IdentifierErrorUnknownImportModule
+        UnknownImportModuleErrorInfo {moduleName = moduleName, suggestions = nearestNames (renderModuleName moduleName) known}
+    )
 
-reportUnknownImportName :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> m ()
-reportUnknownImportName sourceSpan moduleName name = reportIdentifierError sourceSpan (IdentifierErrorUnknownImportName UnknownImportNameErrorInfo {moduleName = moduleName, name = name})
+reportUnknownImportName :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> List Text -> m ()
+reportUnknownImportName sourceSpan moduleName name candidates =
+  reportIdentifierError sourceSpan (IdentifierErrorUnknownImportName UnknownImportNameErrorInfo {moduleName = moduleName, name = name, suggestions = nearestNames name candidates})
 
-reportUndefinedStateVariable :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
-reportUndefinedStateVariable sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorUndefinedStateVariable UndefinedStateVariableErrorInfo {name = name})
+reportUndefinedStateVariable :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> List Text -> m ()
+reportUndefinedStateVariable sourceSpan name candidates =
+  reportIdentifierError sourceSpan (IdentifierErrorUndefinedStateVariable UndefinedStateVariableErrorInfo {name = name, suggestions = nearestNames name candidates})

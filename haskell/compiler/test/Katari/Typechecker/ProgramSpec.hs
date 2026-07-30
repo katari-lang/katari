@@ -7,7 +7,7 @@ import Data.Text qualified as Text
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Diagnostics (Diagnostics)
-import Katari.Error (CompilerError (..), compilerErrorCode, renderTypeError, typeErrorCode)
+import Katari.Error (CompilerError (..), Severity (..), compilerErrorCode, renderTypeError, severityOf, typeErrorCode)
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..))
 import Katari.Parser (parseModule)
@@ -116,6 +116,127 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
         )
       ]
       `shouldContain` ["K3026"]
+
+  -- K3028, the discarded-value warning. The motivating defect: `try_send` stopped answering `null` and
+  -- started answering a `sent | dropped` sum so that a caller could no longer report success for a post
+  -- that never landed — and every existing call site kept compiling, silently dropping the delivery fact.
+  -- The rule is NOT "the type is not null": three families of value are handed back by the language rather
+  -- than answered by the callee, and each has a test below saying so.
+  describe "K3028 (a statement discards a value)" $ do
+    it "warns when a call's answer is dropped in statement position" $
+      typeErrorCodes
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \data undelivered(reason: string)\n\
+            \agent try_send(text: string) -> sent | undelivered { sent(channel = \"c\") }\n\
+            \agent report() -> null {\n\
+            \  try_send(text = \"a\")\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldContain` ["K3028"]
+
+    it "names the discarded type, so the reader can judge whether it mattered" $
+      typeErrorMessages
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \agent try_send(text: string) -> sent { sent(channel = \"c\") }\n\
+            \agent report() -> null { try_send(text = \"a\")\n  null\n}"
+          )
+        ]
+        `shouldSatisfy` any (Text.isInfixOf "discarded: sent")
+
+    it "is a WARNING, not an error — the program is well-typed and the discard may be meant" $
+      -- Read through `severityOf` rather than asserting on the code, so a later severity change here
+      -- fails this test instead of quietly starting to break every build that discards a value.
+      typeErrorSeverities
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \agent try_send(text: string) -> sent { sent(channel = \"c\") }\n\
+            \agent report() -> null { try_send(text = \"a\")\n  null\n}"
+          )
+        ]
+        `shouldBe` [SeverityWarning]
+
+    it "stays silent on `let _ = ...` — the spelling of a deliberate discard" $
+      typeErrorCodes
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \agent try_send(text: string) -> sent { sent(channel = \"c\") }\n\
+            \agent report() -> null {\n\
+            \  let _ = try_send(text = \"a\")\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldBe` []
+
+    it "stays silent on a null-answering call — the ordinary effect-only statement" $
+      typeErrorCodes
+        [ ( "test",
+            "agent note(text: string) -> null { null }\n\
+            \agent report() -> null {\n\
+            \  note(text = \"a\")\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldBe` []
+
+    it "never fires on a block's trailing expression — that value IS the block's" $
+      typeErrorCodes
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \agent try_send(text: string) -> sent { sent(channel = \"c\") }\n\
+            \agent report() -> sent { try_send(text = \"a\") }"
+          )
+        ]
+        `shouldBe` []
+
+    -- `for` is an expression, so a loop run for its effects leaves an `array[null]` nobody meant to read.
+    -- Descending through the container is what keeps the warning off that idiom.
+    it "stays silent on a `for` run for effect (its array[null] is structure, not an answer)" $
+      typeErrorCodes
+        [ ( "test",
+            "agent note(text: string) -> null { null }\n\
+            \agent report(texts: array[string]) -> null {\n\
+            \  for (let text in texts) { next note(text = text) }\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldBe` []
+
+    it "still warns when the loop COLLECTS answers — the array carries every one of them" $
+      typeErrorMessages
+        [ ( "test",
+            "data sent(channel: string)\n\
+            \agent try_send(text: string) -> sent { sent(channel = \"c\") }\n\
+            \agent report(texts: array[string]) -> null {\n\
+            \  for (let text in texts) { next try_send(text = text) }\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldSatisfy` any (Text.isInfixOf "discarded: array[sent]")
+
+    -- A callable says what the holder MAY do next, never what has already happened; `region.fork` answers
+    -- a handle that exists only for `cancel`, and fork-and-forget is its normal spelling.
+    it "stays silent on a discarded callable (a capability, not an outcome)" $
+      typeErrorCodes
+        [ ( "test",
+            "agent make() -> agent (value: null) -> null {\n\
+            \  agent inner(value: null) -> null { null }\n\
+            \  inner\n\
+            \}\n\
+            \agent report() -> null {\n\
+            \  make()\n\
+            \  null\n\
+            \}"
+          )
+        ]
+        `shouldBe` []
 
   it "a catch-all handler covers a still-generic tail (the coverage split: {...E, fail[unknown]} absorbs bare E)" $
     typeErrorCodes
@@ -312,15 +433,15 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
 
   -- A match left non-exhaustive by one constructor reports exactly ONE diagnostic — the uncovered
   -- constructor — and does not cascade the byproduct of the constructor-subtype escape hatch (the
-  -- expanded record vs. the supertype: "Object layers are incompatible … actual: record"). Regression
-  -- for the double diagnostic the coverage check used to emit at a single span.
+  -- expanded record vs. the expectation: "… can be an object or record, which the expected type does
+  -- not admit"). Regression for the double diagnostic the coverage check used to emit at a single span.
   it "reports one diagnostic for a non-exhaustive data-union match (no cascaded record-layer noise)" $ do
     let messages =
           typeErrorMessages
             [("test", "data red()\ndata green()\ndata blue()\nagent f(c: red | green | blue) -> integer { match (c) { case red() -> 1\ncase green() -> 2 } }")]
     length messages `shouldBe` 1
-    messages `shouldSatisfy` any (Text.isInfixOf "not a subtype either: test.blue")
-    messages `shouldSatisfy` (not . any (Text.isInfixOf "Object layers are incompatible"))
+    messages `shouldSatisfy` any (Text.isInfixOf "The actual type can be `test.blue`, which the expected type does not admit")
+    messages `shouldSatisfy` (not . any (Text.isInfixOf "an object or record, which the expected type does not admit"))
 
   -- Narrowing is residual, not unconditional: a first-arm variable still sees the full scrutinee, so a
   -- lone `case rest` over `integer | null` binds `rest` nullable (K3001 on the non-null return).
@@ -641,7 +762,7 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
             ]
      in do
           messages `shouldSatisfy` any (Text.isInfixOf "expected a parameter named `time`, found `moment`")
-          messages `shouldSatisfy` (not . any (Text.isInfixOf "Optional field cannot be a subtype of a required field: moment"))
+          messages `shouldSatisfy` (not . any (Text.isInfixOf "`moment` is optional"))
 
   it "K3001 on a genuinely optional record field keeps the optionality message" $
     typeErrorMessages
@@ -650,7 +771,53 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
           \agent g(input: {x?: integer}) -> integer { f(point = input) }"
         )
       ]
-      `shouldSatisfy` any (Text.isInfixOf "Optional field cannot be a subtype of a required field: x")
+      `shouldSatisfy` any (Text.isInfixOf "Field `x` is optional in the actual type but required in the expected type")
+
+  -- A call that leaves out a required argument is the commonest K3001 there is, and the type-theory
+  -- reading of it ("an optional field cannot be a subtype of a required one") described the lattice
+  -- rather than the edit: the argument the reader has to add. The call site raises the object role that
+  -- says so.
+  it "K3001 on a call missing a required argument names the missing ARGUMENT" $
+    typeErrorMessages
+      [ ( "test",
+          "data cron(expression: string, timezone: string)\n\
+          \agent f() -> cron { cron(expression = \"0 9 * * *\") }"
+        )
+      ]
+      `shouldSatisfy` any (Text.isInfixOf "K3001: Required argument `timezone` is missing")
+
+  -- The structural layers are named in surface words, since "Number layers are incompatible" told a
+  -- reader nothing about their program. The expected / actual pair below the reason is unchanged.
+  it "K3001 on a type mismatch names the kind of value the expected type has no case for" $
+    typeErrorMessages [("test", "agent f(n: integer) -> string { n }")]
+      `shouldSatisfy` any (Text.isInfixOf "K3001: The actual type can be a number, which the expected type does not admit\n  expected: string\n  actual:   integer")
+
+  -- The one layer failure with a second reading: both sides ARE numbers, and the expected side is the
+  -- narrower `integer`.
+  it "K3001 on a number where an integer is expected says the actual value may carry a fraction" $
+    typeErrorMessages [("test", "agent f(n: number) -> integer { n }")]
+      `shouldSatisfy` any (Text.isInfixOf "K3001: The expected type is an `integer`, but the actual type is a `number`, which may carry a fraction")
+
+  -- `with pure` over a request: the row disagreement used to read as "Left effect performs a request not
+  -- present in the right effect", which leaves the reader to work out which side they wrote.
+  it "K3001 on an undeclared request names the request and both fixes" $
+    typeErrorMessages [("test", "request tick() -> integer\nagent f() -> integer with pure { tick() }")]
+      `shouldSatisfy` any
+        ( \message ->
+            "The actual effect performs `test.tick`, which the expected effect does not allow" `Text.isInfixOf` message
+              && "serve it here with a `use handler` clause" `Text.isInfixOf` message
+        )
+
+  -- Reading a field a type does not declare yields `unknown`, so a misspelled field lands on the
+  -- unknown-vs-known rule. "Unknown type cannot be a subtype of a known type" left the reader with no
+  -- hint that the field name was the problem.
+  it "K3001 on an undeclared field read names the field-name reading of `unknown`" $
+    typeErrorMessages [("test", "data point(x: integer, y: integer)\nagent read(p: point) -> integer { p.xx }")]
+      `shouldSatisfy` any (Text.isInfixOf "Reading a field or key that the type does not declare yields `unknown` — check the name")
+
+  it "K3001 on an undeclared io names the `with io` fix" $
+    typeErrorMessages [("test", "external agent ext(value: integer) -> integer\nagent f() -> integer with pure { ext(value = 1) }")]
+      `shouldSatisfy` any (Text.isInfixOf "io cannot be handled away, so it has to appear in the row: write `with io` on this signature")
 
   it "K3013 on an unreadable `use` binder names the pin-the-arguments fix and the synonym idiom" $
     -- A provider generic in its continuation's VALUE type (@A@) leaves the binder's type unreadable
@@ -740,6 +907,12 @@ typeErrorCodes sources =
 typeErrorMessages :: [(Text, Text)] -> [Text]
 typeErrorMessages sources =
   [renderTypeError typeError | located <- toList (runProgramDiagnostics sources), CompilerErrorType typeError <- [located.value]]
+
+-- | The severity of every /type/ diagnostic a whole-program run emits — for the one type diagnostic that
+-- is a warning (K3028), whose whole point is that it does not fail the build.
+typeErrorSeverities :: [(Text, Text)] -> [Severity]
+typeErrorSeverities sources =
+  [severityOf located.value | located <- toList (runProgramDiagnostics sources), CompilerErrorType _ <- [located.value]]
 
 -- | The codes of every diagnostic across all phases, so identifier-phase errors (K2xxx) are visible
 -- too — the type-only 'typeErrorCodes' driver drops them.

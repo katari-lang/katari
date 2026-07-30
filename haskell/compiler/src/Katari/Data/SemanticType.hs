@@ -85,6 +85,48 @@ data SemanticGenericArgument where
   SemanticGenericArgumentAttribute :: SemanticAttribute -> SemanticGenericArgument
   deriving (Eq, Ord, Show)
 
+-- | Whether a value of this type can tell its reader anything ABOUT WHAT HAPPENED — the question the
+-- discarded-value warning (K3028, 'Katari.Typechecker.Check.warnOnDiscardedValue') asks of a statement's
+-- type. It is not "is this type @null@": three families of value are handed back by the language rather
+-- than answered by the callee, and dropping one of those is an idiom, not a defect.
+--
+--   * @null@ answers nothing by definition, and @never@ (bottom) has no values at all.
+--   * A CONTAINER of nothings is also nothing. @for@ and @parallel@ are expressions, so running either
+--     for its effects alone leaves an @array[null]@ / @[null, null]@ behind — a shape the construct must
+--     have a type for, not an answer anyone ignored. Descending (rather than carving out @for@) keeps the
+--     rule structural AND still catches the case that matters: a loop collecting @send_outcome@s whose
+--     array is dropped has dropped every delivery fact in it, and @array[send_outcome]@ says so.
+--   * A CALLABLE is a capability, not an outcome — it says what the holder MAY do next, never what has
+--     already happened. Dropping one declines an option. The clearest case is @region.fork@, which answers
+--     a @fiber@ handle that exists only for @cancel@; a fiber's facts arrive at @watch@ by that API's own
+--     design (its task is typed @-> null@ precisely so no result can ride back), so fork-and-forget is the
+--     normal spelling and every @fork@ in the playground drops the handle.
+--
+-- Everything else answers something, including a nullary @data@ constructor: the author chose a declared
+-- type over @null@, and taking that choice at face value is what makes the warning trustworthy.
+answersNothing :: SemanticType -> Bool
+answersNothing semanticType = case semanticType of
+  SemanticTypeNull -> True
+  SemanticTypeNever -> True
+  SemanticTypeArray itemType -> answersNothing itemType
+  SemanticTypeTuple itemTypes -> all answersNothing itemTypes
+  SemanticTypeRecord valueType -> answersNothing valueType
+  -- An object with no fields (the empty record) reaches this as @all@ over nothing, which is True.
+  SemanticTypeObject fields -> all (answersNothing . (.semanticType)) fields
+  SemanticTypeUnion branches -> all answersNothing branches
+  -- An information-flow label says who may read a value, never whether there is one to read.
+  SemanticTypeAttribute baseType _ -> answersNothing baseType
+  SemanticTypeAgent {} -> True
+  SemanticTypeUnknown -> False
+  SemanticTypeInteger -> False
+  SemanticTypeNumber -> False
+  SemanticTypeString -> False
+  SemanticTypeStringLiteral _ -> False
+  SemanticTypeBoolean -> False
+  SemanticTypeFile -> False
+  SemanticTypeGeneric _ -> False
+  SemanticTypeData _ _ -> False
+
 -- | Render a type in Katari surface syntax (@integer@, @array[T]@, @{x: T, y?: U}@,
 -- @agent(x: T) -> R with req@, @T1 | T2@, @T of private@ …).
 --
@@ -109,13 +151,84 @@ data NameStyle
     -- requests / data types stay distinguishable (so a union of them no longer reads as a bare
     -- @credential | credential@), which is also what makes deduplicating a rendered union sound.
     QualifiedByLastSegment
+  | -- | Bare, EXCEPT for the listed names, which are qualified by their module's last segment. Built by
+    -- 'disambiguatingNameStyle' from the very values being rendered: a bare name that two different
+    -- modules claim there is ambiguous (@auth_error | auth_error@ tells the reader nothing), and every
+    -- other name keeps its bare spelling, so a rendering with no collision is byte-identical to
+    -- 'BareName'.
+    QualifiedWhereAmbiguous (Set Text)
   deriving stock (Eq, Show)
 
 -- | Spell a data-type / request name in the given 'NameStyle'.
 renderStyledName :: NameStyle -> QualifiedName -> Text
 renderStyledName style qualifiedName = case style of
   BareName -> qualifiedName.name
-  QualifiedByLastSegment -> lastSegment qualifiedName.moduleName <> "." <> qualifiedName.name
+  QualifiedByLastSegment -> qualified
+  QualifiedWhereAmbiguous ambiguousNames ->
+    if Set.member qualifiedName.name ambiguousNames then qualified else qualifiedName.name
+  where
+    qualified = lastSegment qualifiedName.moduleName <> "." <> qualifiedName.name
+
+-- | The style to render a group of values under so that no two distinct names in the group read alike:
+-- 'BareName' when every bare name in them denotes one thing, otherwise 'QualifiedWhereAmbiguous' over
+-- exactly the colliding names. Used where several renderings are read against each other (the
+-- expected / actual pair of a subtype error), so the reader can tell two packages' @auth_error@ apart
+-- without every other name growing a prefix.
+disambiguatingNameStyle :: List SemanticGenericArgument -> NameStyle
+disambiguatingNameStyle arguments
+  | Set.null ambiguousNames = BareName
+  | otherwise = QualifiedWhereAmbiguous ambiguousNames
+  where
+    -- A set, so each (module, name) pair counts once and the tally below is the number of DISTINCT
+    -- modules claiming a bare name.
+    names = foldMap genericArgumentNames arguments
+    modulesPerName :: Map Text Int
+    modulesPerName = Map.fromListWith (+) [(qualifiedName.name, 1) | qualifiedName <- Set.toList names]
+    ambiguousNames = Map.keysSet (Map.filter (> 1) modulesPerName)
+
+-- | Every data-type / request name a generic argument mentions, at any depth. The input to
+-- 'disambiguatingNameStyle'; it walks the same shapes the renderer walks, so a name that can be
+-- printed is a name that can be found here.
+genericArgumentNames :: SemanticGenericArgument -> Set QualifiedName
+genericArgumentNames = \case
+  SemanticGenericArgumentType semanticType -> semanticTypeNames semanticType
+  SemanticGenericArgumentEffect effect -> semanticEffectNames effect
+  SemanticGenericArgumentAttribute _ -> Set.empty
+
+semanticTypeNames :: SemanticType -> Set QualifiedName
+semanticTypeNames = \case
+  SemanticTypeData qualifiedName arguments -> Set.insert qualifiedName (foldMap genericArgumentNames (Map.elems arguments))
+  SemanticTypeAgent parameterType returnType effect ->
+    semanticTypeNames parameterType <> semanticTypeNames returnType <> semanticEffectNames effect
+  SemanticTypeArray itemType -> semanticTypeNames itemType
+  SemanticTypeTuple itemTypes -> foldMap semanticTypeNames itemTypes
+  SemanticTypeObject fields -> foldMap (\field -> semanticTypeNames field.semanticType) (Map.elems fields)
+  SemanticTypeRecord valueType -> semanticTypeNames valueType
+  SemanticTypeUnion branches -> foldMap semanticTypeNames branches
+  SemanticTypeAttribute baseType _ -> semanticTypeNames baseType
+  SemanticTypeNever -> Set.empty
+  SemanticTypeUnknown -> Set.empty
+  SemanticTypeNull -> Set.empty
+  SemanticTypeInteger -> Set.empty
+  SemanticTypeNumber -> Set.empty
+  SemanticTypeString -> Set.empty
+  SemanticTypeStringLiteral _ -> Set.empty
+  SemanticTypeBoolean -> Set.empty
+  SemanticTypeFile -> Set.empty
+  SemanticTypeGeneric _ -> Set.empty
+
+semanticEffectNames :: SemanticEffect -> Set QualifiedName
+semanticEffectNames = \case
+  SemanticEffectRequest qualifiedName arguments -> Set.insert qualifiedName (foldMap genericArgumentNames (Map.elems arguments))
+  SemanticEffectUnion effects -> foldMap semanticEffectNames effects
+  SemanticEffectOverwrite baseEffect lacksNames overwrites ->
+    semanticEffectNames baseEffect
+      <> lacksNames
+      <> foldMap (\(qualifiedName, arguments) -> Set.insert qualifiedName (foldMap genericArgumentNames (Map.elems arguments))) overwrites
+  SemanticEffectPure -> Set.empty
+  SemanticEffectAny -> Set.empty
+  SemanticEffectIo -> Set.empty
+  SemanticEffectGeneric _ -> Set.empty
 
 -- | Drop duplicate rendered union leaves — but only once names carry their module qualifier. Bare
 -- rendering leaves the list untouched so error messages stay byte-stable and two same-named leaves from
@@ -125,6 +238,9 @@ dedupUnionLeaves :: NameStyle -> List Text -> List Text
 dedupUnionLeaves style = case style of
   BareName -> id
   QualifiedByLastSegment -> nub
+  -- Under this style two leaves render alike only when they are the same name from the same module (a
+  -- collision is qualified away), so collapsing them is sound for the same reason.
+  QualifiedWhereAmbiguous _ -> nub
 
 -- | 'renderSemanticType' with an explicit 'NameStyle'; the escalation report renders nested names
 -- 'QualifiedByLastSegment' so they read like the source.

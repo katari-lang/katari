@@ -27,10 +27,14 @@ typeExpression :: Parser TypeExpression
 typeExpression = label "type" unionType
 
 -- | @T1 | T2 | ...@ — a union of 2+ branches, else just the single branch.
+--
+-- A newline after @|@ is insignificant even in line mode: the operator has been consumed and a right
+-- branch is then obligatory, so no reading of the newline as a separator survives it. That is what lets
+-- a row-heavy signature wrap instead of running past 200 characters on one line.
 unionType :: Parser TypeExpression
 unionType = do
   first <- attributedType
-  rest <- many (symbol "|" *> attributedType)
+  rest <- many (symbol "|" *> multilineSpace *> attributedType)
   pure $ case rest of
     [] -> first
     _ ->
@@ -197,7 +201,7 @@ agentType = do
   parameterType <- agentParameterType
   _ <- symbol "->"
   returnType <- typeExpression
-  effects <- optional (keyword "with" *> typeExpression)
+  effects <- optional (breakableBefore (keyword "with") *> typeExpression)
   let endSpan = maybe (sourceSpanOf returnType) sourceSpanOf effects
   pure
     ( TypeAgent

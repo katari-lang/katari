@@ -57,6 +57,7 @@ import Control.Monad.State.Strict (StateT, evalStateT, get, modify')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName (..), covers)
 import Katari.Project.Cache (CachePaths, ensureCacheDirs, packageDir, projectCachePaths)
@@ -74,6 +75,7 @@ import Katari.Project.Discovery
     SourceOverlay,
     configFilename,
     emptyOverlay,
+    modulePathForModuleName,
     scanSources,
   )
 import Katari.Project.Error
@@ -101,7 +103,7 @@ import Katari.Project.Lockfile
     lockfileFormatVersion,
   )
 import Katari.Project.Reconcile (closureMismatches, manifestMismatches)
-import Katari.Project.Snapshot (Snapshot (..), loadSnapshotFromUrl)
+import Katari.Project.Snapshot (Snapshot (..), SnapshotEntry (..), loadSnapshotFromUrl)
 import Katari.Stdlib (isReservedModuleName)
 import Network.HTTP.Client (Manager)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
@@ -280,7 +282,10 @@ resolveSnapshotDependency context name = do
   case Map.lookup name snapshot.packages of
     Nothing -> throwError (ResolveUnresolvedDependency DependencyInfo {dependency = name})
     -- The pin's sha is both the cache hint (skip download if held) and the required hash (verify).
-    Just pin -> loadGitPackage context name GitRef {url = pin.url, rev = pin.rev} (Just pin.sha) (Just pin.sha)
+    -- The entry's version label is not consulted: the pin is what a snapshot resolves on.
+    Just entry ->
+      let pin = entry.source
+       in loadGitPackage context name GitRef {url = pin.url, rev = pin.rev} (Just pin.sha) (Just pin.sha)
 
 -- | The registry snapshot, loaded at most once. A dependency that needs the snapshot but has no
 -- @[dependencies].registry@ to load it from is simply unresolvable.
@@ -407,9 +412,20 @@ validatePackageNamespace name package = do
   when (isReservedModuleName (ModuleName name)) $
     Left (ResolveReservedPackageName PackageNameInfo {name = name})
   let namespaceRoot = ModuleName name
+      -- The layout facts the diagnostic needs: this layer owns the module-name / path convention, so it
+      -- resolves the offending file and its destination rather than leaving the renderer to guess.
+      sourceDirectory = package.config.package.src
   forM_ (Map.keys package.sources) $ \moduleName ->
     unless (namespaceRoot `covers` moduleName) $
-      Left (ResolveOutOfNamespace OutOfNamespaceInfo {package = name, moduleName = moduleName})
+      Left
+        ( ResolveOutOfNamespace
+            OutOfNamespaceInfo
+              { package = name,
+                moduleName = moduleName,
+                currentPath = sourceDirectory </> modulePathForModuleName moduleName,
+                fixedPath = sourceDirectory </> Text.unpack name </> modulePathForModuleName moduleName
+              }
+        )
   pure [(moduleName, (name, entry)) | (moduleName, entry) <- Map.toList package.sources]
 
 -- | Validate one dependency package: its declared key must agree with its @[package].name@ — the one

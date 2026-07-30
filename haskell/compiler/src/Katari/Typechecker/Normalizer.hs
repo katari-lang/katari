@@ -62,12 +62,11 @@ data SubtypingContext = SubtypingContext
     -- (public) at the top level, raised by 'withWorld' as the comparison descends through private
     -- expectations. Every attribute is compared joined with it.
     world :: NormalizedAttribute,
-    -- | Whether the object comparison about to run is an agent type's PARAMETER record
-    -- ('subtypeFunction' raises it around its contravariant argument check; 'subtypeObject' consumes
-    -- and lowers it before descending). Parameter names are part of an agent type, so a required
-    -- field present on exactly one side there is a parameter-NAME mismatch — which the plain
-    -- per-field optionality reading would misreport (nothing was declared optional).
-    comparingAgentParameters :: Bool,
+    -- | What the object comparison about to run IS, when it is not an ordinary record comparison (see
+    -- 'ObjectRole'). Raised by the caller that knows ('subtypeFunction', the checker's call-argument
+    -- check) and lowered by 'subtypeObject' before descending, so only the outermost object of a
+    -- comparison reads its role. Message-only: no subtype verdict depends on it.
+    objectRole :: ObjectRole,
     -- | The requests served by a @use handler@ clause in the enclosing agent body that is installed
     -- LATER in the source than the check currently running, each mapped to its install site. When an
     -- unhandled-request mismatch names one of these, the defect is almost always handler ORDER — a
@@ -78,6 +77,23 @@ data SubtypingContext = SubtypingContext
     laterHandlerInstallSites :: Map QualifiedName SourceSpan
   }
   deriving (Eq, Show)
+
+-- | What an object under comparison stands for in the source, which decides how a field disagreement
+-- reads. Structurally the three are one comparison; only the wording differs, so the role is carried
+-- as data and dispatched on once, in 'subtypeObject'.
+data ObjectRole where
+  -- | A record / object type in its own right. A field present on one side only is a field.
+  ObjectRoleRecord :: ObjectRole
+  -- | An agent type's PARAMETER record (raised by 'subtypeFunction' around its contravariant argument
+  -- check). Parameter names are part of an agent type, so a required field on exactly one side is a
+  -- parameter-NAME mismatch — which the plain optionality reading would misreport as an optionality
+  -- that nobody wrote.
+  ObjectRoleAgentParameters :: ObjectRole
+  -- | The argument record a CALL SITE supplies, against the callee's parameters (raised by the
+  -- checker's argument check). A field the call does not supply is a missing argument, which is what
+  -- the reader wrote and what they must add.
+  ObjectRoleCallArguments :: ObjectRole
+  deriving (Eq, Ord, Show)
 
 -- | The normalizer runs over exactly the subtyping context.
 type NormalizerEnvironment = SubtypingContext
@@ -107,10 +123,10 @@ currentWorld = asks (\environment -> environment.world)
 withWorld :: NormalizedAttribute -> Normalizer a -> Normalizer a
 withWorld attribute = local (\environment -> environment {world = joinAttribute environment.world attribute})
 
--- | Run a sub-comparison with the agent-parameter marker set (an agent type's argument record) or
--- cleared (anything nested below it) — see 'comparingAgentParameters'.
-withAgentParameters :: Bool -> Normalizer a -> Normalizer a
-withAgentParameters flag = local (\environment -> environment {comparingAgentParameters = flag})
+-- | Run a sub-comparison with the object role set — see 'ObjectRole'. Every descent lowers it back to
+-- 'ObjectRoleRecord', so a role never leaks into a nested object.
+withObjectRole :: ObjectRole -> Normalizer a -> Normalizer a
+withObjectRole role = local (\environment -> environment {objectRole = role})
 
 ------------------------------------------------------------------------------------------------
 -- Environment lookups. A name absent here is a compiler-invariant violation, not a user error: the
@@ -466,7 +482,13 @@ instance TypeLattice NormalizedType where
     withWorld right.attribute $ case (effectiveLeft.baseType, right.baseType) of
       (NormalizedBaseTypeUnknown, NormalizedBaseTypeUnknown) -> pure ()
       (NormalizedBaseTypeUnknown, NormalizedBaseTypeLayered _) ->
-        tellSubtypeMismatch "Unknown type cannot be a subtype of a known type" effectiveLeft right
+        tellSubtypeMismatch
+          ( "The actual type is `unknown`, so nothing is known about the value and it fits only a position"
+              <> " that also accepts `unknown`. Reading a field or key that the type does not declare"
+              <> " yields `unknown` — check the name — otherwise narrow the value with a `match` first."
+          )
+          effectiveLeft
+          right
       (_, NormalizedBaseTypeUnknown) -> pure ()
       (NormalizedBaseTypeLayered leftLayer, NormalizedBaseTypeLayered rightLayer) -> do
         subtypeLayers leftLayer rightLayer
@@ -495,7 +517,13 @@ instance TypeLattice NormalizedAttribute where
     -- no-generics case (the overwhelmingly common one) skips the fixpoint entirely.
     effectiveLeft <- if Set.null worldedLeft.generic then pure worldedLeft else boundedAttribute worldedRight.generic worldedLeft
     when (effectiveLeft.private && not worldedRight.private) $
-      tellAttributeMismatch "Private attribute cannot be a subtype of public attribute" effectiveLeft worldedRight
+      tellAttributeMismatch
+        ( "The actual value is private (a secret), but this position accepts only a public value — a secret"
+            <> " may not flow out of the private context that observes it. Mark the position `of private`"
+            <> " too, or keep the secret out of it."
+        )
+        effectiveLeft
+        worldedRight
 
 instance TypeLattice NormalizedEffect where
   -- The request part combines as before; the two escape channels combine independently (and so are
@@ -518,13 +546,25 @@ instance TypeLattice NormalizedEffect where
     subtypeEscapes left.continues right.continues
     -- io cannot be discharged: a left that performs io must flow only where io is also allowed.
     when (left.io && not right.io) $
-      tellEffectMismatch "Left effect performs io, which the right effect does not allow (io cannot be discharged)" left right
+      tellEffectMismatch
+        ( "The actual effect performs io (an `external` call), which the expected effect does not allow."
+            <> " io cannot be handled away, so it has to appear in the row: write `with io` on this"
+            <> " signature (or add `io` to the row it already has)."
+        )
+        left
+        right
     where
       subtypeEscapes leftMap rightMap =
         mapM_
           ( \(boundaryId, leftType) ->
               case Map.lookup boundaryId rightMap of
-                Nothing -> tellEffectMismatch "Left effect carries a global escape not present in the right effect" left right
+                Nothing ->
+                  tellEffectMismatch
+                    ( "The actual effect carries a control escape — a `return` / `break` / `next` aimed at an"
+                        <> " enclosing boundary — that the expected effect does not carry."
+                    )
+                    left
+                    right
                 Just rightType -> subtype leftType rightType
           )
           (Map.toList leftMap)
@@ -559,7 +599,12 @@ subtypeRequestEffect :: NormalizedEffect -> NormalizedEffect -> Normalizer ()
 subtypeRequestEffect left right = case (left.requests, right.requests) of
   (RequestEffectAny, RequestEffectAny) -> pure ()
   (RequestEffectAny, RequestEffectRow _) ->
-    tellEffectMismatch "Any effect cannot be a subtype of a known effect" left right
+    tellEffectMismatch
+      ( "The actual effect is `all` — it may perform ANY request — so no row can cover it. Narrow the"
+          <> " actual signature's row to the requests it really performs."
+      )
+      left
+      right
   (RequestEffectRow _, RequestEffectAny) -> pure ()
   (RequestEffectRow _, RequestEffectRow rightRow) -> do
     -- Expand the left's tails to their upper bounds (transitively), treating the supertype's own
@@ -568,7 +613,14 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
     case effectiveLeft.requests of
       -- A left-only tail is unbounded (any), so the effective left effect is any and cannot be a
       -- subtype of a known effect row.
-      RequestEffectAny -> tellEffectMismatch "A left-only effect generic is unbounded, so the left effect is effectively any" effectiveLeft right
+      RequestEffectAny ->
+        tellEffectMismatch
+          ( "The actual effect carries an effect parameter the expected effect does not, and that parameter"
+              <> " has no `extends` bound — so it may carry any request and no row can cover it. Give it a"
+              <> " bound, or declare the same effect parameter on the expected side."
+          )
+          effectiveLeft
+          right
       RequestEffectRow effectiveLeftRow -> do
         -- NOTE: requests are covariant; every request the left performs must appear on the right
         mapM_
@@ -576,7 +628,15 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
               case Map.lookup qualifiedName rightRow.request of
                 Nothing -> do
                   geometryNote <- handlerGeometryNote qualifiedName
-                  tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName <> geometryNote) effectiveLeft right
+                  tellEffectMismatch
+                    ( "The actual effect performs `"
+                        <> renderQualifiedName qualifiedName
+                        <> "`, which the expected effect does not allow. Either name that request in the expected"
+                        <> " `with` row, or serve it here with a `use handler` clause."
+                        <> geometryNote
+                    )
+                    effectiveLeft
+                    right
                 Just rightArguments -> do
                   requestInfo <- requestInfoFor qualifiedName
                   subtypeArgumentsWith (requestRowVariance . (.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
@@ -591,7 +651,13 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
         mapM_
           ( \(genericId, leftLacks) ->
               case Map.lookup genericId rightRow.tails of
-                Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
+                Nothing ->
+                  tellEffectMismatch
+                    ( "The actual effect carries an effect parameter that the expected effect does not declare."
+                        <> " Declare the same parameter on the expected side, or resolve it to a concrete row."
+                    )
+                    effectiveLeft
+                    right
                 Just rightLacks -> do
                   uncovered <- filterM (fmap not . coveredByConcreteEntry rightRow genericId) (Set.toList (Set.difference rightLacks leftLacks))
                   unless (null uncovered) $ do
@@ -975,15 +1041,35 @@ combineSequence direction leftSequence rightSequence = case direction of
 subtypeLayers :: LayeredType -> LayeredType -> Normalizer ()
 subtypeLayers leftLayer rightLayer = do
   let mismatch message = tellSubtypeMismatch message (layeredAsType leftLayer) (layeredAsType rightLayer)
-  unless (leftLayer.nullLayer <= rightLayer.nullLayer) $ mismatch "Null layers are incompatible"
+  unless (leftLayer.nullLayer <= rightLayer.nullLayer) $ mismatch (notAdmitted "null")
   -- NOTE: 'NumberSlot' is the chain Absent < Integer < Number, so the ordering is 'Ord'
-  unless (leftLayer.numberLayer <= rightLayer.numberLayer) $ mismatch "Number layers are incompatible"
-  unless (leftLayer.stringLayer `stringSlotWithin` rightLayer.stringLayer) $ mismatch "String layers are incompatible"
-  unless (leftLayer.booleanLayer `Set.isSubsetOf` rightLayer.booleanLayer) $ mismatch "Boolean layers are incompatible"
-  unless (leftLayer.fileLayer <= rightLayer.fileLayer) $ mismatch "File layers are incompatible"
-  subtypeSlot (mismatch "Function layers are incompatible") subtypeFunction leftLayer.functionLayer rightLayer.functionLayer
-  subtypeSlot (mismatch "Sequence layers are incompatible") subtypeSequence leftLayer.sequenceLayer rightLayer.sequenceLayer
-  subtypeSlot (mismatch "Object layers are incompatible") subtypeObject leftLayer.objectLayer rightLayer.objectLayer
+  unless (leftLayer.numberLayer <= rightLayer.numberLayer) $
+    mismatch $ case rightLayer.numberLayer of
+      -- The expected type takes a whole number specifically: the actual one may carry a fraction, which
+      -- is the single most useful thing to say here (the surface names are `integer` and `number`).
+      NumberSlotInteger -> "The expected type is an `integer`, but the actual type is a `number`, which may carry a fraction"
+      _ -> notAdmitted "a number"
+  unless (leftLayer.stringLayer `stringSlotWithin` rightLayer.stringLayer) $
+    mismatch $
+      if stringSlotInhabited rightLayer.stringLayer
+        then "The expected type admits only the string literals it lists, and the actual type is not within them"
+        else notAdmitted "a string"
+  unless (leftLayer.booleanLayer `Set.isSubsetOf` rightLayer.booleanLayer) $
+    mismatch $
+      if Set.null rightLayer.booleanLayer
+        then notAdmitted "a boolean"
+        else "The expected type admits only one of `true` / `false`, and the actual type is not within it"
+  unless (leftLayer.fileLayer <= rightLayer.fileLayer) $ mismatch (notAdmitted "a file")
+  subtypeSlot (mismatch (notAdmitted "an agent")) subtypeFunction leftLayer.functionLayer rightLayer.functionLayer
+  subtypeSlot (mismatch (notAdmitted "an array or tuple")) subtypeSequence leftLayer.sequenceLayer rightLayer.sequenceLayer
+  subtypeSlot (mismatch (notAdmitted "an object or record")) subtypeObject leftLayer.objectLayer rightLayer.objectLayer
+
+-- | The reason a structural layer the expected type has no case for at all. The layers of one type are
+-- independent union members, so the honest reading of such a failure is "the actual type carries this
+-- kind of value and the expected type has nowhere to put it" — which the expected / actual lines under
+-- the reason then spell out in full.
+notAdmitted :: Text -> Text
+notAdmitted kind = "The actual type can be " <> kind <> ", which the expected type does not admit"
 
 -- | Absent is the bottom of every slot: an absent left fits anything, a present left needs a
 -- present right.
@@ -995,12 +1081,12 @@ subtypeSlot mismatch checkPresent left right = case (left, right) of
 
 subtypeFunction :: NormalizedFunction -> NormalizedFunction -> Normalizer ()
 subtypeFunction leftFunction rightFunction = do
-  -- NOTE: the function argument is contravariant. The marker tells the object check underneath that
+  -- NOTE: the function argument is contravariant. The role tells the object check underneath that
   -- it is comparing an agent's PARAMETER record, so a field-name mismatch there reports as the
   -- parameter-name mismatch it is; the return / effect comparisons run with it cleared, since a
   -- direct object there is an ordinary result record.
-  withAgentParameters True $ subtype rightFunction.argumentType leftFunction.argumentType
-  withAgentParameters False $ do
+  withObjectRole ObjectRoleAgentParameters $ subtype rightFunction.argumentType leftFunction.argumentType
+  withObjectRole ObjectRoleRecord $ do
     subtype leftFunction.returnType rightFunction.returnType
     subtype leftFunction.effect rightFunction.effect
 
@@ -1014,7 +1100,7 @@ subtypeSequence :: NormalizedSequence -> NormalizedSequence -> Normalizer ()
 subtypeSequence leftSequence rightSequence
   | length leftSequence.items < length rightSequence.items =
       tellSubtypeMismatch
-        "Sequence is shorter than the expected fixed length"
+        "The actual type has fewer fixed positions than the expected type requires (an absent position is not `null`)"
         (layeredAsType neverLayer {sequenceLayer = Just leftSequence})
         (layeredAsType neverLayer {sequenceLayer = Just rightSequence})
   | otherwise = do
@@ -1025,32 +1111,47 @@ subtypeSequence leftSequence rightSequence
 -- other side's rest (treated as optional). A required field on the right must be required on the
 -- left, otherwise the left value may omit a field the right guarantees.
 --
--- At an agent-parameter comparison ('comparingAgentParameters', raised by 'subtypeFunction' for the
--- one object that IS the parameter record) the optionality reading of that rule is misleading for a
--- field the left does not declare at all: under the contravariant flip the left is what the expected
--- agent type passes and the right is what the actual agent declares, so a required right-only field
--- paired with a left-only field is two spellings of ONE parameter — a NAME mismatch, reported as
--- such. Everything nested below the parameter record compares with the marker cleared, so ordinary
--- record optionality errors keep their message.
+-- That one rule reads three ways in the source, which is what 'ObjectRole' selects between (the role
+-- is lowered before descending, so only the outermost object of a comparison consults it):
+--
+--   * 'ObjectRoleAgentParameters' — under the contravariant flip the left is what the expected agent
+--     type passes and the right is what the actual agent declares, so a required right-only field
+--     paired with a left-only field is two spellings of ONE parameter: a NAME mismatch, not an
+--     optionality the reader wrote.
+--   * 'ObjectRoleCallArguments' — a field the left (the call's arguments) does not carry at all is an
+--     argument the reader did not supply.
+--   * 'ObjectRoleRecord' — the general case: the actual type's field is optional where the expected
+--     type requires one.
 subtypeObject :: NormalizedObject -> NormalizedObject -> Normalizer ()
 subtypeObject leftObject rightObject = do
-  atAgentParameters <- asks (.comparingAgentParameters)
+  role <- asks (.objectRole)
   let expectedOnlyNames = Map.keys (Map.difference leftObject.fields rightObject.fields)
-      nameMismatch fieldName =
-        atAgentParameters
-          && Map.notMember fieldName leftObject.fields
-          && not (null expectedOnlyNames)
+      -- Whether the left side does not carry this name at all (as opposed to carrying it optionally).
+      absentOnLeft fieldName = Map.notMember fieldName leftObject.fields
+      reasonFor fieldName = case role of
+        -- Both arms read under the contravariant flip: the left is what the expected agent TYPE passes,
+        -- the right what the actual agent DECLARES.
+        ObjectRoleAgentParameters
+          | absentOnLeft fieldName && not (null expectedOnlyNames) ->
+              agentParameterNameMismatch expectedOnlyNames fieldName
+          | otherwise ->
+              "The actual agent requires the parameter `"
+                <> fieldName
+                <> "`, but the expected agent type does not always pass it"
+        ObjectRoleCallArguments
+          | absentOnLeft fieldName -> "Required argument `" <> fieldName <> "` is missing"
+        _
+          | absentOnLeft fieldName -> "Required field `" <> fieldName <> "` is missing from the actual type"
+          | otherwise ->
+              "Field `"
+                <> fieldName
+                <> "` is optional in the actual type but required in the expected type, so a value that"
+                <> " omits it would not fit"
       checkField (fieldName, (leftField, rightField)) = do
         subtype leftField.normalizedType rightField.normalizedType
         when (leftField.optional && not rightField.optional) $
-          tellSubtypeMismatch
-            ( if nameMismatch fieldName
-                then agentParameterNameMismatch expectedOnlyNames fieldName
-                else "Optional field cannot be a subtype of a required field: " <> fieldName
-            )
-            leftField.normalizedType
-            rightField.normalizedType
-  withAgentParameters False $ do
+          tellSubtypeMismatch (reasonFor fieldName) leftField.normalizedType rightField.normalizedType
+  withObjectRole ObjectRoleRecord $ do
     mapM_ checkField (Map.toList (alignObjectFields leftObject rightObject))
     subtype leftObject.rest rightObject.rest
 
@@ -1100,7 +1201,11 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
           ((), constructorErrors) <- constructorCheck dataInfo leftArguments
           unless (null constructorErrors) $
             tellSubtypeMismatch
-              ("Data type is not present in the supertype, and its constructor is not a subtype either: " <> renderQualifiedName qualifiedName)
+              ( "The actual type can be `"
+                  <> renderQualifiedName qualifiedName
+                  <> "`, which the expected type does not admit (and its fields do not fit the expected type"
+                  <> " either). If this is a `match`, add an arm for it."
+              )
               (layeredAsType neverLayer {dataLayer = Map.singleton qualifiedName leftArguments})
               right
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do

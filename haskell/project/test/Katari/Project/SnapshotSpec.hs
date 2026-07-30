@@ -8,6 +8,7 @@ import Katari.Project.Error (ProjectError (..))
 import Katari.Project.Lockfile (GitSource (..))
 import Katari.Project.Snapshot
   ( Snapshot (..),
+    SnapshotEntry (..),
     SnapshotIndex (..),
     SnapshotIndexEntry (..),
     loadSnapshotFromUrl,
@@ -27,7 +28,7 @@ sampleSha :: Text
 sampleSha = Text.replicate 64 "a"
 
 -- | A snapshot in the registry's wire format (katari-registry README): top-level @katari_compiler@,
--- per-package @repo@ / @ref@ / @sha256@, plus keys resolution does not need (@version@).
+-- per-package @version@ / @repo@ / @ref@ / @sha256@.
 sampleSnapshot :: Text
 sampleSnapshot =
   Text.unlines
@@ -78,11 +79,30 @@ spec = do
           snapshot.compilerVersion `shouldBe` Just "0.1.0"
           Map.lookup "list_utils" snapshot.packages
             `shouldBe` Just
-              GitSource
-                { url = "https://github.com/katari-lang/list_utils",
-                  rev = "v0.2.1",
-                  sha = sampleSha
+              SnapshotEntry
+                { version = Just "1.0.0",
+                  source =
+                    GitSource
+                      { url = "https://github.com/katari-lang/list_utils",
+                        rev = "v0.2.1",
+                        sha = sampleSha
+                      }
                 }
+
+    -- The version label is what `katari ls packages` shows a reader; it is informational, so an entry
+    -- written without one has to keep resolving rather than fail the whole snapshot.
+    it "keeps an entry that carries no version label" $ do
+      let unlabelled =
+            Text.unlines
+              [ "[packages.list_utils]",
+                "repo = \"https://github.com/katari-lang/list_utils\"",
+                "ref = \"v0.2.1\"",
+                "sha256 = \"" <> sampleSha <> "\""
+              ]
+      case parseSnapshot "snapshot.toml" unlabelled of
+        Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+        Right snapshot ->
+          fmap (\entry -> entry.version) (Map.lookup "list_utils" snapshot.packages) `shouldBe` Just Nothing
 
     it "rejects a package whose sha256 is not 64 hex characters" $ do
       let malformed =

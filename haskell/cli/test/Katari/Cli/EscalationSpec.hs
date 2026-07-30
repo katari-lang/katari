@@ -4,7 +4,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Cli.Escalation (EntryPointReport (..), entryPointReports, renderEntryPointSection)
+import Katari.Cli.Escalation (EntryPointReport (..), EntryPointScope (..), entryPointReports, renderEntryPointSection)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Diagnostics (hasErrors)
@@ -69,6 +69,11 @@ multiPackageCompiled =
             ]
       }
 
+-- | Two hand-built rows, for the rendering edge cases the sample program does not reach.
+pureReport, escalatingReport :: EntryPointReport
+pureReport = EntryPointReport {qualifiedName = "test.helper", requests = [], io = False}
+escalatingReport = EntryPointReport {qualifiedName = "test.root", requests = ["store.get"], io = True}
+
 -- | The entry-point rows scoped to the root @test@ module (so the imported packages never appear).
 multiPackageReports :: List EntryPointReport
 multiPackageReports = entryPointReports [ModuleName "test"] multiPackageCompiled.typedModules
@@ -103,8 +108,8 @@ spec = do
       reportNamed "test.pure_one"
         `shouldBe` Just EntryPointReport {qualifiedName = "test.pure_one", requests = [], io = False}
 
-  describe "renderEntryPointSection" $ do
-    let section = renderEntryPointSection reports
+  describe "renderEntryPointSection (ScopeAll)" $ do
+    let section = renderEntryPointSection ScopeAll reports
 
     it "opens with the section header" $
       Text.isInfixOf "Entry points (requests that escalate to the run root):" section `shouldBe` True
@@ -123,7 +128,44 @@ spec = do
       Text.isInfixOf "escalates: (nothing)" section `shouldBe` True
 
     it "reads (none) when a project has no top-level agents" $
-      renderEntryPointSection [] `shouldBe` "Entry points (requests that escalate to the run root):\n  (none)"
+      renderEntryPointSection ScopeAll [] `shouldBe` "Entry points (requests that escalate to the run root):\n  (none)"
+
+    it "adds no summary line: the flag reproduces the pre-filter report byte for byte" $
+      Text.isInfixOf "not shown" section `shouldBe` False
+
+  -- The default report is read as a capability diff, so it must not bury the composition root's row
+  -- under pure helpers — while an io-only row STAYS, because io is a capability and "(nothing but io)"
+  -- on the composition root is the line the guides teach a reviewer to check.
+  describe "renderEntryPointSection (ScopeEscalating, the default)" $ do
+    let section = renderEntryPointSection ScopeEscalating reports
+
+    it "drops the entry points that escalate nothing at all" $ do
+      Text.isInfixOf "test.pure_one" section `shouldBe` False
+      Text.isInfixOf "escalates: (nothing)\n" section `shouldBe` False
+
+    it "keeps every entry point that escalates a request" $ do
+      Text.isInfixOf "escalates: prelude.throw[test.oops]" section `shouldBe` True
+      Text.isInfixOf "escalates: test.ask, io" section `shouldBe` True
+
+    it "keeps an io-only entry point" $ do
+      Text.isInfixOf "test.do_io" section `shouldBe` True
+      Text.isInfixOf "escalates: (nothing but io)" section `shouldBe` True
+
+    it "counts what it dropped on one trailing line, naming the flag that shows them" $
+      Text.isInfixOf "  (not shown: 1 entry point(s) that escalate nothing; --all-entry-points lists them)" section
+        `shouldBe` True
+
+    it "prints no summary line when nothing was dropped" $
+      Text.isInfixOf "not shown" (renderEntryPointSection ScopeEscalating [escalatingReport]) `shouldBe` False
+
+    it "still reads (none) when a project has no top-level agents" $
+      renderEntryPointSection ScopeEscalating []
+        `shouldBe` "Entry points (requests that escalate to the run root):\n  (none)"
+
+    it "prints the count alone when every entry point escalates nothing" $
+      renderEntryPointSection ScopeEscalating [pureReport, pureReport {qualifiedName = "test.other"}]
+        `shouldBe` "Entry points (requests that escalate to the run root):\n\
+                   \  (not shown: 2 entry point(s) that escalate nothing; --all-entry-points lists them)"
 
   -- Regression for B7: two packages' same-named requests / data types must stay distinguishable in the
   -- row (module-qualified by last segment, like the source), not conflate to `credential | credential`.

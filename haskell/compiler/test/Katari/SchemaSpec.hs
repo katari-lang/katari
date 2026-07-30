@@ -159,6 +159,60 @@ spec = do
             "additionalProperties" .= False
           ]
 
+    -- The other half of the same property. A documented field whose TYPE is itself documented carries two
+    -- texts, and the overlay used to overwrite the inner one — so the best-documented shape in the
+    -- language (a documented field of a documented variant) was the one that reached a model with the
+    -- variant's explanation missing. Both land now, the field's own leading because it is more specific.
+    it "keeps BOTH a field's docstring and its documented type's, field first" $
+      toJSON (toJSONSchema nestedDocumentedDefinitions (SemanticTypeData escalationName mempty))
+        `shouldBe` object
+          [ "type" .= ("object" :: Text),
+            "description" .= ("escalation: A run that stopped and wants attention." :: Text),
+            "properties"
+              .= object
+                [ "$katari_constructor"
+                    .= object
+                      [ "const" .= ("test.escalation" :: Text),
+                        "description" .= ("The tag that selects this variant. Write this exact string." :: Text)
+                      ],
+                  "$katari_value"
+                    .= object
+                      [ "type" .= ("object" :: Text),
+                        "properties"
+                          .= object
+                            [ "cause"
+                                .= object
+                                  [ "type" .= ("object" :: Text),
+                                    "description" .= ("What to wake a human about.\n\nalert: Something needs a human." :: Text),
+                                    "properties"
+                                      .= object
+                                        [ "$katari_constructor"
+                                            .= object
+                                              [ "const" .= ("test.alert" :: Text),
+                                                "description" .= ("The tag that selects this variant. Write this exact string." :: Text)
+                                              ],
+                                          "$katari_value"
+                                            .= object
+                                              [ "type" .= ("object" :: Text),
+                                                "properties"
+                                                  .= object
+                                                    ["reason" .= object ["type" .= ("string" :: Text), "description" .= ("Why the run stopped." :: Text)]],
+                                                "required" .= (["reason"] :: List Text),
+                                                "additionalProperties" .= True
+                                              ]
+                                        ],
+                                    "required" .= (["$katari_constructor", "$katari_value"] :: List Text),
+                                    "additionalProperties" .= False
+                                  ]
+                            ],
+                        "required" .= (["cause"] :: List Text),
+                        "additionalProperties" .= True
+                      ]
+                ],
+            "required" .= (["$katari_constructor", "$katari_value"] :: List Text),
+            "additionalProperties" .= False
+          ]
+
   describe "fillGenericSchema" $ do
     it "replaces a placeholder nested inside an array" $
       fillGenericSchema (Map.singleton genericT SchemaString) (SchemaArray (SchemaGeneric genericT))
@@ -289,3 +343,21 @@ documentedDefinitions =
         fieldAnnotations = Map.singleton "reason" "Why the run stopped."
       }
     noteDefinitions
+
+escalationName :: QualifiedName
+escalationName = QualifiedName {moduleName = testModule, name = "escalation"}
+
+-- | 'documentedDefinitions' plus @data escalation(\@"..." cause: alert)@ — a documented field whose TYPE
+-- is a documented declaration. The one shape that carries two descriptions at the same wire position, and
+-- so the only one that can show whether an overlay joins them or overwrites.
+nestedDocumentedDefinitions :: DataDefinitions
+nestedDocumentedDefinitions =
+  Map.insert
+    escalationName
+    DataDefinition
+      { fields = Map.singleton "cause" FieldInformation {semanticType = SemanticTypeData alertName mempty, optional = False},
+        parameterGenericIds = Map.empty,
+        annotation = Just "A run that stopped and wants attention.",
+        fieldAnnotations = Map.singleton "cause" "What to wake a human about."
+      }
+    documentedDefinitions

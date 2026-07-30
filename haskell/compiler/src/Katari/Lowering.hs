@@ -52,7 +52,7 @@ import Katari.Primitive (isPanicHandler, panicRequestName, preludeModuleName, re
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
-import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), denormalize, objectAsType)
+import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, ObjectRole (..), SubtypingContext (..), denormalize, objectAsType)
 
 ---------------------------------------------------------------------------------------------------
 -- The lowering monad
@@ -477,7 +477,7 @@ lowerModule typeEnvironment valueEnvironment _moduleName module' =
           requestEnvironment = typeEnvironment.requestEnvironment,
           genericsInScope = mempty,
           world = bottomAttribute,
-          comparingAgentParameters = False,
+          objectRole = ObjectRoleRecord,
           -- Lowering runs after checking, so no message enrichment applies here.
           laterHandlerInstallSites = mempty
         }

@@ -34,7 +34,7 @@ import Katari.Typechecker.Check (arrayOf, integerType, namedObjectType, numberTy
 import Katari.Typechecker.Elaborate (schemeVariableFor)
 import Katari.Typechecker.Environment (buildEnvironment)
 import Katari.Typechecker.Inference
-import Katari.Typechecker.Normalizer (Normalizer, SubtypingContext (..), normalizeGenericArgument)
+import Katari.Typechecker.Normalizer (Normalizer, ObjectRole (..), SubtypingContext (..), normalizeGenericArgument)
 import Katari.Typechecker.ValueGraph (valueSCCs)
 import Test.Hspec
 
@@ -412,7 +412,7 @@ runN action = let (result, _, _) = runRWS action emptyContext () in result
           requestEnvironment = mempty,
           genericsInScope = mempty,
           world = bottomAttribute,
-          comparingAgentParameters = False,
+          objectRole = ObjectRoleRecord,
           laterHandlerInstallSites = mempty
         }
 

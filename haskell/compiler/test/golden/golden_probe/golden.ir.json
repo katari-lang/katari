@@ -695,6 +695,593 @@
       "block": {
         "body": 22,
         "defaults": {},
+        "description": "A line between two points.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "finish": {
+                "additionalProperties": false,
+                "description": "Where the line ends.\n\npoint: A point in the plane.",
+                "properties": {
+                  "$katari_constructor": {
+                    "const": "golden_probe.point",
+                    "description": "The tag that selects this variant. Write this exact string."
+                  },
+                  "$katari_value": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "x": {
+                        "type": "integer"
+                      },
+                      "y": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "$katari_constructor",
+                  "$katari_value"
+                ],
+                "type": "object"
+              },
+              "start": {
+                "additionalProperties": false,
+                "description": "Where the line starts.\n\npoint: A point in the plane.",
+                "properties": {
+                  "$katari_constructor": {
+                    "const": "golden_probe.point",
+                    "description": "The tag that selects this variant. Write this exact string."
+                  },
+                  "$katari_value": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "x": {
+                        "type": "integer"
+                      },
+                      "y": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "$katari_constructor",
+                  "$katari_value"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "finish",
+              "start"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "additionalProperties": false,
+            "description": "edge: A line between two points.",
+            "properties": {
+              "$katari_constructor": {
+                "const": "golden_probe.edge",
+                "description": "The tag that selects this variant. Write this exact string."
+              },
+              "$katari_value": {
+                "additionalProperties": true,
+                "properties": {
+                  "finish": {
+                    "additionalProperties": false,
+                    "description": "Where the line ends.\n\npoint: A point in the plane.",
+                    "properties": {
+                      "$katari_constructor": {
+                        "const": "golden_probe.point",
+                        "description": "The tag that selects this variant. Write this exact string."
+                      },
+                      "$katari_value": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "x": {
+                            "type": "integer"
+                          },
+                          "y": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "x",
+                          "y"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "$katari_constructor",
+                      "$katari_value"
+                    ],
+                    "type": "object"
+                  },
+                  "start": {
+                    "additionalProperties": false,
+                    "description": "Where the line starts.\n\npoint: A point in the plane.",
+                    "properties": {
+                      "$katari_constructor": {
+                        "const": "golden_probe.point",
+                        "description": "The tag that selects this variant. Write this exact string."
+                      },
+                      "$katari_value": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "x": {
+                            "type": "integer"
+                          },
+                          "y": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "x",
+                          "y"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "$katari_constructor",
+                      "$katari_value"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "finish",
+                  "start"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "$katari_constructor",
+              "$katari_value"
+            ],
+            "type": "object"
+          },
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "22": {
+      "block": {
+        "input": 51,
+        "kind": "construct",
+        "name": "golden_probe.edge"
+      },
+      "parameters": {
+        "parameter": 51
+      }
+    },
+    "23": {
+      "block": {
+        "body": 27,
+        "defaults": {},
+        "description": "Name the shape. The parameter is a SUM, so its schema is an `anyOf` with one documented arm per\nconstructor \u2014 the honest-schema property: every arm keeps its declaration's own text, every field keeps\nits `@` docstring, and a documented field of a documented type carries BOTH (the field's text leads).\nNothing here is about the body; the fixture exists so the golden pins that wire shape.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "shape": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "edge: A line between two points.",
+                    "properties": {
+                      "$katari_constructor": {
+                        "const": "golden_probe.edge",
+                        "description": "The tag that selects this variant. Write this exact string."
+                      },
+                      "$katari_value": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "finish": {
+                            "additionalProperties": false,
+                            "description": "Where the line ends.\n\npoint: A point in the plane.",
+                            "properties": {
+                              "$katari_constructor": {
+                                "const": "golden_probe.point",
+                                "description": "The tag that selects this variant. Write this exact string."
+                              },
+                              "$katari_value": {
+                                "additionalProperties": true,
+                                "properties": {
+                                  "x": {
+                                    "type": "integer"
+                                  },
+                                  "y": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "x",
+                                  "y"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "$katari_constructor",
+                              "$katari_value"
+                            ],
+                            "type": "object"
+                          },
+                          "start": {
+                            "additionalProperties": false,
+                            "description": "Where the line starts.\n\npoint: A point in the plane.",
+                            "properties": {
+                              "$katari_constructor": {
+                                "const": "golden_probe.point",
+                                "description": "The tag that selects this variant. Write this exact string."
+                              },
+                              "$katari_value": {
+                                "additionalProperties": true,
+                                "properties": {
+                                  "x": {
+                                    "type": "integer"
+                                  },
+                                  "y": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "x",
+                                  "y"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "$katari_constructor",
+                              "$katari_value"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "finish",
+                          "start"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "$katari_constructor",
+                      "$katari_value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "point: A point in the plane.",
+                    "properties": {
+                      "$katari_constructor": {
+                        "const": "golden_probe.point",
+                        "description": "The tag that selects this variant. Write this exact string."
+                      },
+                      "$katari_value": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "x": {
+                            "type": "integer"
+                          },
+                          "y": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "x",
+                          "y"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "$katari_constructor",
+                      "$katari_value"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "The shape to name."
+              }
+            },
+            "required": [
+              "shape"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "type": "string"
+          },
+          "requests": []
+        }
+      },
+      "parameters": {}
+    },
+    "24": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "loadLiteral",
+            "output": 56,
+            "value": {
+              "kind": "string",
+              "value": "point"
+            }
+          }
+        ],
+        "result": 56
+      },
+      "parameters": {}
+    },
+    "25": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "kind": "loadLiteral",
+            "output": 59,
+            "value": {
+              "kind": "string",
+              "value": "edge"
+            }
+          }
+        ],
+        "result": 59
+      },
+      "parameters": {}
+    },
+    "26": {
+      "block": {
+        "arms": [
+          {
+            "body": 24,
+            "pattern": {
+              "fields": [
+                [
+                  "x",
+                  {
+                    "kind": "variable",
+                    "variable": 54
+                  }
+                ],
+                [
+                  "y",
+                  {
+                    "kind": "variable",
+                    "variable": 55
+                  }
+                ]
+              ],
+              "kind": "constructor",
+              "name": "golden_probe.point"
+            }
+          },
+          {
+            "body": 25,
+            "pattern": {
+              "fields": [
+                [
+                  "start",
+                  {
+                    "kind": "variable",
+                    "variable": 57
+                  }
+                ],
+                [
+                  "finish",
+                  {
+                    "kind": "variable",
+                    "variable": 58
+                  }
+                ]
+              ],
+              "kind": "constructor",
+              "name": "golden_probe.edge"
+            }
+          }
+        ],
+        "fallback": null,
+        "kind": "match",
+        "subject": 53
+      },
+      "parameters": {}
+    },
+    "27": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "shape",
+            "kind": "getField",
+            "output": 53,
+            "source": 52
+          },
+          {
+            "kind": "call",
+            "output": 60,
+            "target": 26
+          }
+        ],
+        "result": 60
+      },
+      "parameters": {
+        "parameter": 52
+      }
+    },
+    "28": {
+      "block": {
+        "body": 29,
+        "defaults": {},
+        "description": "A signature broken across lines: the `with` row starts on its own line, and wraps again after a `|`.\nBoth used to be K1001, which is what pushed row-heavy signatures past 200 characters on one line.",
+        "kind": "agent",
+        "schema": {
+          "genericBindings": {},
+          "input": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "output": {
+            "type": "integer"
+          },
+          "requests": [
+            {
+              "descriptor": {
+                "input": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "options": {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "options"
+                  ],
+                  "type": "object"
+                },
+                "name": "golden_probe.pick",
+                "output": {
+                  "type": "integer"
+                }
+              },
+              "kind": "concrete"
+            },
+            {
+              "descriptor": {
+                "input": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                },
+                "name": "prelude.throw",
+                "output": {
+                  "not": {}
+                }
+              },
+              "kind": "concrete"
+            }
+          ]
+        }
+      },
+      "parameters": {}
+    },
+    "29": {
+      "block": {
+        "kind": "sequence",
+        "operations": [
+          {
+            "field": "value",
+            "kind": "getField",
+            "output": 62,
+            "source": 61
+          },
+          {
+            "elements": [
+              62
+            ],
+            "kind": "makeTuple",
+            "output": 63
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              62
+            ]
+          },
+          {
+            "entries": [
+              [
+                "options",
+                63
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 64
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              63
+            ]
+          },
+          {
+            "argument": 64,
+            "kind": "delegate",
+            "output": 65,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.pick"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              64
+            ]
+          }
+        ],
+        "result": 65
+      },
+      "parameters": {
+        "parameter": 61
+      }
+    },
+    "3": {
+      "block": {
+        "input": 1,
+        "kind": "request",
+        "name": "golden_probe.pick"
+      },
+      "parameters": {
+        "parameter": 1
+      }
+    },
+    "30": {
+      "block": {
+        "body": 31,
+        "defaults": {},
         "description": "Entry point: summarize a fixed list of numbers.",
         "kind": "agent",
         "schema": {
@@ -719,25 +1306,25 @@
       },
       "parameters": {}
     },
-    "22": {
+    "31": {
       "block": {
         "kind": "sequence",
         "operations": [
           {
             "field": "input",
             "kind": "getField",
-            "output": 52,
-            "source": 51
+            "output": 67,
+            "source": 66
           },
           {
             "kind": "drop",
             "variables": [
-              52
+              67
             ]
           },
           {
             "kind": "loadLiteral",
-            "output": 53,
+            "output": 68,
             "value": {
               "kind": "integer",
               "value": 1
@@ -745,7 +1332,143 @@
           },
           {
             "kind": "loadLiteral",
-            "output": 54,
+            "output": 69,
+            "value": {
+              "kind": "integer",
+              "value": 2
+            }
+          },
+          {
+            "entries": [
+              [
+                "x",
+                68
+              ],
+              [
+                "y",
+                69
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 70
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              68,
+              69
+            ]
+          },
+          {
+            "argument": 70,
+            "kind": "delegate",
+            "output": 71,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.point"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              70
+            ]
+          },
+          {
+            "entries": [
+              [
+                "shape",
+                71
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 72
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              71
+            ]
+          },
+          {
+            "argument": 72,
+            "kind": "delegate",
+            "output": 73,
+            "target": {
+              "kind": "name",
+              "name": "golden_probe.describe"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              72
+            ]
+          },
+          {
+            "kind": "bindPattern",
+            "pattern": {
+              "kind": "variable",
+              "variable": 74
+            },
+            "source": 73
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              73
+            ]
+          },
+          {
+            "entries": [
+              [
+                "value",
+                74
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 75
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              74
+            ]
+          },
+          {
+            "argument": 75,
+            "kind": "delegate",
+            "output": 76,
+            "target": {
+              "kind": "name",
+              "name": "prelude.string.to_string"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              75
+            ]
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 77,
+            "value": {
+              "kind": "string",
+              "value": ": "
+            }
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 78,
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          },
+          {
+            "kind": "loadLiteral",
+            "output": 79,
             "value": {
               "kind": "integer",
               "value": 2
@@ -753,7 +1476,7 @@
           },
           {
             "kind": "loadLiteral",
-            "output": 55,
+            "output": 80,
             "value": {
               "kind": "integer",
               "value": 3
@@ -761,41 +1484,41 @@
           },
           {
             "elements": [
-              53,
-              54,
-              55
+              78,
+              79,
+              80
             ],
             "kind": "makeTuple",
-            "output": 56
+            "output": 81
           },
           {
             "kind": "drop",
             "variables": [
-              53,
-              54,
-              55
+              78,
+              79,
+              80
             ]
           },
           {
             "entries": [
               [
                 "values",
-                56
+                81
               ]
             ],
             "kind": "makeRecord",
-            "output": 57
+            "output": 82
           },
           {
             "kind": "drop",
             "variables": [
-              56
+              81
             ]
           },
           {
-            "argument": 57,
+            "argument": 82,
             "kind": "delegate",
-            "output": 58,
+            "output": 83,
             "target": {
               "kind": "name",
               "name": "golden_probe.summarize"
@@ -804,24 +1527,117 @@
           {
             "kind": "drop",
             "variables": [
-              57
+              82
+            ]
+          },
+          {
+            "entries": [
+              [
+                "value",
+                83
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 84
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              83
+            ]
+          },
+          {
+            "argument": 84,
+            "kind": "delegate",
+            "output": 85,
+            "target": {
+              "kind": "name",
+              "name": "prelude.string.to_string"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              84
+            ]
+          },
+          {
+            "entries": [
+              [
+                "left",
+                76
+              ],
+              [
+                "right",
+                77
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 86
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              76,
+              77
+            ]
+          },
+          {
+            "argument": 86,
+            "kind": "delegate",
+            "output": 87,
+            "target": {
+              "kind": "name",
+              "name": "prelude.concat"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              86
+            ]
+          },
+          {
+            "entries": [
+              [
+                "left",
+                87
+              ],
+              [
+                "right",
+                85
+              ]
+            ],
+            "kind": "makeRecord",
+            "output": 88
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              85,
+              87
+            ]
+          },
+          {
+            "argument": 88,
+            "kind": "delegate",
+            "output": 89,
+            "target": {
+              "kind": "name",
+              "name": "prelude.concat"
+            }
+          },
+          {
+            "kind": "drop",
+            "variables": [
+              88
             ]
           }
         ],
-        "result": 58
+        "result": 89
       },
       "parameters": {
-        "parameter": 51
-      }
-    },
-    "3": {
-      "block": {
-        "input": 1,
-        "kind": "request",
-        "name": "golden_probe.pick"
-      },
-      "parameters": {
-        "parameter": 1
+        "parameter": 66
       }
     },
     "4": {
@@ -1087,8 +1903,20 @@
     }
   },
   "entries": {
-    "golden_probe.main": {
+    "golden_probe.broken_signature": {
+      "block": 28,
+      "private": false
+    },
+    "golden_probe.describe": {
+      "block": 23,
+      "private": false
+    },
+    "golden_probe.edge": {
       "block": 21,
+      "private": false
+    },
+    "golden_probe.main": {
+      "block": 30,
       "private": false
     },
     "golden_probe.pick": {
@@ -1115,9 +1943,15 @@
     "19": "handler.body",
     "2": "pick",
     "20": "summarize.body",
-    "21": "main",
-    "22": "main.body",
+    "21": "edge",
+    "22": "edge.leaf",
+    "23": "describe",
+    "27": "describe.body",
+    "28": "broken_signature",
+    "29": "broken_signature.body",
     "3": "pick.leaf",
+    "30": "main",
+    "31": "main.body",
     "4": "summarize",
     "5": "use.continuation"
   }

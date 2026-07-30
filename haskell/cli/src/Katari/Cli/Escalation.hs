@@ -10,12 +10,13 @@
 -- already inferred — so nothing is re-inferred here.
 module Katari.Cli.Escalation
   ( EntryPointReport (..),
+    EntryPointScope (..),
     entryPointReports,
     renderEntryPointSection,
   )
 where
 
-import Data.List (nub, sort)
+import Data.List (nub, partition, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -98,18 +99,50 @@ splitEscalations = \case
      in (concatMap fst parts, any snd parts)
   other -> (renderSemanticEffectLeavesWith QualifiedByLastSegment other, False)
 
--- | Render the whole section printed beneath @check@'s @OK@ line. Every entry point prints its
--- qualified name and an @escalates:@ line; a row with no requests and no io reads @(nothing)@, a
--- row of only io reads @(nothing but io)@, otherwise the requests are listed with @io@ last. A
--- project with no top-level agents prints a single @(none)@ line under the header.
-renderEntryPointSection :: List EntryPointReport -> Text
-renderEntryPointSection reports =
+-- | Which entry points the section lists.
+data EntryPointScope
+  = -- | The default: only entry points that escalate SOMETHING, plus a one-line count of the rest.
+    ScopeEscalating
+  | -- | Every entry point, the pure helpers included (@katari check --all-entry-points@).
+    ScopeAll
+  deriving stock (Eq, Show)
+
+-- | Render the whole section printed beneath @check@'s @OK@ line. Every listed entry point prints its
+-- qualified name and an @escalates:@ line; a row of only io reads @(nothing but io)@, otherwise the
+-- requests are listed with @io@ last. A project with no top-level agents prints a single @(none)@
+-- line under the header.
+--
+-- Under 'ScopeEscalating' an entry point whose row is EMPTY — a pure helper, @escalates: (nothing)@ —
+-- is replaced by a count on one trailing line. A thirty-agent program is mostly pure helpers, and two
+-- lines each buried the composition root's row, which is the row this report exists to show. An
+-- io-only row is deliberately NOT folded away: io is a capability (the agent reaches the outside
+-- world), and a closed composition root reading @(nothing but io)@ is the exact line the guides teach
+-- a reviewer to check after adding an agent.
+--
+-- The report is read as a capability diff — teams diff it to prove a change granted nothing new — so
+-- both halves stay stable: 'ScopeAll' reproduces the pre-filter output byte for byte (an existing
+-- baseline needs the flag and nothing else), and under 'ScopeEscalating' a helper that gains ANY
+-- effect leaves the count and appears as its own line.
+renderEntryPointSection :: EntryPointScope -> List EntryPointReport -> Text
+renderEntryPointSection scope reports =
   Text.intercalate "\n" (header : bodyLines)
   where
     header = "Entry points (requests that escalate to the run root):"
     bodyLines = case reports of
       [] -> ["  (none)"]
-      _ -> concatMap renderReport reports
+      _ -> case scope of
+        ScopeAll -> concatMap renderReport reports
+        ScopeEscalating ->
+          let (escalating, silent) = partition escalatesSomething reports
+           in concatMap renderReport escalating <> [silentCountLine (length silent) | not (null silent)]
+    escalatesSomething report = not (null report.requests) || report.io
+
+-- | The one line the folded-away entry points earn: how many there were, and how to see them.
+silentCountLine :: Int -> Text
+silentCountLine count =
+  "  (not shown: "
+    <> Text.pack (show count)
+    <> " entry point(s) that escalate nothing; --all-entry-points lists them)"
 
 -- | The two lines one entry point contributes.
 renderReport :: EntryPointReport -> List Text

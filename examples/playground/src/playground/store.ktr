@@ -78,8 +78,10 @@ agent main() -> string with store.get | store.set | store.delete | store.list {
   // (hence `store.modify`) is served by the workspace's serial FIFO for the rest of this block.
   use store.workspace(path = "playground/store")
 
-  // 1. Atomic counter: two bumps, each a critical section of the workspace's serial domain.
-  bump(value = null)
+  // 1. Atomic counter: two bumps, each a critical section of the workspace's serial domain. The first
+  // bump's new count is deliberately dropped — only the second one's is shown — and `let _ =` is how a
+  // deliberate discard is spelled (an unbound one warns, K3028).
+  let _ = bump(value = null)
   let visits = bump(value = null)
 
   // 2. Plain write / read: `store.set` stores any value; `store.get` distinguishes found from absent.

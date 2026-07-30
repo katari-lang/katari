@@ -62,6 +62,7 @@ import Katari.Typechecker.Environment (TypeEnvironment (..))
 import Katari.Typechecker.Normalizer
   ( Normalizer,
     NormalizerEnvironment,
+    ObjectRole (..),
     SubtypingContext (..),
     TypeLattice,
     joinAttribute,
@@ -177,8 +178,8 @@ normalizerEnvironment = do
         requestEnvironment = typeEnvironment.requestEnvironment,
         genericsInScope = generics,
         world = world,
-        -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
-        comparingAgentParameters = False,
+        -- A comparison-local role each caller raises for itself; every entry starts at the ordinary one.
+        objectRole = ObjectRoleRecord,
         -- "Later than the check" only means something against an anchor span, which this span-free
         -- assembly does not have; 'runNormalizer' fills the narrowed sites in. Anchor-free entries
         -- (probes, inference sub-runs) therefore never produce the handler-geometry note.

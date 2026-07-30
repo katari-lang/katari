@@ -181,6 +181,16 @@ katari update SNAPSHOT     # ... or to a named cut ("staging" for the mutable ca
 katari lock                # re-lock what katari.toml already declares, and nothing else
 ```
 
+To see what there is to add, `katari ls packages` lists the pinned snapshot's whole set alongside
+which of them this project already has:
+
+```text
+PACKAGE          VERSION  STATUS
+ai               0.4.0    added
+google_common    0.2.0    in closure
+web              0.2.0
+```
+
 Everything else reads. If you hand-edit `katari.toml` — moving the snapshot pin, adding an
 `[overrides]` entry — `check`, `build` and `apply` **refuse** until you run `katari lock`, naming
 what disagrees. A green check earned against a closure the manifest no longer asks for would be a

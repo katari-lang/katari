@@ -8,8 +8,9 @@ import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
-import Katari.Data.SemanticType (SemanticGenericArgument, SemanticType, renderSemanticGenericArgument, renderSemanticType)
+import Katari.Data.SemanticType (SemanticGenericArgument, SemanticType (..), disambiguatingNameStyle, renderSemanticGenericArgument, renderSemanticGenericArgumentWith, renderSemanticType)
 import Katari.Data.SourceSpan (Located (..), renderSourceSpan)
+import Katari.Suggestion (renderSuggestion)
 
 -- | Every error the compiler can emit, tagged by the phase that produced it.
 data CompilerError where
@@ -56,15 +57,46 @@ renderCompilerError = \case
 renderLocatedCompilerError :: Located CompilerError -> Text
 renderLocatedCompilerError located = renderSourceSpan located.sourceSpan <> " " <> renderCompilerError located.value
 
+-- | Whether this error is a name that did not resolve. Such an error is the ROOT CAUSE of every
+-- 'isUnresolvedNameShadow' diagnostic in the same file: the checker has no type for the reference, so
+-- it carries on with @never@ and every shape demand downstream fails on that.
+isUnresolvedName :: CompilerError -> Bool
+isUnresolvedName = \case
+  CompilerErrorIdentifier identifierError -> case identifierError of
+    IdentifierErrorUndefinedName _ -> True
+    IdentifierErrorUndefinedMember _ -> True
+    IdentifierErrorNotAModule _ -> True
+    IdentifierErrorUnknownImportModule _ -> True
+    IdentifierErrorUnknownImportName _ -> True
+    -- A duplicate / reserved name and a mistargeted `with` all resolve to something; they leave no
+    -- @never@ behind, so they cause no shadow.
+    IdentifierErrorDuplicateName _ -> False
+    IdentifierErrorUndefinedStateVariable _ -> False
+    IdentifierErrorReservedModuleName _ -> False
+  _ -> False
+
+-- | Whether this error can only be the SHADOW of a name that did not resolve: a position that needed
+-- a shape (a callable, an object, a sequence) reporting that the expression has type @never@. A
+-- genuinely-@never@ expression there is unreachable code, so the message is worth printing on its own
+-- — but not next to the unresolved name that produced the @never@, where it buries the root cause.
+isUnresolvedNameShadow :: CompilerError -> Bool
+isUnresolvedNameShadow = \case
+  CompilerErrorType (TypeErrorExpectedShape info) -> info.actual == SemanticTypeNever
+  _ -> False
+
 renderTypeError :: TypeError -> Text
 renderTypeError typeError =
   typeErrorCode typeError <> ": " <> case typeError of
     TypeErrorSubtype info ->
-      info.reason
-        <> "\n  expected: "
-        <> renderSemanticGenericArgument info.expected
-        <> "\n  actual:   "
-        <> renderSemanticGenericArgument info.actual
+      -- The two lines are read against each other, so they are rendered under one shared name style:
+      -- a bare name that BOTH lines (or one of them twice) would spell the same for two different
+      -- modules is qualified, and everything else keeps its bare spelling.
+      let style = disambiguatingNameStyle [info.expected, info.actual]
+       in info.reason
+            <> "\n  expected: "
+            <> renderSemanticGenericArgumentWith style info.expected
+            <> "\n  actual:   "
+            <> renderSemanticGenericArgumentWith style info.actual
     TypeErrorCannotBeUnioned info ->
       "Invariant generic arguments must be identical to be unioned"
         <> "\n  left:  "
@@ -175,6 +207,11 @@ renderTypeError typeError =
         <> " none, so nothing could ever instantiate them. Declare it as a named agent (`agent"
         <> " name[T](...) -> ... { ... }`) and pass that name instead, or write the anonymous agent"
         <> " at the concrete types it is used at."
+    TypeErrorDiscardedValue info ->
+      "This statement produces a value and nothing reads it. Bind what it answers (`let outcome = ..."
+        <> "`) and act on it, or write `let _ = ...` to say the discard is deliberate."
+        <> "\n  discarded: "
+        <> renderSemanticType info.discarded
   where
     renderBackticked name = "`" <> name <> "`"
 
@@ -263,6 +300,13 @@ data TypeError where
   -- parameters could never be instantiated. Rejected rather than silently dropped, because dropping
   -- them would leave the body checked against variables nothing can ever solve.
   TypeErrorGenericAgentExpression :: GenericAgentExpressionErrorInfo -> TypeError
+  -- | A statement evaluates an expression whose type is not @null@, so a value was produced and then
+  -- dropped. The only WARNING in the type range, because the program is well-typed and the discard may
+  -- be deliberate — but silence here has a specific cost the house style makes routine: an outcome
+  -- returned AS A VALUE (@sent | dropped@ rather than @null@) exists so the caller must face it, and
+  -- turning a request's answer into a sum used to leave every existing call site compiling while it
+  -- quietly threw the delivery fact away. Warn, and let @let _ =@ say the discard is meant.
+  TypeErrorDiscardedValue :: DiscardedValueErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -291,9 +335,10 @@ typeErrorCode = \case
   TypeErrorParallelHandlerVarBinding _ -> "K3025"
   TypeErrorLacksEntry -> "K3026"
   TypeErrorGenericAgentExpression _ -> "K3027"
+  TypeErrorDiscardedValue _ -> "K3028"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
--- decision. Every current type error fails compilation.
+-- decision. Every type error but the discarded-value warning fails compilation.
 typeErrorSeverity :: TypeError -> Severity
 typeErrorSeverity = \case
   TypeErrorSubtype _ -> SeverityError
@@ -320,6 +365,10 @@ typeErrorSeverity = \case
   TypeErrorParallelHandlerVarBinding _ -> SeverityError
   TypeErrorLacksEntry -> SeverityError
   TypeErrorGenericAgentExpression _ -> SeverityError
+  -- A discarded value is well-typed: the program means something, and the discard is sometimes what the
+  -- author wants. Reject it and the only way to call an outcome-answering agent for its effect alone
+  -- would be a binding nobody reads, which is worse than the warning.
+  TypeErrorDiscardedValue _ -> SeverityWarning
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -494,6 +543,13 @@ newtype GenericAgentExpressionErrorInfo = GenericAgentExpressionErrorInfo
   }
   deriving (Eq, Ord, Show)
 
+-- | @discarded@ is the type of the value the statement threw away — the one thing the reader needs to
+-- decide whether it mattered, and the reason the warning names a type rather than the expression.
+newtype DiscardedValueErrorInfo = DiscardedValueErrorInfo
+  { discarded :: SemanticType
+  }
+  deriving (Eq, Ord, Show)
+
 ------------------------------------------------------------------------------------------------
 -- Parser errors (K1xxx)
 ------------------------------------------------------------------------------------------------
@@ -586,23 +642,43 @@ identifierErrorSeverity = \case
 renderIdentifierError :: IdentifierError -> Text
 renderIdentifierError identifierError =
   identifierErrorCode identifierError <> ": " <> case identifierError of
-    IdentifierErrorUndefinedName info -> "Undefined name: " <> info.name
-    IdentifierErrorUndefinedMember info -> "Module " <> renderModuleName info.moduleName <> " has no exported member " <> info.name
+    IdentifierErrorUndefinedName info ->
+      "Nothing in scope is named `"
+        <> info.name
+        <> "`"
+        <> case info.suggestions of
+          [] -> ". Check the spelling, or bring it into scope — a name from another module is written `module.name`, and `import` adds the module"
+          suggestions -> renderSuggestion suggestions
+    IdentifierErrorUndefinedMember info ->
+      "Module " <> renderModuleName info.moduleName <> " has no exported member `" <> info.name <> "`" <> renderSuggestion info.suggestions
     IdentifierErrorDuplicateName info -> "Duplicate declaration of " <> info.name
     IdentifierErrorNotAModule info -> info.name <> " is not a module"
-    IdentifierErrorUnknownImportModule info -> "Imported module does not exist: " <> renderModuleName info.moduleName
-    IdentifierErrorUnknownImportName info -> "Module " <> renderModuleName info.moduleName <> " does not export " <> info.name
-    IdentifierErrorUndefinedStateVariable info -> info.name <> " is not a loop or handler state variable"
+    IdentifierErrorUnknownImportModule info ->
+      "Imported module does not exist: " <> renderModuleName info.moduleName <> renderSuggestion info.suggestions
+    IdentifierErrorUnknownImportName info ->
+      "Module " <> renderModuleName info.moduleName <> " does not export `" <> info.name <> "`" <> renderSuggestion info.suggestions
+    IdentifierErrorUndefinedStateVariable info ->
+      "`"
+        <> info.name
+        <> "` is not a loop or handler state variable"
+        <> case info.suggestions of
+          [] -> " — a `with` modifier targets a `var` declared by an enclosing `for` or `handler`, and none of those is in scope here"
+          suggestions -> renderSuggestion suggestions
     IdentifierErrorReservedModuleName info -> "Module name " <> renderModuleName info.moduleName <> " is reserved by the compiler (the primitive / stdlib namespace)"
 
-newtype UndefinedNameErrorInfo = UndefinedNameErrorInfo
-  { name :: Text
+-- | @suggestions@ are the in-scope names close enough to @name@ to be worth offering (computed at the
+-- report site, which is the only place that holds the scope; empty when nothing is close). Every
+-- unresolved-name error below carries them the same way.
+data UndefinedNameErrorInfo = UndefinedNameErrorInfo
+  { name :: Text,
+    suggestions :: List Text
   }
   deriving (Eq, Ord, Show)
 
 data UndefinedMemberErrorInfo = UndefinedMemberErrorInfo
   { moduleName :: ModuleName,
-    name :: Text
+    name :: Text,
+    suggestions :: List Text
   }
   deriving (Eq, Ord, Show)
 
@@ -616,19 +692,23 @@ newtype NotAModuleErrorInfo = NotAModuleErrorInfo
   }
   deriving (Eq, Ord, Show)
 
-newtype UnknownImportModuleErrorInfo = UnknownImportModuleErrorInfo
-  { moduleName :: ModuleName
+-- | @suggestions@ are whole module names (the import names a reader writes), not bare members.
+data UnknownImportModuleErrorInfo = UnknownImportModuleErrorInfo
+  { moduleName :: ModuleName,
+    suggestions :: List Text
   }
   deriving (Eq, Ord, Show)
 
 data UnknownImportNameErrorInfo = UnknownImportNameErrorInfo
   { moduleName :: ModuleName,
-    name :: Text
+    name :: Text,
+    suggestions :: List Text
   }
   deriving (Eq, Ord, Show)
 
-newtype UndefinedStateVariableErrorInfo = UndefinedStateVariableErrorInfo
-  { name :: Text
+data UndefinedStateVariableErrorInfo = UndefinedStateVariableErrorInfo
+  { name :: Text,
+    suggestions :: List Text
   }
   deriving (Eq, Ord, Show)
 

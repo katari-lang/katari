@@ -17,7 +17,7 @@ import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (Diagnostics, renderDiagnostics)
-import Katari.Error (CompilerError (..), LoweringError (..), UnsupportedErrorInfo (..), compilerErrorCode, typeErrorCode)
+import Katari.Error (CompilerError (..), LoweringError (..), Severity (..), UnsupportedErrorInfo (..), compilerErrorCode, severityOf, typeErrorCode)
 import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
@@ -819,7 +819,10 @@ spec = do
               { locals = Map.singleton (LocalVariableId 9) (monoScheme callable)
               }
           (_, diagnostics) = runChecker environment (synthExpressionType handlerExpr)
-       in toList diagnostics `shouldBe` []
+       in -- Errors only: the body's one statement is an integer-answering call whose value nothing reads,
+          -- which is a true K3028 warning about this fixture and says nothing about the effect join under
+          -- test. Asserting on errors keeps the test measuring what it is named for.
+          [located | located <- toList diagnostics, severityOf located.value == SeverityError] `shouldBe` []
 
   describe "synthExpressionType (for)" $ do
     it "iterating an array binds the element at T (no null injected)" $
@@ -1865,7 +1868,7 @@ spec = do
                   <> "  null\n"
                   <> "}"
               )
-      message `shouldSatisfy` Text.isInfixOf "performs a request not present"
+      message `shouldSatisfy` Text.isInfixOf "The actual effect performs `test.pong`, which the expected effect does not allow"
       message `shouldSatisfy` Text.isInfixOf "`test.pong` is served by the handler installed at line 5"
       message `shouldSatisfy` Text.isInfixOf "move that handler earlier, or this perform later"
 
@@ -1878,7 +1881,7 @@ spec = do
                   <> "  null\n"
                   <> "}"
               )
-      message `shouldSatisfy` Text.isInfixOf "performs a request not present"
+      message `shouldSatisfy` Text.isInfixOf "The actual effect performs `test.ping`, which the expected effect does not allow"
       message `shouldSatisfy` (not . Text.isInfixOf "is served by the handler installed at line")
 
   -- Parameter names are structural (part of the agent type), so a callback can be FORCED to name a

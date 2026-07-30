@@ -16,7 +16,7 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
+import Katari.Cli.Common (WarningScope (..), assembleSourcesOrExit, compileSourcesOrExit, dieIn, ownedSourceFiles, resolveProjectRoot, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
 import Katari.Data.ModuleName (renderModuleName)
@@ -57,7 +57,7 @@ run options = do
       Left projectError -> dieIn "build" (renderProjectError projectError)
       Right loaded -> pure loaded
   sources <- assembleSourcesOrExit "build" resolved
-  loweredModules <- compileSourcesOrExit sources
+  loweredModules <- compileSourcesOrExit (WarningsOwnedBy (ownedSourceFiles resolved)) sources
   -- Module names carry no 'ToJSONKey', so re-key by their rendered text to form the JSON object.
   let irByName = Map.mapKeys renderModuleName loweredModules
       outputPath = case options.output of

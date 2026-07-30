@@ -176,10 +176,18 @@ data ModuleCollisionInfo = ModuleCollisionInfo
   }
   deriving (Show, Eq)
 
--- | A package laid out a module outside its own @P@ / @P.\<sub>@ namespace.
+-- | A package laid out a module outside its own @P@ / @P.\<sub>@ namespace. @sourceDirectory@ is the
+-- package's @[package].src@ (default @src@), carried so the message can name the file to move and
+-- where to move it — the fix, not just the rule.
 data OutOfNamespaceInfo = OutOfNamespaceInfo
   { package :: Text,
-    moduleName :: ModuleName
+    moduleName :: ModuleName,
+    -- | Where the offending file sits now, and where it must move for its module name to fall inside the
+    -- namespace. Both are supplied by the resolver, which owns the @.ktr@ layout convention
+    -- ('Katari.Project.Discovery.modulePathForModuleName'), so the fix a reader is told to apply is
+    -- exactly the path the scanner will read the module back from.
+    currentPath :: FilePath,
+    fixedPath :: FilePath
   }
   deriving (Show, Eq)
 
@@ -352,13 +360,29 @@ renderProjectError projectError = case projectError of
       <> " and "
       <> info.secondPackage
   ResolveOutOfNamespace info ->
+    -- Every newcomer meets this on their SECOND file, so the message spends its length on the fix
+    -- rather than on the rule: a module's name IS its path under the source directory, so the rule is
+    -- satisfied by moving the file, and the resolver hands over both paths.
     "Package "
       <> info.package
       <> " provides module "
       <> renderModuleName info.moduleName
       <> ", which is outside its "
       <> info.package
-      <> " namespace"
+      <> " namespace.\n  A module's name is its path under the source directory (a/b.ktr is module a.b),"
+      <> " and a package may only provide "
+      <> info.package
+      <> " itself and its "
+      <> info.package
+      <> ". descendants.\n  Fix: move "
+      <> Text.pack info.currentPath
+      <> " to "
+      <> Text.pack info.fixedPath
+      <> ", so the module becomes "
+      <> info.package
+      <> "."
+      <> renderModuleName info.moduleName
+      <> "."
   ResolveDependencyNameMismatch info ->
     "Dependency declared as " <> info.declaredKey <> " but its [package].name is " <> info.actualName
   ResolveUnresolvedDependency info ->

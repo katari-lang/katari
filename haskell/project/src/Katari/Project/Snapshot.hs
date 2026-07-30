@@ -33,6 +33,7 @@
 -- @(repo, ref)@ via "Katari.Project.Fetch", and verifies the download against the @sha256@ pin.
 module Katari.Project.Snapshot
   ( Snapshot (..),
+    SnapshotEntry (..),
     parseSnapshot,
     loadSnapshotFromUrl,
     SnapshotIndex (..),
@@ -77,7 +78,20 @@ import TOML
 
 data Snapshot = Snapshot
   { compilerVersion :: Maybe Text,
-    packages :: Map Text GitSource
+    packages :: Map Text SnapshotEntry
+  }
+  deriving (Show, Eq)
+
+-- | One package in a snapshot: the pinned source resolution fetches, and the version label the
+-- registry publishes alongside it.
+--
+-- The version is carried but never resolved on: the @(repo, ref, sha256)@ pin is what a snapshot
+-- MEANS, and the label is what a human recognises the package by ("web 0.2.0" against its README).
+-- It is optional because the pin is the only field a snapshot is required to carry — an entry written
+-- without a label still resolves, it just lists without one.
+data SnapshotEntry = SnapshotEntry
+  { version :: Maybe Text,
+    source :: GitSource
   }
   deriving (Show, Eq)
 
@@ -96,15 +110,16 @@ tomlSuffix = ".toml"
 -- ===========================================================================
 
 -- | The decode target, with fields named as the registry spells them; 'parseSnapshot' maps them to
--- the 'GitSource' the rest of the package speaks. Keys the registry writes but resolution does not
--- need (@version@, @published_time@) are simply not decoded — toml-reader ignores unknown keys.
+-- the 'SnapshotEntry' the rest of the package speaks. Keys the registry writes that nothing here
+-- reads (@published_time@) are simply not decoded — toml-reader ignores unknown keys.
 data RawSnapshot = RawSnapshot
   { katariCompiler :: Maybe Text,
     packages :: Map Text RawGitSource
   }
 
 data RawGitSource = RawGitSource
-  { repo :: Text,
+  { version :: Maybe Text,
+    repo :: Text,
     ref :: Text,
     sha256 :: Text
   }
@@ -118,7 +133,8 @@ instance DecodeTOML RawSnapshot where
 instance DecodeTOML RawGitSource where
   tomlDecoder =
     RawGitSource
-      <$> getField "repo"
+      <$> getFieldOpt "version"
+      <*> getField "repo"
       <*> getField "ref"
       <*> getField "sha256"
 
@@ -130,15 +146,22 @@ parseSnapshot path text = case decodeWith tomlDecoder text of
     validatedPackages <- traverse (validateSnapshotPackage path) (Map.toList raw.packages)
     pure Snapshot {compilerVersion = raw.katariCompiler, packages = Map.fromList validatedPackages}
 
--- | Map one decoded snapshot entry to a 'GitSource', rejecting a name that is not a valid identifier
--- (it becomes a cache-directory path) or a malformed @sha256@ (it keys the content-addressed cache and
--- is the only thing pinning a snapshot's reproducibility, since the @rev@ may be a tag). The @sha256@
--- is normalised to lowercase so it compares equal to the hash 'Katari.Project.Fetch' computes.
-validateSnapshotPackage :: FilePath -> (Text, RawGitSource) -> Either ProjectError (Text, GitSource)
+-- | Map one decoded snapshot entry to a 'SnapshotEntry', rejecting a name that is not a valid
+-- identifier (it becomes a cache-directory path) or a malformed @sha256@ (it keys the
+-- content-addressed cache and is the only thing pinning a snapshot's reproducibility, since the
+-- @rev@ may be a tag). The @sha256@ is normalised to lowercase so it compares equal to the hash
+-- 'Katari.Project.Fetch' computes.
+validateSnapshotPackage :: FilePath -> (Text, RawGitSource) -> Either ProjectError (Text, SnapshotEntry)
 validateSnapshotPackage path (name, rawSource) = do
   requireValidPackageName SnapshotValidationError path name
   sha <- requireSha256Hex SnapshotValidationError path name rawSource.sha256
-  Right (name, GitSource {url = rawSource.repo, rev = rawSource.ref, sha = sha})
+  Right
+    ( name,
+      SnapshotEntry
+        { version = rawSource.version,
+          source = GitSource {url = rawSource.repo, rev = rawSource.ref, sha = sha}
+        }
+    )
 
 -- ===========================================================================
 -- Loading

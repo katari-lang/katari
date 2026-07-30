@@ -52,6 +52,7 @@ questions to their operator, and the runtime keeps every run durable.
 | `katari answer <escalation>` | Answer a question a run escalated |
 | `katari cancel <run>` | Cancel a running run |
 | `katari env set KEY --secret` | Store a secret programs read via `env.get_secret` |
+| `katari ls packages` | What you can `katari add` — the pinned snapshot's whole set |
 | `katari add PKG` | Add a dependency from the registry, and re-lock |
 | `katari update` | Re-pin to the registry's newest snapshot, and re-lock |
 | `katari lock` | Re-lock what `katari.toml` declares (no compile, no deploy) |

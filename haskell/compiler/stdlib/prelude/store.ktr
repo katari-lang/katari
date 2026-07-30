@@ -221,7 +221,15 @@ letters, digits, `-`, `_`). A path that is not — an empty segment, a `..`, a s
 chose and nobody checked — PANICS here rather than opening a workspace somewhere else: the descent is
 the program's own geometry, so a malformed one is a defect in the program and not an outcome a caller
 could route. Validate a name that came from OUTSIDE the program with `safe_segment` first, and render
-its `null` into whatever sentence the proposer should read."
+its `null` into whatever sentence the proposer should read.
+
+ONE IMPRECISION TO KNOW ABOUT, because it shows up in the escalation report. All four clauses are
+installed, and each re-performs its own operation, so this agent's row names all four whatever the
+continuation actually does — a caller that only reads still carries `set` and `delete` outward. The row
+is sound (a scope really can perform all four on its continuation's behalf) but it is coarser than the
+truth, so the report reads as though a read-only agent could delete. Narrowing it needs the row to
+follow which requests the continuation performs, which the language cannot express yet; until it can,
+read a scoped agent's store row as \"reaches the store\" rather than as the set of operations it uses."
 agent scope[R, effect E](
   @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"; `/`-separated `safe_segment`s, and a malformed one panics." path: string,
   @"Runs with every store operation prefixed; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list},

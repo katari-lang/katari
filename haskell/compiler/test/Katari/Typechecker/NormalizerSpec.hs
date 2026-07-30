@@ -382,7 +382,7 @@ environment =
             (boundedEffectGeneric, boundedEffectParameter)
           ],
       world = bottomAttribute,
-      comparingAgentParameters = False,
+      objectRole = ObjectRoleRecord,
       laterHandlerInstallSites = mempty
     }
   where
