@@ -1293,8 +1293,8 @@ describe("in-memory core", () => {
     expect(actor.listOpenEscalations()).toHaveLength(0);
   });
 
-  test("an orphan `prelude.replay.interrupted` (no provider in scope) FAILS the run, not parks", async () => {
-    // `interrupted` is a `-> never` control channel like `throw` / `panic`: with no `replay` provider to
+  test("an orphan `prelude.supervise.interrupted` (no provider in scope) FAILS the run, not parks", async () => {
+    // `interrupted` is a `-> never` control channel like `throw` / `panic`: with no `supervise` provider to
     // catch it, it must fail the run — never open an un-answerable escalation (its answer type is `never`).
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
@@ -1318,10 +1318,10 @@ describe("in-memory core", () => {
           },
           parameters: { parameter: 11 },
         },
-        // `signal` performs the bare `prelude.replay.interrupted` request with the failure it was handed.
+        // `signal` performs the bare `prelude.supervise.interrupted` request with the failure it was handed.
         5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
         6: {
-          block: { kind: "request", name: createAgentName("prelude.replay.interrupted"), input: 50 },
+          block: { kind: "request", name: createAgentName("prelude.supervise.interrupted"), input: 50 },
           parameters: { parameter: 50 },
         },
       },
@@ -1334,7 +1334,7 @@ describe("in-memory core", () => {
 
     const actor = makeActor(ir);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
-    await expect(result).rejects.toThrow(/prelude\.replay\.interrupted/);
+    await expect(result).rejects.toThrow(/prelude\.supervise\.interrupted/);
     expect(actor.listOpenEscalations()).toHaveLength(0); // failed, not parked awaiting an impossible answer
   });
 

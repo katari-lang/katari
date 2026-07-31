@@ -5,7 +5,7 @@
 import { describe, expect, test } from "vitest";
 import { PANIC_REQUEST } from "../src/runtime/engine/common.js";
 import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
-import { isUserFacingRequest, REPLAY_INTERRUPTED_REQUEST } from "../src/runtime/escalation-filter.js";
+import { isUserFacingRequest, SUPERVISE_INTERRUPTED_REQUEST } from "../src/runtime/escalation-filter.js";
 
 describe("isUserFacingRequest", () => {
   test("a genuine (qualified) capability request is user-facing", () => {
@@ -21,10 +21,10 @@ describe("isUserFacingRequest", () => {
     expect(isUserFacingRequest(THROW_REQUEST)).toBe(false);
   });
 
-  test("a `prelude.replay.interrupted` is not user-facing (the replay seam is also `-> never`)", () => {
-    // With a `replay` provider in scope the provider catches it; with NONE in scope it must FAIL the run
+  test("a `prelude.supervise.interrupted` is not user-facing (the supervision seam is also `-> never`)", () => {
+    // With a `supervise` provider in scope the provider catches it; with NONE in scope it must FAIL the run
     // rather than park an un-answerable escalation at the run root — so it belongs to the failure set.
-    expect(isUserFacingRequest(REPLAY_INTERRUPTED_REQUEST)).toBe(false);
+    expect(isUserFacingRequest(SUPERVISE_INTERRUPTED_REQUEST)).toBe(false);
   });
 
   test("control-flow escapes crossing a boundary are not user-facing", () => {

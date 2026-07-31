@@ -13,14 +13,15 @@ import { THROW_REQUEST } from "./engine/throw-signal.js";
  *  these is an unwind crossing an instance boundary, not something a user answers. */
 const CONTROL_ESCAPE_KINDS = new Set(["next", "next-for", "return", "break", "break-for"]);
 
-/** `prelude.replay.interrupted` — the replay seam a converter performs to hand control to a `replay`
- *  provider. Like `throw` / `panic` it is a `-> never` control channel (its answer type is `never`, so no
- *  valid answer exists): with a provider in scope the provider catches it, but with NONE in scope it must
- *  FAIL the run, not open an un-answerable escalation at the run root. So it belongs to the failure set. */
-export const REPLAY_INTERRUPTED_REQUEST = "prelude.replay.interrupted";
+/** `prelude.supervise.interrupted` — the supervision seam a converter performs to hand control to a
+ *  `supervise` provider. Like `throw` / `panic` it is a `-> never` control channel (its answer type is
+ *  `never`, so no valid answer exists): with a provider in scope the provider catches it, but with NONE in
+ *  scope it must FAIL the run, not open an un-answerable escalation at the run root. So it belongs to the
+ *  failure set. */
+export const SUPERVISE_INTERRUPTED_REQUEST = "prelude.supervise.interrupted";
 
 /** Whether an escalation's `request` is a *failure* channel — a panic (a deterministic defect, uncatchable),
- *  a `prelude.throw` (a typed anticipated error), or a `prelude.replay.interrupted` (the replay seam, also
+ *  a `prelude.throw` (a typed anticipated error), or a `prelude.supervise.interrupted` (the supervision seam, also
  *  `-> never`). All fail rather than wait for an answer (their answer type is `never`, so no valid answer
  *  exists): reaching the run root, they fail the run rather than open an answerable escalation. Named once
  *  here so every site that distinguishes "a failure" from "an answerable request" reads the same set —
@@ -37,7 +38,9 @@ export const REPLAY_INTERRUPTED_REQUEST = "prelude.replay.interrupted";
  *  declaration and forces the choice: add it here, or intend it to be user-facing. */
 export function isFailureRequest(request: string): boolean {
   return (
-    request === PANIC_REQUEST || request === THROW_REQUEST || request === REPLAY_INTERRUPTED_REQUEST
+    request === PANIC_REQUEST ||
+    request === THROW_REQUEST ||
+    request === SUPERVISE_INTERRUPTED_REQUEST
   );
 }
 

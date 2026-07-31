@@ -22,12 +22,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { PANIC_REQUEST } from "../src/runtime/engine/common.js";
 import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
-import { isFailureRequest, REPLAY_INTERRUPTED_REQUEST } from "../src/runtime/escalation-filter.js";
+import { isFailureRequest, SUPERVISE_INTERRUPTED_REQUEST } from "../src/runtime/escalation-filter.js";
 
 const stdlibDirectory = new URL("../../../haskell/compiler/stdlib/", import.meta.url);
 
-/** The module prefix a stdlib `.ktr` file lowers under: `prelude.ktr` → `prelude`, `prelude/replay.ktr`
- *  → `prelude.replay` (the compiler's own path-to-module-name rule). */
+/** The module prefix a stdlib `.ktr` file lowers under: `prelude.ktr` → `prelude`, `prelude/supervise.ktr`
+ *  → `prelude.supervise` (the compiler's own path-to-module-name rule). */
 function moduleNameOf(relativePath: string): string {
   return relativePath.replace(/\.ktr$/, "").replaceAll("/", ".");
 }
@@ -103,7 +103,7 @@ function stdlibRequests(): Map<string, string | null> {
 }
 
 /** The failure channels the filter names, minus `prelude.panic` (undeclared by design — see the header). */
-const declaredFailureRequests = new Set<string>([THROW_REQUEST, REPLAY_INTERRUPTED_REQUEST]);
+const declaredFailureRequests = new Set<string>([THROW_REQUEST, SUPERVISE_INTERRUPTED_REQUEST]);
 
 describe("stdlib `-> never` requests ↔ the escalation filter's failure set", () => {
   const requests = stdlibRequests();
