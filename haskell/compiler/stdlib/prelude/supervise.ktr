@@ -77,6 +77,16 @@ request interrupted[F](@"The converter-chosen value standing for the underlying 
 // catching is not a thing a converter can do); SELECTION happens where it reads better anyway, in the
 // `match` over `signalled`'s payload, as ordinary flat code with a `prelude.throw` arm for what should
 // keep flying. They compose by stacking, and stacking is how one block covers both channels.
+//
+// PER-FAILURE BOOKKEEPING GOES IN THE CONVERTER, and it is worth saying because the alternative looks
+// like a provider parameter. A converter is an ordinary handler, so it may carry `var` state — enough
+// to count a streak, compare this failure against the last one, and report only when the answer
+// CHANGES. Two rules come with doing that, both learned at a price: compare a STABLE key (a short tag
+// for the failure's shape), never the whole message, because a line carrying an id or a timestamp never
+// equals the previous one — so a sustained outage reads as a fresh failure every time, the backoff
+// resets on every attempt, and a notice meant to go quiet shouts identically forever. And report from
+// the converter, not the provider: the provider knows how long to wait, the program knows what is worth
+// saying.
 
 @"A panic reached a converter — an interrupted call under the at-most-once rule, or a defect. It carries
 only @message@, because that is all a panic carries. It exists so `signal_panics` has a value to signal
