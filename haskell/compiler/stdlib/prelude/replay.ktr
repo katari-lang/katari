@@ -69,6 +69,63 @@ seam between policy and mechanism — a provider reasons only about `interrupted
 `interrupted`, so signal it only below a provider."
 request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 
+// ── THE CONVERTERS: the two failure channels, as `use` lines instead of hand-written handlers ─────
+//
+// A converter is policy, and policy belongs to the program — but the SHAPE of a converter is not policy,
+// it is the same three lines every time: install a handler, name the failure, signal. These two write
+// those lines. They convert TOTALLY (a handler must admit every failure the block can raise, so partial
+// catching is not a thing a converter can do); SELECTION happens where it reads better anyway, in the
+// `match` over `signalled`'s payload, as ordinary flat code with a `prelude.throw` arm for what should
+// keep flying. They compose by stacking, and stacking is how one block covers both channels.
+
+@"A panic reached a converter — an interrupted call under the at-most-once rule, or a defect. It carries
+only @message@, because that is all a panic carries. It exists so `signal_panics` has a value to signal
+WITH: a bare string would collide with a throw payload of the same type when both converters stack, and
+a program folding both wants two arms it can tell apart."
+data panicked(@"The panic message." message: string)
+
+@"Turn every `throw[T]` from the rest of the block into the replay signal, carrying the thrown payload
+UNCHANGED as the failure. The payload is already the program's own value, so nothing is wrapped and no
+`F` has to be invented: `signal_throws[my_error]` gives a `signalled[my_error]`.
+
+It converts TOTALLY, and that is not a limitation to work around — a throw handler must admit everything
+the block can throw, so a converter that caught only part of `T` could not exist. Let the whole union
+through and decide afterwards: `case my_fatal(...) -> prelude.throw(error = it)` in the `match` over the
+signal is the same decision, written flat, where the reader can see it beside the other endings.
+
+Written `use replay.signal_throws[my_error]()`. Stacks with `signal_panics` — install both and the
+failure type is their union."
+agent signal_throws[T, R, effect E](
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, prelude.throw[T], interrupted[T]},
+) -> R with {...E, interrupted[T]} {
+  use handler {
+    request prelude.throw(error: T) -> never { interrupted(failure = error) }
+  }
+  continuation(value = null)
+}
+
+@"Turn every panic from the rest of the block into the replay signal, carrying `panicked(message)`.
+
+A panic is the channel a runtime restart arrives on: an external call the runtime interrupted is never
+re-run, and the frame that was holding it panics. That is the single most common failure a resident
+meets, and folding it is why `once` exists — so this is the line that turns \"the runtime restarted
+under me\" into a value the program can answer.
+
+RETRYING a panic is an explicit choice, not a default: under `once` the interrupted call is not re-run
+(right for an interrupted call, and required for a body that already had effects), while under `forever`
+or `exponential` it is. The converter is the same either way; the mechanism below it decides.
+
+Written `use replay.signal_panics()`. Stacks with `signal_throws` — install both and the failure type is
+their union."
+agent signal_panics[R, effect E](
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[panicked]},
+) -> R with {...E, interrupted[panicked]} {
+  use handler {
+    request panic(msg: string) { interrupted(failure = panicked(message = msg)) }
+  }
+  continuation(value = null)
+}
+
 // ── THE NON-REPLAYING MECHANISM: run it once, and answer with what happened ───────────────────────
 
 @"One run that COMPLETED with @value@ — it did not signal."
