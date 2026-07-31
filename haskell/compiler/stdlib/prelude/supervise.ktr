@@ -93,8 +93,8 @@ the block can throw, so a converter that caught only part of `T` could not exist
 through and decide afterwards: `case my_fatal(...) -> prelude.throw(error = it)` in the `match` over the
 signal is the same decision, written flat, where the reader can see it beside the other endings.
 
-Written `use supervise.signal_throws[my_error]()`. It fixes the failure type to `T`, so it does not
-stack with `signal_panics`; a block folding both channels writes one converter over the union it wants."
+Written `use supervise.signal_throws[my_error]()`. It fixes the failure type to `T`; to fold panics as
+well, install `signal_panics[T]` around it and the block's one failure type becomes `T | panicked`."
 agent signal_throws[T, R, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, prelude.throw[T], interrupted[T]},
 ) -> R with {...E, interrupted[T]} {
@@ -115,11 +115,12 @@ RETRYING a panic is an explicit choice, not a default: under `once` the interrup
 (right for an interrupted call, and required for a body that already had effects), while under `forever`
 or `exponential` it is. The converter is the same either way; the mechanism below it decides.
 
-Written `use supervise.signal_panics()`. It fixes the failure type to `panicked`, so it does not stack
-with `signal_throws`; a block folding both channels writes one converter over the union it wants."
-agent signal_panics[R, effect E](
-  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[panicked]},
-) -> R with {...E, interrupted[panicked]} {
+@F@ is the RESIDUAL — what else may signal in this block — and it is not inferred, so spell it:
+`use supervise.signal_panics[never]()` when this is the only converter, `[T]` when it wraps a
+`signal_throws[T]` and the block's one failure type is meant to be `T | panicked`."
+agent signal_panics[F, R, effect E](
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[panicked | F]},
+) -> R with {...E, interrupted[panicked | F]} {
   use handler {
     request panic(msg: string) { interrupted(failure = panicked(message = msg)) }
   }
