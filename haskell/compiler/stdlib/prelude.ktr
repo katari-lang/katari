@@ -99,18 +99,3 @@ the payload. `-> never` means a throw cannot be resumed: a handler recovers by `
 the handle (or rethrows)."
 request throw[T](@"The error payload; a handler naming this payload type catches it." error: T) -> never
 
-@"Run @task@ and turn EVERY error it throws into a value with @recover@ — the expression form of the
-handler-and-break composition apps kept respelling. The catch is TOTAL: @F@ is the union of the
-task's throws (the `lacks` on @E@ is what makes that the whole story), so nothing flies past. To let
-SOME errors keep flying, match inside @recover@ is no use (it cannot rethrow into @E@) — write the
-handler yourself and rethrow the match residual (`case rest -> throw(error = rest)`)."
-agent catch[T, F, effect E lacks throw](
-  @"The task whose throws are caught; every other effect passes through." task: agent (value: null) -> T with {...E, throw[F]},
-  @"Turns a thrown error into the result value." recover: agent (error: F) -> T with E,
-) -> T with E {
-  use handler {
-    request throw(error: F) -> never { break recover(error = error) }
-  }
-  task(value = null)
-}
-

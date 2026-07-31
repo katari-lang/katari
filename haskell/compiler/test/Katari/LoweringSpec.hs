@@ -611,14 +611,11 @@ spec = describe "lowerModule (via compile)" $ do
         )
         `shouldBe` []
 
-    it "stands in a real stdlib slot: `prelude.catch`'s `task: agent (value: null) -> T`" $
+    it "stands in a real stdlib slot: `supervise.once`'s `task: agent (value: null) -> R`" $
       compileErrorCodes
         ( "data boom(reason: string)\n"
-            <> "agent caught() -> integer {\n"
-            <> "  prelude.catch[integer, boom, pure](\n"
-            <> "    task = agent () -> integer with prelude.throw[boom] { 1 },\n"
-            <> "    recover = agent (error: boom) -> integer { 0 },\n"
-            <> "  )\n"
+            <> "agent caught() -> supervise.ran[integer] | supervise.signalled[boom] {\n"
+            <> "  supervise.once[integer, boom, pure](task = agent () -> integer { 1 })\n"
             <> "}"
         )
         `shouldBe` []
