@@ -16,6 +16,16 @@
 //   }
 //   <body>   // performs interrupted (via the converter); the provider sleeps and re-runs it
 //
+// ONE SIGNAL, TWO MECHANISMS. `interrupted[F]` is the whole seam, and there are exactly two useful things
+// to do with it. RE-RUN the block — `immediate` / `forever` / `exponential`, the `use`-shaped providers
+// above. Or DO NOT re-run it, and hand the signal back as a VALUE — `once`, below. The second is not a
+// lesser retry policy; it is the other half of the module, and for a large class of failures it is the
+// only correct one. An external call the runtime INTERRUPTED must never be re-run (the at-most-once
+// rule), and a body that already had effects before it failed must not repeat them — so "post the reply,
+// then fail" cannot be retried without posting twice. What those want is to learn WHAT HAPPENED and carry
+// on, which is exactly `once`'s `ran | signalled`. The two mechanisms share the signal, the converter and
+// the failure type `F`, so a block moves between them by changing one line.
+//
 // WHY THE SPLIT. The predecessor (`prelude.retry`) folded BOTH failure channels into the mechanism: its
 // `attempt` caught every `throw` and every `panic` indiscriminately, so `retry.forever` spun forever on a
 // revoked-credential `auth_error` exactly as on a transient `fetch_error` — there was no way to retry one
@@ -43,12 +53,12 @@
 // fine: the cost is per LIVE frame, not per call ever made.
 //
 // THE ONLY PERFORMABLE REQUEST IN THIS MODULE IS `interrupted` (the seam a converter performs). The
-// providers are ordinary `forever` loops: their per-iteration `interrupted`-catch is `run_once`, and their
+// providers are ordinary `forever` loops: their per-iteration `interrupted`-catch is `once`, and their
 // evolving loop state (attempt count, backoff delay) is the `forever`'s own `var` — one owner, advanced by a
 // `next … with (…)`. Loop EXIT is `break` (a lexical jump, not a request) and exhaustion is `prelude.throw`;
-// there is NO internal loop-control request a block could perform to hijack the loop. `run_once` / `ran` /
-// `signalled` / `replay_after` / `give_up` are internal machinery (an agent and data — none performable);
-// they are module members only because Katari has no module-private declarations.
+// there is NO internal loop-control request a block could perform to hijack the loop. `replay_after` /
+// `give_up` are internal machinery (data the bounded loop matches on, none performable); they are module
+// members only because Katari has no module-private declarations.
 
 @"The replay signal — the ONE request a `replay` provider catches, and the ONLY performable request this
 module exports. A converter performs it to ask that the enclosing block be re-run, carrying the failure it
@@ -59,32 +69,44 @@ seam between policy and mechanism — a provider reasons only about `interrupted
 `interrupted`, so signal it only below a provider."
 request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 
-// INTERNAL LOOP MACHINERY (below): `run_once` and the `ran` / `signalled` / `replay_after` / `give_up` sums.
-// A user never performs or handles any of them — `run_once` is called only by the providers, and the sums
-// are data the loop bodies `match` on. They are module members only because Katari has no module-private.
+// ── THE NON-REPLAYING MECHANISM: run it once, and answer with what happened ───────────────────────
 
-@"One run of the continuation that completed with a value @value@ (it did not signal a replay)."
+@"One run that COMPLETED with @value@ — it did not signal."
 data ran[R](@"The completed run's result." value: R)
 
-@"One run of the continuation that performed `interrupted`, carrying the @failure@ it signalled."
+@"One run that performed `interrupted`, carrying the @failure@ its converter chose."
 data signalled[F](@"The failure the run's `interrupted` carried." failure: F)
 
-@"Run the continuation once and reify which happened: `ran` with its value, or `signalled` with the failure
-it performed `interrupted` on. This is the single boundary where `interrupted` is caught and turned into a
-value the loop can `match` on in ordinary control flow (the mechanism-side analog of the old `attempt`, but
-catching only the replay signal — never `throw` / `panic`, which the converter already handled).
-`interrupted[F]` sits in the continuation's OVERWRITE row because this handler DISCHARGES it (the discord-
-provider shape); @F@ is inferred from the continuation and preserved into `signalled`."
-agent run_once[R, F, effect E](
-  @"The rest of the block, run once with `interrupted` served." continuation: agent (value: null) -> R with {...E, interrupted[F]},
+@"Run @task@ ONCE and answer with which happened — `ran(value)` or `signalled(failure)`. The other half of
+this module: where `forever` and `exponential` answer an `interrupted` by RE-RUNNING the block, this one
+answers it by handing the failure back as a value, and the task is never re-entered.
+
+REACH FOR IT WHENEVER RE-RUNNING WOULD BE WRONG, which is more often than it looks. An external call the
+runtime interrupted must NOT be re-run — the at-most-once rule is the runtime's, not a preference — so a
+turn, a send or a question that died with the process wants to be REPORTED, not retried. A body that
+already had effects before it failed must not repeat them, so \"post the reply, then fail\" retries into a
+double post. And a failure that will answer the same next time is not a retry candidate at all, only a
+fact to fold. In every one of those the question is what happened, and the answer is this sum.
+
+THE SHAPE THIS REPLACES is a guard whose only job is to convert: `use handler { request panic(msg) {
+break my_arm(msg) } }` (or the `prelude.throw` twin) wrapped around one call, with the success case
+constructed by hand — which forces a named agent per call site, a data type per failure, and a sum
+per site to name the pair. Here the converter still chooses `F`, so the failure keeps the caller's own
+vocabulary; what goes away is minting `ok` / `failed` constructors again at every boundary.
+
+@F@ is inferred from @task@ and preserved into `signalled`; `interrupted[F]` sits in @task@'s OVERWRITE
+row because this agent DISCHARGES it. It catches ONLY the replay signal — never `throw`, never `panic`,
+which is the converter's business and stays visible in the source."
+agent once[R, F, effect E](
+  @"The work to run once, with `interrupted` served for it. A converter installed inside it (or around this call) decides which throws and panics become the signal." task: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> ran[R] | signalled[F] with E {
   use handler {
     request interrupted(failure: F) -> never { break signalled(failure = failure) }
   }
-  ran(value = continuation(value = null))
+  ran(value = task(value = null))
 }
 
-// MECHANISM providers — three delay policies over the one `run_once` boundary, each an ordinary `forever`
+// THE REPLAYING MECHANISM — three delay policies over the one `once` boundary, each an ordinary `forever`
 // loop. The loop's `var` is the SINGLE owner of the evolving state (backoff delay, attempt count); a
 // `next … with (…)` advances it, a `break` carries the success value out, and durable footprint stays FLAT
 // no matter how many times the block has replayed (every finished iteration's frames are reclaimed). The
@@ -100,7 +122,7 @@ agent immediate[R, F, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E {
   forever {
-    match (run_once(continuation = continuation)) {
+    match (once(task = continuation)) {
       case ran(value => value) -> { break value }   // success: carry it out of the loop
       case signalled(_) -> { null }                 // replay: fall through, re-run at once
     }
@@ -127,7 +149,7 @@ agent forever[R, F, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io {
   forever (var delay = initial_delay_milliseconds) {
-    match (run_once(continuation = continuation)) {
+    match (once(task = continuation)) {
       case ran(value => value) -> { break value }
       case signalled(_) -> {
         time.sleep(milliseconds = delay)
@@ -158,7 +180,7 @@ agent exponential[R, F, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io | prelude.throw[F] {
   forever (var attempt = 0, var delay = initial_delay_milliseconds) {
-    match (run_once(continuation = continuation)) {
+    match (once(task = continuation)) {
       case ran(value => value) -> { break value }
       case signalled(failure => failure) -> {
         // THE one comparison boundary: classify the running failure count against the budget into a
