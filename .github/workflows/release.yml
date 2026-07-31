@@ -4,6 +4,10 @@
 # and only once they have all succeeded does `finalize` create the GitHub Release with every asset
 # attached. So a half-published release is never visible: if any channel fails, there is no Release.
 #
+# Two gates stand in front of every channel, because a publish cannot be taken back: `verify` (the same
+# typecheck / lint / test ci.yml runs, against the TAGGED tree — see its comment for why it is re-run
+# here rather than read off ci) and `e2e` (compiler-runtime wire compatibility).
+#
 # Replaces the former fan-out (release-katari / release-npm / release-katari-runtime / release-vsix /
 # publish-vsix-marketplace), which created the Release first and hung the rest off it.
 name: release
@@ -129,6 +133,82 @@ jobs:
             ${{ steps.package.outputs.lsp_tarball }}
             ${{ steps.package.outputs.lsp_tarball }}.sha256
 
+  verify:
+    # The correctness gate, and the one v0.1.4 shipped without. `e2e` below proves the compiler and the
+    # runtime still agree on the wire, but it drives ONE program (the playground) — it cannot see a
+    # runtime unit trip-wire go red, which is exactly how v0.1.4 published with the runtime still
+    # spelling `prelude.replay.interrupted` after the stdlib module became `prelude.supervise`.
+    #
+    # WHY THIS IS DUPLICATED FROM ci.yml INSTEAD OF DEFERRING TO IT. A tag push starts this workflow;
+    # nothing makes it observe the ci run for the same commit, because GitHub does not gate one workflow
+    # on another's conclusion. Reading ci's status through the API would mean polling a run that may not
+    # have started yet, and trusting a green that was recorded for a DIFFERENT tree if the tag moved. A
+    # publish is irreversible, so the release re-runs the checks against the tagged tree itself —
+    # the same commands, the same caches, on the ref this release is actually cutting.
+    needs: verify-versions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: "3.7.1"
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: |
+          echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Cache .stack-work
+        uses: actions/cache@v4
+        with:
+          path: |
+            .stack-work
+            haskell/*/.stack-work
+          key: ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (Haskell)
+        run: stack build --fast
+
+      - name: Build (TypeScript)
+        run: pnpm -r run build
+
+      # The three commands ci.yml runs, in one job: the Haskell toolchain setup is the expensive part
+      # and every one of them needs it, so splitting them would pay for it three times.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
   e2e:
     # The wire-compatibility gate: the compiler's IR/schema output must still drive the runtime end to
     # end (see e2e/README.md) before ANY channel publishes — a publish is otherwise irreversible. It
@@ -181,7 +261,7 @@ jobs:
           KATARI_E2E_BIN: ${{ steps.cli.outputs.bin }}
 
   publish-npm:
-    needs: [verify-versions, build, e2e]
+    needs: [verify-versions, build, verify, e2e]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -276,7 +356,7 @@ jobs:
           DIST_TAG: ${{ steps.version.outputs.dist-tag }}
 
   runtime-image:
-    needs: [verify-versions, e2e]
+    needs: [verify-versions, verify, e2e]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -326,7 +406,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   package-vsix:
-    needs: [verify-versions, build, e2e]
+    needs: [verify-versions, build, verify, e2e]
     runs-on: ubuntu-22.04
     strategy:
       # One platform-specific VSIX per binary, same targets as the build matrix. The VSIX is just a
