@@ -17,7 +17,7 @@
 //   <body>   // performs interrupted (via the converter); the provider sleeps and re-runs it
 //
 // ONE SIGNAL, TWO MECHANISMS. `interrupted[F]` is the whole seam, and there are exactly two useful things
-// to do with it. RE-RUN the block — `immediate` / `forever` / `exponential`, the `use`-shaped providers
+// to do with it. RE-RUN the block — `forever` / `exponential`, the `use`-shaped providers
 // above. Or DO NOT re-run it, and hand the signal back as a VALUE — `once`, below. The second is not a
 // lesser retry policy; it is the other half of the module, and for a large class of failures it is the
 // only correct one. An external call the runtime INTERRUPTED must never be re-run (the at-most-once
@@ -169,22 +169,6 @@ agent once[R, F, effect E](
 // no matter how many times the block has replayed (every finished iteration's frames are reclaimed). The
 // three differ only by their effect rows: `immediate` adds nothing, `forever` adds `io` (it sleeps),
 // `exponential` adds `io` and `prelude.throw[F]` (it sleeps, then re-raises when the budget is spent).
-
-@"Replay the rest of the block on every `interrupted`, unbounded and with NO artificial delay: it re-runs at
-once. The retry cadence is therefore set entirely by whatever the converter does BEFORE it signals — e.g. a
-converter that performs a human-in-the-loop escalation and parks before signalling gives the attended /
-re-auth loop, human-paced with no polling. Never re-raises and never returns on its own; a converter that
-rethrows instead of signalling is how a failure leaves this loop. Written `use replay.immediate()`."
-agent immediate[R, F, effect E](
-  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
-) -> R with E {
-  forever {
-    match (once(task = continuation)) {
-      case ran(value => value) -> { break value }   // success: carry it out of the loop
-      case signalled(_) -> { null }                 // replay: fall through, re-run at once
-    }
-  }
-}
 
 @"Replay the rest of the block on every `interrupted`, unbounded, with exponential backoff capped at
 @max_delay_milliseconds@. For daemons that must stay up across transient failures (e.g. keeping a
