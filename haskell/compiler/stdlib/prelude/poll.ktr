@@ -62,7 +62,7 @@
 // default, on purpose — the choice is too consequential to inherit.
 //
 // NO RETRY IS BUILT IN, exactly as in `time.watch`: a `fetch` or a `deliver_to` that throws kills the
-// subscription, and resilience is COMPOSED at the call site (`replay.forever` plus a converter that
+// subscription, and resilience is COMPOSED at the call site (`supervise.forever` plus a converter that
 // chooses which failures are transient). A subscription with `resume` recovers what it missed while
 // the replay backed off, because the cursor outlived the failed activation — which is the composition
 // this module exists to make ordinary.
@@ -145,7 +145,7 @@ type backlog = skip_backlog | deliver_backlog
 // ── continuity: where the cursor lives — the restart decision, made in source ─────────────────────
 
 @"Keep the cursor in the STORE, at @key@ — so it outlives the run that wrote it. Every commit writes
-it; a fresh activation (a restart, a re-fork, a `replay` re-run) reads it back and RESUMES. Under
+it; a fresh activation (a restart, a re-fork, a `supervise` re-run) reads it back and RESUMES. Under
 `watermark` that means the items which arrived while the process was down are DELIVERED rather than
 skipped; under `seen_set`, which has no floor to list from, it means the window is not re-notified
 from scratch. @key@ is an ordinary store key: it resolves against the surrounding `store.scope` /
@@ -350,15 +350,15 @@ for hearing about new things and the wrong one for \"tell me whenever anything m
 agent answers the latter.
 
 RESTARTS. With `continuity = resume(key = ...)` the cursor lives in the store, so a runtime restart, a
-re-forked fiber and a `replay` re-run all RESUME from it — and the items that arrived while the
+re-forked fiber and a `supervise` re-run all RESUME from it — and the items that arrived while the
 subscription was down are delivered, oldest first, on the tick after it comes back. With `fresh()`
 every activation re-primes and that downtime is skipped for good. Nothing else about the subscription
 changes between the two.
 
 NO RETRY IS BUILT IN — a failing @fetch@ or @deliver_to@ propagates and kills the subscription, exactly
-as an uncaught failure in any callee does. Compose resilience at the call site: `replay.forever` plus a
+as an uncaught failure in any callee does. Compose resilience at the call site: `supervise.forever` plus a
 converter that turns the transient failures (and, for an OAuth source, `auth_error`) into
-`replay.interrupted`. With `resume`, the backoff costs nothing but latency; the cursor survives it.
+`supervise.interrupted`. With `resume`, the backoff costs nothing but latency; the cursor survives it.
 
 The first poll is one @schedule@ occurrence in (a `time.watch` occurrence fires one interval AFTER the
 start), and under `seen_set` + `skip_backlog` that first poll is the priming one — so the earliest

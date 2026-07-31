@@ -35,7 +35,7 @@
 // before its stored expiry keeps being served — every call gets the dead token until the recorded
 // lifetime runs out. The worst case is therefore bounded by one access-token lifetime (about an hour for
 // Google), and it surfaces as the API's own 401 / 403, never as an `oauth` error. The recovery is
-// ordinary: turn that downstream auth failure into a `replay.interrupted` (see `prelude.replay`), and
+// ordinary: turn that downstream auth failure into a `supervise.interrupted` (see `prelude.supervise`), and
 // each re-run asks afresh — once the stored lifetime passes, the ask refreshes, and a refresh the token
 // endpoint REFUSES parks the run on the authorization escalation below rather than failing it.
 //
@@ -69,7 +69,7 @@ while the RECORDED expiry holds (with a ~60s refresh margin), refreshing once du
 caching, so a program that keeps its own copy only defeats the refresh. The flip side, which callers must
 design around: because the stored expiry is the only input, a token revoked BEFORE it expires keeps being
 served, and the API answers 401 / 403 for up to one access-token lifetime. Convert that downstream failure
-into a `replay.interrupted` to recover automatically — see this module's header."
+into a `supervise.interrupted` to recover automatically — see this module's header."
 external agent token(
   @"The registered name of a stored credential (e.g. \"github\"); the name itself is not a secret." name: string,
 ) -> string of private with io | prelude.throw[server_error] from "oauth"

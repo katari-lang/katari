@@ -175,7 +175,7 @@ agent get(
 // It lives in the stdlib because it was already the same sum in every package that had one. `gmail` and
 // `google_calendar` each declared this pair, at the same statuses, with the same paragraph in each doc, and
 // so did every OAuth REST integration written after them — while an app composing two of those packages had
-// to write ONE `replay` converter per package to say the same thing twice. Shared, the vocabulary is one
+// to write ONE `supervise` converter per package to say the same thing twice. Shared, the vocabulary is one
 // vocabulary: a converter matches `http.auth_error` once and covers every API behind it, and the next
 // package inherits the classification instead of re-deciding where the line goes.
 //
@@ -191,8 +191,8 @@ agent get(
 @"An authenticated API call was rejected over WHO IS CALLING: the endpoint answered @status@ — 401 or
 403 — so the CREDENTIAL is what failed: revoked, expired past what its holder believed, or scoped too
 narrowly for this call. Retrying with the SAME credential cannot succeed; the recovery is a fresh
-RESOLUTION of it, which is why the ordinary composition is a `replay` converter that signals
-`replay.interrupted`: the re-run resolves the credential again, and one the runtime cannot refresh parks
+RESOLUTION of it, which is why the ordinary composition is a `supervise` converter that signals
+`supervise.interrupted`: the re-run resolves the credential again, and one the runtime cannot refresh parks
 the run on a `prelude.oauth.authorize` escalation — a human's re-authorization prompt — rather than
 failing. That is the whole line this variant draws: an `auth_error` may need a HUMAN before any retry can
 work, an `api_error` never does.
@@ -238,7 +238,7 @@ problem no retry with the same credential can fix), EVERY other status is `api_e
 This is the ONE place the line is drawn, and that is the point. The classification used to be re-decided
 per package — `gmail`, `google_calendar`, `tavily` and every OAuth REST integration written after them each
 carried a private copy of the same two-arm `match`, so \"Google's 401\" and \"Anthropic's 401\" wore
-different types and an app composing two of them wrote one `replay` converter per package to say the same
+different types and an app composing two of them wrote one `supervise` converter per package to say the same
 thing twice. With one classifier the vocabulary is one vocabulary: a converter matches `http.auth_error`
 once and covers every API behind it.
 

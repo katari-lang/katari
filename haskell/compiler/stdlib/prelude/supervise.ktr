@@ -1,15 +1,15 @@
-// The `prelude.replay` sub-module: the retry MECHANISM, split cleanly from the failure POLICY. A `replay`
+// The `prelude.supervise` sub-module: the retry MECHANISM, split cleanly from the failure POLICY. A `supervise`
 // provider re-runs the rest of a block, but it knows NOTHING about what counts as a retriable failure. It
 // catches exactly one request — `interrupted` — and re-runs after its policy's delay. Deciding WHICH
 // failures become an `interrupted` is user code: an ordinary `use handler` (a "converter") installed
-// between the provider and the body that turns the throws / panics it chooses into `replay.interrupted`.
+// between the provider and the body that turns the throws / panics it chooses into `supervise.interrupted`.
 //
-//   use replay.exponential(initial_delay_milliseconds = 1000, factor = 2, max_attempts = 5)
+//   use supervise.exponential(initial_delay_milliseconds = 1000, factor = 2, max_attempts = 5)
 //   use handler {
-//     // POLICY: this converter decides. Only transient errors become a replay; the rest rethrow.
+//     // POLICY: this converter decides. Only transient errors become the signal; the rest rethrow.
 //     request prelude.throw(error: fetch_error | auth_error) -> never {
 //       match (error) {
-//         case fetch_error(_) -> { replay.interrupted(failure = error) }   // transient -> replay
+//         case fetch_error(_) -> { supervise.interrupted(failure = error) }   // transient -> re-run
 //         case auth_error(_)  -> { prelude.throw(error = error) }          // fatal     -> rethrow (proxies up)
 //       }
 //     }
@@ -43,7 +43,7 @@
 // a crash-recovery reload has to rebuild the chain. A `forever` loop is FLAT instead: each finished
 // iteration's frames are reclaimed, and the loop's own `var`s are the only state that survives, however
 // many times it has gone round. That is why the providers below are `forever` loops, why their durable
-// footprint does not grow with the replay count, and why a daemon polls with `time.watch` (whose reactor
+// footprint does not grow with the re-run count, and why a daemon polls with `time.watch` (whose reactor
 // owns the loop, so a tick adds no depth) rather than a `time.sleep` recursion.
 //
 // The rule generalizes past this module: anything that iterates without a known-small bound wants a
@@ -60,12 +60,12 @@
 // `give_up` are internal machinery (data the bounded loop matches on, none performable); they are module
 // members only because Katari has no module-private declarations.
 
-@"The replay signal — the ONE request a `replay` provider catches, and the ONLY performable request this
+@"The supervision signal — the ONE request a `supervise` provider catches, and the ONLY performable request this
 module exports. A converter performs it to ask that the enclosing block be re-run, carrying the failure it
 chose to represent as @failure@ (of the converter's own type @F@). `-> never`: performing it transfers
 control to the provider (which applies its delay policy and re-runs) and does not return. This is the whole
 seam between policy and mechanism — a provider reasons only about `interrupted`, never about `throw` or
-`panic`. Only a `replay` provider installed inside the program serves it: the runtime never machine-answers
+`panic`. Only a `supervise` provider installed inside the program serves it: the runtime never machine-answers
 `interrupted`, so signal it only below a provider."
 request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 
@@ -84,7 +84,7 @@ WITH: a bare string would collide with a throw payload of the same type when bot
 a program folding both wants two arms it can tell apart."
 data panicked(@"The panic message." message: string)
 
-@"Turn every `throw[T]` from the rest of the block into the replay signal, carrying the thrown payload
+@"Turn every `throw[T]` from the rest of the block into the supervision signal, carrying the thrown payload
 UNCHANGED as the failure. The payload is already the program's own value, so nothing is wrapped and no
 `F` has to be invented: `signal_throws[my_error]` gives a `signalled[my_error]`.
 
@@ -93,7 +93,7 @@ the block can throw, so a converter that caught only part of `T` could not exist
 through and decide afterwards: `case my_fatal(...) -> prelude.throw(error = it)` in the `match` over the
 signal is the same decision, written flat, where the reader can see it beside the other endings.
 
-Written `use replay.signal_throws[my_error]()`. Stacks with `signal_panics` — install both and the
+Written `use supervise.signal_throws[my_error]()`. Stacks with `signal_panics` — install both and the
 failure type is their union."
 agent signal_throws[T, R, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, prelude.throw[T], interrupted[T]},
@@ -104,7 +104,7 @@ agent signal_throws[T, R, effect E](
   continuation(value = null)
 }
 
-@"Turn every panic from the rest of the block into the replay signal, carrying `panicked(message)`.
+@"Turn every panic from the rest of the block into the supervision signal, carrying `panicked(message)`.
 
 A panic is the channel a runtime restart arrives on: an external call the runtime interrupted is never
 re-run, and the frame that was holding it panics. That is the single most common failure a resident
@@ -115,7 +115,7 @@ RETRYING a panic is an explicit choice, not a default: under `once` the interrup
 (right for an interrupted call, and required for a body that already had effects), while under `forever`
 or `exponential` it is. The converter is the same either way; the mechanism below it decides.
 
-Written `use replay.signal_panics()`. Stacks with `signal_throws` — install both and the failure type is
+Written `use supervise.signal_panics()`. Stacks with `signal_throws` — install both and the failure type is
 their union."
 agent signal_panics[R, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[panicked]},
@@ -152,7 +152,7 @@ per site to name the pair. Here the converter still chooses `F`, so the failure 
 vocabulary; what goes away is minting `ok` / `failed` constructors again at every boundary.
 
 @F@ is inferred from @task@ and preserved into `signalled`; `interrupted[F]` sits in @task@'s OVERWRITE
-row because this agent DISCHARGES it. It catches ONLY the replay signal — never `throw`, never `panic`,
+row because this agent DISCHARGES it. It catches ONLY the supervision signal — never `throw`, never `panic`,
 which is the converter's business and stays visible in the source."
 agent once[R, F, effect E](
   @"The work to run once, with `interrupted` served for it. A converter installed inside it (or around this call) decides which throws and panics become the signal." task: agent (value: null) -> R with {...E, interrupted[F]},
@@ -174,14 +174,14 @@ agent once[R, F, effect E](
 once. The retry cadence is therefore set entirely by whatever the converter does BEFORE it signals — e.g. a
 converter that performs a human-in-the-loop escalation and parks before signalling gives the attended /
 re-auth loop, human-paced with no polling. Never re-raises and never returns on its own; a converter that
-rethrows instead of signalling is how a failure leaves this loop. Written `use replay.immediate()`."
+rethrows instead of signalling is how a failure leaves this loop. Written `use supervise.immediate()`."
 agent immediate[R, F, effect E](
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E {
   forever {
     match (once(task = continuation)) {
       case ran(value => value) -> { break value }   // success: carry it out of the loop
-      case signalled(_) -> { null }                 // replay: fall through, re-run at once
+      case signalled(_) -> { null }                 // signalled: fall through, re-run at once
     }
   }
 }
@@ -189,19 +189,19 @@ agent immediate[R, F, effect E](
 @"Replay the rest of the block on every `interrupted`, unbounded, with exponential backoff capped at
 @max_delay_milliseconds@. For daemons that must stay up across transient failures (e.g. keeping a
 `time.watch` alive): it never re-raises and never returns on its own. The backoff delay lives in the loop's
-own @delay@ var and grows by @factor@ per replay up to the cap (`math.min`), so the durable state stays flat
+own @delay@ var and grows by @factor@ per re-run up to the cap (`math.min`), so the durable state stays flat
 across any number of replays. Written
-`use replay.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`.
+`use supervise.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`.
 SUPERVISING A REGION: a converter cannot see a FIBER's failure. A fiber's panic is delivered to the region
 as the typed `region.crashed` event rather than unwinding past `region.watch`, so a resident whose work runs
 in fibers must perform `interrupted` from its `region.crashed` clause (installed inside this scope) — a
-`panic` converter alone catches only the failures raised on the block's own path. What the replay REBUILDS
+`panic` converter alone catches only the failures raised on the block's own path. What a re-run REBUILDS
 is what the block installs: state a handler above this `use` owns survives every attempt, so install a desk
 whose contents must outlive a reconnect above the scope, and whatever consumes that state on the same side
 of the boundary."
 agent forever[R, F, effect E](
   @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
-  @"The per-replay delay multiplier (e.g. 2 doubles the delay each replay)." factor: number,
+  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number,
   @"The backoff ceiling, in milliseconds; the delay never grows past it." max_delay_milliseconds: number,
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io {
@@ -229,10 +229,10 @@ failure as a TYPED `throw[F]` — @F@ is the converter's chosen failure represen
 error typed end to end and never needs to re-panic. The attempt count and delay live in the loop's own vars
 (one owner). The exhausted-vs-continue decision is genuine sum dispatch: the ONE comparison of the count to
 the budget mints a `replay_after | give_up`, and the `signalled` arm `match`es it once — no code re-tests the
-counter. Written `use replay.exponential(initial_delay_milliseconds = ..., factor = ..., max_attempts = ...)`."
+counter. Written `use supervise.exponential(initial_delay_milliseconds = ..., factor = ..., max_attempts = ...)`."
 agent exponential[R, F, effect E](
   @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
-  @"The per-replay delay multiplier (e.g. 2 doubles the delay each replay)." factor: number,
+  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number,
   @"The total run budget, not a retry count: the @max_attempts@-th `interrupted` re-raises instead of re-running." max_attempts: number,
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io | prelude.throw[F] {

@@ -388,20 +388,20 @@ test("playground.deferred_callback.main: a callback payload survives being answe
   expect(stdout).toContain("deploy-secret approved by deploy");
 });
 
-test("playground.replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
-  // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
+test("playground.supervise_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
+  // A `supervise` provider re-runs the block on `supervise.interrupted`; a user converter decides which failures
   // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
   // `exhausting` spends a 2-attempt budget and the exhaustion re-raises the TYPED `warming_up`; `rejected`
   // shows selective retry — the fatal `unauthorized` is rethrown, not replayed, so it leaves at once; and
-  // `reauth_intercepted` composes `replay.immediate` + a user handler answering the demo's own
+  // `reauth_intercepted` composes `supervise.immediate` + a user handler answering the demo's own
   // `needs_reauth` request, so the session re-auths and re-runs in place.
-  const success = await katari(["run", "playground.replay_demo.main", "--project", "playground"]);
+  const success = await katari(["run", "playground.supervise_demo.main", "--project", "playground"]);
   expect(success.stdout).toContain("result: connected on attempt 3");
-  const exhausted = await katari(["run", "playground.replay_demo.exhausting", "--project", "playground"]);
+  const exhausted = await katari(["run", "playground.supervise_demo.exhausting", "--project", "playground"]);
   expect(exhausted.stdout).toContain("gave up while warming up (attempt 2)");
-  const rejected = await katari(["run", "playground.replay_demo.rejected", "--project", "playground"]);
+  const rejected = await katari(["run", "playground.supervise_demo.rejected", "--project", "playground"]);
   expect(rejected.stdout).toContain("unauthorized: revoked credential");
-  const reauth = await katari(["run", "playground.replay_demo.reauth_intercepted", "--project", "playground"]);
+  const reauth = await katari(["run", "playground.supervise_demo.reauth_intercepted", "--project", "playground"]);
   expect(reauth.stdout).toContain("session: calendar loaded on attempt 2");
 }, 20_000);
 
