@@ -59,15 +59,17 @@ export function registerHostPrims(prims: PrimRegistry, stores: HostPrimStores): 
     return markPrivate({ kind: "string", value });
   });
 
-  prims.register("prelude.env.get_all", async (_argument, context) => {
+  prims.register("prelude.env.get_or", async (argument, context) => {
+    const key = stringArgument(argument, "key");
+    const fallback = stringArgument(argument, "fallback");
     const entries = await stores.env.readPublic(context.projectId);
-    // A null-prototype map so an env key literally named `__proto__` / `constructor` becomes a real record
-    // field rather than a silently-dropped prototype write (env key names are admin-chosen, so not trusted).
-    const fields: Record<string, Value> = Object.create(null);
-    for (const [key, value] of Object.entries(entries)) {
-      fields[key] = { kind: "string", value };
-    }
-    return { kind: "record", fields };
+    // TOTAL by construction: an unset key is the fallback, never a throw — a config read is a decision the
+    // program has already made, so there is nothing for a handler to add. `Object.hasOwn` (not `entries[key]`)
+    // is what distinguishes "unset" from "set to the empty string": the entry is returned as-is when present,
+    // so a set-but-empty value does NOT silently become the fallback. It also keeps a key literally named
+    // `__proto__` from reading the prototype chain (env key names are admin-chosen, so not trusted).
+    const entry = Object.hasOwn(entries, key) ? entries[key] : undefined;
+    return { kind: "string", value: typeof entry === "string" ? entry : fallback };
   });
 }
 

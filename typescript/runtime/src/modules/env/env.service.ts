@@ -71,7 +71,7 @@ export const envService = {
   },
 };
 
-/** The engine-facing reader the host wires into the `PrimRegistry` (`env.get_secret` / `env.get_all`). It runs
+/** The engine-facing reader the host wires into the `PrimRegistry` (`env.get_secret` / `env.get_or`). It runs
  *  inside a react turn, so — like the IR DB read — a DB failure is raised as a `TransientError` (retryable)
  *  rather than let through as a plain throw the engine would misclassify as a deterministic panic. Only the DB
  *  access is wrapped: a missing entry is not a throw (it returns `null`), and a `decryptSecret` failure of a

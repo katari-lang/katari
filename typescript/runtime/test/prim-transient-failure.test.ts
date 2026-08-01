@@ -1,10 +1,10 @@
 // A prim's failure is a THREE-way sum, and the runtime must not collapse it to two. `env.get_secret` /
-// `env.get_all` read the project's env store INSIDE a react turn, so a transient DB blip there is the same
+// `env.get_or` read the project's env store INSIDE a react turn, so a transient DB blip there is the same
 // retryable class as an IR-store blip — NOT a deterministic panic. The engine's prim seam rethrows a
 // `TransientError` so the substrate replays the turn from durable state; a deterministic error (any other
 // throw) stays a panic that fails the run.
 //
-// Both tests drive a run whose body is `prelude.env.get_all` over a stubbed `EnvReader`. The run's launch is
+// Both tests drive a run whose body is `prelude.env.get_or` over a stubbed `EnvReader`. The run's launch is
 // seeded as a durable delegate (the shape a crash leaves behind — a retry drops the WARM state and replays
 // from durable, so an in-memory `startRun` command would be lost by the very drop under test). A transient
 // read then retries to completion; a deterministic one fails the run.
@@ -33,9 +33,9 @@ const PROJECT = "project-prim-transient" as ProjectId;
 const SNAPSHOT = "snapshot-prim-transient" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
-// agent main() { return read_env({}) }
-// read_env is an agent whose body is the `prelude.env.get_all` primitive (a host I/O prim). `get_all` returns
-// a PUBLIC record, so the run result crosses the user boundary without redaction.
+// agent main() { return read_env(key = "HOST", fallback = "unset") }
+// read_env is an agent whose body is the `prelude.env.get_or` primitive (a host I/O prim). `get_or` returns
+// a PUBLIC string, so the run result crosses the user boundary without redaction.
 const IR: IRModule = {
   metadata: { schemaVersion: 1 },
   blocks: {
@@ -45,7 +45,16 @@ const IR: IRModule = {
         kind: "sequence",
         result: null,
         operations: [
-          { kind: "makeRecord", entries: [], output: 20 },
+          { kind: "loadLiteral", output: 18, value: { kind: "string", value: "HOST" } },
+          { kind: "loadLiteral", output: 19, value: { kind: "string", value: "unset" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["key", 18],
+              ["fallback", 19],
+            ],
+            output: 20,
+          },
           {
             kind: "delegate",
             target: { kind: "name", name: createAgentName("read_env") },
@@ -59,7 +68,7 @@ const IR: IRModule = {
     },
     6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
     7: {
-      block: { kind: "primitive", name: "prelude.env.get_all", input: 8 },
+      block: { kind: "primitive", name: "prelude.env.get_or", input: 8 },
       parameters: { parameter: 8 },
     },
   },
@@ -148,10 +157,7 @@ describe("prim transient infra failure", () => {
       const record = persistence.peekRun(run);
       return record?.state === "done" ? record : undefined;
     });
-    expect(done.result).toEqual({
-      kind: "record",
-      fields: { HOST: { kind: "string", value: "example.com" } },
-    });
+    expect(done.result).toEqual({ kind: "string", value: "example.com" });
     // The read was retried: the first raise was transient, not terminal.
     expect(reads).toBeGreaterThanOrEqual(2);
     // Recovery quiesced — nothing left suspended, the outbox drained.
