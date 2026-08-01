@@ -5,6 +5,7 @@
 import { gzipSync } from "node:zlib";
 import { Hono } from "hono";
 import { describe, expect, test } from "vitest";
+import { createApp } from "../src/app.js";
 import { errorHandler } from "../src/middleware/error-handler.js";
 import { decompressRequest } from "../src/middleware/decompress.js";
 import type { AppEnv } from "../src/types/app-env.js";
@@ -66,5 +67,21 @@ describe("decompressRequest", () => {
       body: "not actually gzip",
     });
     expect(response.status).toBe(400);
+  });
+
+  // Expanding a body is work a caller has to authenticate to ask for. `bearerAuth` exempts the health
+  // probe, so mounting the decompressor on all of `/api/*` would let anyone who can reach the port turn
+  // 32 KiB into whatever the cap allows, once per request and with no rate limiter on that path.
+  test("it is mounted on the authenticated subtree, not on the public probe", async () => {
+    const app = createApp();
+    // A body that is not gzip at all: were the decompressor on this path, it would read it and answer
+    // 400. The 404 says the request reached routing with its body untouched — nothing expanded it for
+    // a caller that presented no credential.
+    const response = await app.request("/api/v1/health", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Encoding": "gzip" },
+      body: "not actually gzip",
+    });
+    expect(response.status).toBe(404);
   });
 });

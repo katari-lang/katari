@@ -102,7 +102,11 @@ export function createApp() {
   app.use("/api/*", apiBodyLimit);
   // …and then what those bytes expand to, for a caller that compressed them. The cap is the same
   // number: no request body exceeds it, whichever form it arrived in.
-  app.use("/api/*", decompressRequest({ maxSize: config.limits.maxRequestBytes }));
+  //
+  // Mounted on the authenticated subtree rather than on `/api/*`: every endpoint under `/api/v1` but
+  // the public health probe lives beneath `/projects`, and expanding a body is work a caller should
+  // have to authenticate to ask for — a few compressed kilobytes name as much memory as the cap allows.
+  app.use("/api/v1/projects/*", decompressRequest({ maxSize: config.limits.maxRequestBytes }));
 
   // Rate-limit the surfaces that carry no bearer token at all.
   app.use("/inbound/*", rateLimit(limiter));
