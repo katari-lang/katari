@@ -7,6 +7,7 @@
 
 import {
   createAgentName,
+  type DefaultValue,
   type IRModule,
   type Operation,
   type QualifiedName,
@@ -159,6 +160,9 @@ function forkIr(bodies: {
   task: Operation[];
   main?: Operation[];
   canceller?: Operation[];
+  /** `task`'s parameter defaults (`AgentBlock.defaults`) — the omitted-parameter fill a forked task gets
+   *  at its instance root, exercised by the defaults test. Empty for every other fixture. */
+  taskDefaults?: Record<string, DefaultValue>;
 }): IRModule {
   // A `canceller` fiber body (wave 5): defaults to a no-op fiber. The cancel tests override it with a body that
   // gates on a request then cancels a handle it was forked with (to panic a join parked concurrently).
@@ -229,7 +233,13 @@ function forkIr(bodies: {
         parameters: { parameter: 110 },
       },
       12: {
-        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        block: {
+          kind: "agent",
+          body: 13,
+          schema: EMPTY_SCHEMA,
+          description: "",
+          defaults: bodies.taskDefaults ?? {},
+        },
         parameters: {},
       },
       13: {
@@ -1192,6 +1202,42 @@ describe("region reactor", () => {
     expect(
       actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
     ).toBeUndefined();
+  });
+
+  test("a forked task's omitted parameters are filled from the task's own defaults", async () => {
+    // The gate on giving a forked task `?=` parameters at all. Defaults are NOT a call-site rewrite: the
+    // callee's instance root fills them (`applyDefaults` over the agent block's `defaults`), so every way of
+    // reaching an agent — a compiled call, `reflection.call_agent`, an mcp inbound call, and a `fork` —
+    // gets the same fill, and the flat `fork` needs no filling path of its own. The fork here passes only
+    // `input`; `hop` and `files` arrive on the fiber's escalated parameter record anyway.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({
+        continuation: forkThenHold("delivered"),
+        task: askingTask,
+        taskDefaults: {
+          hop: { kind: "integer", value: 1 },
+          files: { kind: "array", elements: [] },
+        },
+      }),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    const ask = buffered.mailbox[0]?.ask;
+    if (ask?.kind !== "request") throw new Error("the buffered entry must be a request");
+    expect(ask.argument).toEqual({
+      kind: "record",
+      fields: {
+        input: { kind: "string", value: "delivered" },
+        hop: { kind: "integer", value: 1 },
+        files: { kind: "array", elements: [] },
+      },
+    });
   });
 
   test("independent forks each spawn their own fiber", async () => {
