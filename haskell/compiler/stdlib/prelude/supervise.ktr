@@ -22,8 +22,8 @@
 // `replay_after` / `give_up` are internal machinery, module members only because Katari has no
 // module-private declarations.
 
-@"The supervision signal — the one request a `supervise` provider catches, and the only performable
-request this module exports. A converter performs it to ask that the enclosing block be re-run,
+@"The supervision signal — the one request a `supervise` provider catches, and the only
+performable request this module exports. A converter performs it to ask that the enclosing block be re-run,
 carrying the failure it chose to represent as @failure@. `-> never`: performing it transfers control to
 the provider and does not return. A provider installed inside the program is what serves it; the
 runtime never machine-answers `interrupted`."
