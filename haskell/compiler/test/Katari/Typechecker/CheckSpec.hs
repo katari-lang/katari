@@ -606,7 +606,7 @@ spec = do
       compiledCodes
         ( "request on_message(source: string, msg: string) -> null\n"
             <> "type ev = on_message\n"
-            <> "agent worker(input: null) -> null with ev {\n  let a = on_message(source = \"s\", msg = \"m\")\n  null\n}\n"
+            <> "agent worker(label: string) -> null with ev {\n  let a = on_message(source = \"s\", msg = \"m\")\n  null\n}\n"
             <> "agent bot() -> null with io {\n"
             <> "  let r = use region.provide[region.scope, ev]\n"
             <> "  use handler {\n"
@@ -614,7 +614,7 @@ spec = do
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
             <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
-            <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "  let f = region.fork(nursery = r, task = worker, argument = { label = \"a\" })\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
@@ -1683,17 +1683,18 @@ spec = do
 
   -- The `prelude.region` stdlib module: structured concurrency as a nursery, built on the same scoped
   -- marker discipline as `mcp.provide`. `provide` opens the nursery and discharges its scope marker;
-  -- `fork` spawns a child bounded by the ceiling `E`; `join` / `cancel` operate on a fiber; `watch`
-  -- re-emits the fibers' escalations as `E`. Two soundness properties are checked end to end: a fiber is
-  -- joinable only in the region that spawned it (the nursery pins its scope marker INVARIANTLY, so two
-  -- distinct markers do not merge into a union), and a child's effect may not exceed the ceiling.
+  -- `fork` spawns a child bounded by the ceiling `E`, applied to the whole argument record of the call it
+  -- defers; `cancel_by_id` stops one by the id the runtime minted; `watch` re-emits the fibers'
+  -- escalations as `E`. Two soundness properties are checked end to end: every operation is gated on the
+  -- nursery's scope marker, which the handle pins INVARIANTLY (so two distinct markers do not merge into a
+  -- union), and a child's effect may not exceed the ceiling.
   describe "region (structured concurrency nursery)" $ do
     let botEvents =
           "request on_message(source: string, msg: string) -> null\n"
             <> "request needs_approval(x: string) -> boolean\n"
             <> "type bot_events = on_message | needs_approval\n"
         discordWatch =
-          "agent discord_watch(input: null) -> never with bot_events {\n"
+          "agent discord_watch() -> never with bot_events {\n"
             <> "  let a = on_message(source = \"s\", msg = \"m\")\n"
             <> "  let b = needs_approval(x = \"y\")\n"
             <> "  forever { }\n"
@@ -1701,7 +1702,7 @@ spec = do
         tickWorker =
           "request tick() -> null\n"
             <> "type ev = tick\n"
-            <> "agent worker(input: null) -> null with ev {\n  let a = tick()\n  null\n}\n"
+            <> "agent worker(label: string) -> null with ev {\n  let a = tick()\n  null\n}\n"
 
     it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
       -- The handler covers the ceiling AND the two runtime ending events `region.crashed` /
@@ -1718,13 +1719,13 @@ spec = do
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
             <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
-            <> "  let f = region.fork(nursery = r, task = discord_watch, argument = null)\n"
+            <> "  let f = region.fork(nursery = r, task = discord_watch, argument = {})\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "fork, cancel and watch compose in one nursery (there is no join: results ride escalations)" $
+    it "fork, cancel_by_id and watch compose in one nursery (there is no join: results ride escalations)" $
       compiledCodes
         ( tickWorker
             <> "agent bot() -> never with io {\n"
@@ -1734,8 +1735,8 @@ spec = do
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
             <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
-            <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
-            <> "  let g = region.cancel(nursery = r, handle = f)\n"
+            <> "  let f = region.fork(nursery = r, task = worker, argument = { label = \"a\" })\n"
+            <> "  let g = region.cancel_by_id(nursery = r, id = region.fiber_id(handle = f))\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
@@ -1771,19 +1772,24 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
-    it "rejects cancelling a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
-      -- Two nurseries under distinct markers `scope_a` / `scope_b`; a fiber forked in the first is passed
-      -- to the second's `cancel`. The nursery pins its marker invariantly, so `cancel` cannot infer the
-      -- mere UNION of the two scopes — the fiber's `scope_a` is rejected against the nursery's `scope_b`.
+    it "rejects forking a task whose effect exceeds the nursery's ceiling (K3001)" $
+      -- The ceiling is an upper bound on EVERY fiber, and it is what makes `watch` a total obligation:
+      -- a child raising something the ceiling does not name could surface at a watch whose handler was
+      -- checked against the ceiling alone. (Throws are the one documented exception — `fork`'s task row
+      -- widens by `prelude.throw[unknown]`, since the boundary traps them as `failed`.)
       compiledCodes
         ( tickWorker
-            <> "effect scope_a\n"
-            <> "effect scope_b\n"
-            <> "agent bot() -> null with io {\n"
-            <> "  let ra : region.nursery[scope_a, ev] = use region.provide[scope_a, ev]\n"
-            <> "  let rb : region.nursery[scope_b, ev] = use region.provide[scope_b, ev]\n"
-            <> "  let fa = region.fork(nursery = ra, task = worker, argument = null)\n"
-            <> "  region.cancel(nursery = rb, handle = fa)\n"
+            <> "request shout(text: string) -> null\n"
+            <> "agent loud(label: string) -> null with shout {\n  let a = shout(text = label)\n  null\n}\n"
+            <> "agent bot() -> never with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  use handler {\n"
+            <> "    request tick() -> null { null }\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
+            <> "  }\n"
+            <> "  let f = region.fork(nursery = r, task = loud, argument = { label = \"a\" })\n"
+            <> "  region.watch(nursery = r)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
@@ -1798,7 +1804,7 @@ spec = do
       -- every throwing task to be guarded at the fork site, so it is pinned here.
       compiledCodes
         ( "data boom(reason: string)\n"
-            <> "agent throwing_worker(input: null) -> null with io | prelude.throw[boom] {\n"
+            <> "agent throwing_worker() -> null with io | prelude.throw[boom] {\n"
             <> "  prelude.throw(error = boom(reason = \"x\"))\n"
             <> "}\n"
             <> "agent bot() -> never with io {\n"
@@ -1807,7 +1813,7 @@ spec = do
             <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
             <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
             <> "  }\n"
-            <> "  let f = region.fork(nursery = r, task = throwing_worker, argument = null)\n"
+            <> "  let f = region.fork(nursery = r, task = throwing_worker, argument = {})\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
@@ -1828,23 +1834,18 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
-    it "rejects cancelling a fiber that escaped its provide, in a foreign region: the marker has nowhere to be discharged (K3001)" $
-      -- A fiber value may leave its `provide` (it is an opaque handle), but it can only be cancelled back
-      -- in a nursery carrying its own scope marker. `leak` returns a `region.scope` fiber; `consume` opens
-      -- a nursery under the distinct `other` marker and cannot cancel it.
+    it "rejects returning a fiber out of its provide: the handle drags a marker with nowhere to be discharged (K3001)" $
+      -- A `fiber[Scope]` carries its nursery's scope marker in its effect row, so a handle cannot be
+      -- handed to a signature that does not carry that scope — which is what keeps a fiber from
+      -- outliving the `provide` that spawned it. `leak` tries to return one under a row that has
+      -- already discharged `region.scope`.
       compiledCodes
         ( tickWorker
-            <> "effect other\n"
-            <> "agent leak() -> region.fiber[region.scope] with io {\n"
+            <> "agent leak() -> region.fiber[other] with io {\n"
             <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
-            <> "  region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "  region.fork(nursery = r, task = worker, argument = { label = \"a\" })\n"
             <> "}\n"
-            <> "agent consume() -> null with io {\n"
-            <> "  let leaked = leak()\n"
-            <> "  let r2 : region.nursery[other, ev] = use region.provide[other, ev]\n"
-            <> "  let bad = region.cancel(nursery = r2, handle = leaked)\n"
-            <> "  null\n"
-            <> "}"
+            <> "effect other\n"
         )
         `shouldContain` ["K3001"]
 
@@ -1903,24 +1904,22 @@ spec = do
   -- `serialize` opens a serial domain whose `exclusive` critical sections carry a FIXED row — the
   -- four store operations, nothing else — so a section can never block on a model, a network, or
   -- another domain. No type arguments anywhere: the fixed row replaced the old ceiling generics.
-  describe "store workspaces (scope / serialize / exclusive / modify)" $ do
-    it "scope-prefix composition type-checks: nested workspaces over ambient keys, a listing under a subdirectory" $
+  describe "store workspaces (workspace / exclusive / get_or)" $ do
+    it "prefix composition type-checks: nested workspaces over ambient keys, a listing under a subdirectory" $
       compiledCodes
         ( "agent driver() -> array[store.entry] with store.get | store.set | store.delete | store.list {\n"
-            <> "  use store.scope(path = \"assistant\")\n"
-            <> "  use store.scope(path = \"core\")\n"
+            <> "  use store.workspace(path = \"assistant\")\n"
+            <> "  use store.workspace(path = \"core\")\n"
             <> "  store.set(key = \"memos/today\", value = \"hi\")\n"
             <> "  store.list(path = \"memos\")\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "serialize + exclusive + modify happy path: install bare, run a multi-key task and the one-key sugar" $
+    it "workspace + exclusive happy path: one install serves the prefix AND the critical section" $
       compiledCodes
-        ( "agent increment(value: unknown) -> unknown {\n"
-            <> "  match (value) {\n    case integer(count) -> count + 1\n    case _ -> 1\n  }\n}\n"
-            <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
-            <> "  use store.serialize\n"
+        ( "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
+            <> "  use store.workspace(path = \"core\")\n"
             <> "  agent move_note(value: null) -> string {\n"
             <> "    match (store.get(key = \"draft\")) {\n"
             <> "      case store.found(value => value) -> {\n"
@@ -1930,19 +1929,32 @@ spec = do
             <> "      case store.absent(key => _) -> \"(nothing to move)\"\n"
             <> "    }\n"
             <> "  }\n"
-            <> "  let _moved = store.exclusive(task = move_note)\n"
-            <> "  store.modify(key = \"count\", transform = increment)\n"
+            <> "  store.exclusive(task = move_note)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "a facility's subdirectory travels with the task: an exclusive task may open store.scope as its first move" $
+    it "store.get_or: T is read off the fallback, at a scalar and at a data constructor alike" $
+      -- The typed store read replaced `get_text` / `get_integer` / the three `_as` wrappers, so what has
+      -- to hold is that ONE signature infers T from the fallback in every shape a caller supplies —
+      -- a bare scalar and a nominal `data` value — with no explicit instantiation.
+      compiledCodes
+        ( "data cursor(floor: integer, phase: string)\n"
+            <> "agent driver() -> string with store.get {\n"
+            <> "  let count = store.get_or(key = \"count\", fallback = 0)\n"
+            <> "  let label = store.get_or(key = \"label\", fallback = \"(none)\")\n"
+            <> "  let memory = store.get_or(key = \"cursor\", fallback = cursor(floor = 0, phase = \"priming\"))\n"
+            <> "  f\"${string.to_string(value = count)}/${label}/${memory.phase}\"\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "a facility's subdirectory travels with the task: an exclusive task may open a workspace as its first move" $
       compiledCodes
         ( "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
-            <> "  use store.scope(path = \"core\")\n"
-            <> "  use store.serialize\n"
+            <> "  use store.workspace(path = \"core\")\n"
             <> "  agent save_index(value: null) -> null {\n"
-            <> "    use store.scope(path = \"memory\")\n"
+            <> "    use store.workspace(path = \"memory\")\n"
             <> "    store.set(key = \"index\", value = 1)\n"
             <> "    null\n"
             <> "  }\n"
@@ -1959,21 +1971,21 @@ spec = do
             <> "  null\n"
             <> "}\n"
             <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
-            <> "  use store.serialize\n"
+            <> "  use store.workspace(path = \"core\")\n"
             <> "  store.exclusive(task = chatty)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
 
-    it "rejects an impure modify transform: what a new value depends on is closed over, not performed (K3001)" $
+    it "rejects an impure critical section: what a new value depends on is closed over, not performed (K3001)" $
       compiledCodes
-        ( "agent leaky(value: unknown) -> unknown with io {\n"
+        ( "agent leaky(value: null) -> unknown with io {\n"
             <> "  let _now = time.now()\n"
-            <> "  value\n"
+            <> "  store.get(key = \"count\")\n"
             <> "}\n"
             <> "agent driver() -> unknown with store.get | store.set | store.delete | store.list {\n"
-            <> "  use store.serialize\n"
-            <> "  store.modify(key = \"count\", transform = leaky)\n"
+            <> "  use store.workspace(path = \"core\")\n"
+            <> "  store.exclusive(task = leaky)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
@@ -1983,21 +1995,21 @@ spec = do
   -- shape type-checks against the real wired-in stdlib — a signature that only reads well is worth
   -- nothing if the inference behind it does not admit the call the docs advertise.
   describe "stdlib composition helpers" $ do
-    it "store.shared_exclusive_as: a shared critical section answers a TYPED value across both request boundaries" $
+    it "store.share / store.shared: a shared cell is reached by a task that opens its own workspace" $
       compiledCodes
-        ( "agent driver() -> string with store.get | store.set | store.delete | store.list | store.exclusive | prelude.throw[json.validation_error] {\n"
+        ( "agent driver() -> unknown with store.get | store.set | store.delete | store.list | store.exclusive {\n"
             <> "  use store.share\n"
-            <> "  agent save_entry(value: null) -> string {\n"
-            <> "    use store.scope(path = \"shared/digest\")\n"
+            <> "  agent save_entry(value: null) -> unknown {\n"
+            <> "    use store.workspace(path = \"shared/digest\")\n"
             <> "    store.set(key = \"today\", value = \"note\")\n"
             <> "    \"(saved)\"\n"
             <> "  }\n"
-            <> "  store.shared_exclusive_as(task = save_entry)\n"
+            <> "  store.shared(task = save_entry)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "store.safe_segment / store.scope: a checked name is what a workspace path is built from" $
+    it "store.safe_segment / store.workspace: a checked name is what a workspace path is built from" $
       compiledCodes
         ( "agent open_worker(proposed: string) -> string with store.get | store.set | store.delete | store.list {\n"
             <> "  match (store.safe_segment(name = proposed)) {\n"
@@ -2015,16 +2027,16 @@ spec = do
     it "record.set_if: T is read off the target, so a chain over a typed record needs no instantiation" $
       compiledCodes
         ( "agent headers(token: string | null, agent_line: string | null) -> record[string] {\n"
-            <> "  let base = record.set(target = record.empty(), key = \"accept\", value = \"application/json\")\n"
+            <> "  let base = record.set(target = {}, key = \"accept\", value = \"application/json\")\n"
             <> "  record.set_if(target = record.set_if(target = base, key = \"authorization\", value = token), key = \"user-agent\", value = agent_line)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "record.set_if: a chain seeded at record.empty() instantiates T (the element type is only under a union)" $
+    it "record.set_if: a chain seeded at an empty record literal instantiates T (the element type is only under a union)" $
       compiledCodes
         ( "agent arguments(cursor: string | null, limit: integer | null) -> record[unknown] {\n"
-            <> "  record.set_if[unknown](target = record.set_if[unknown](target = record.empty(), key = \"cursor\", value = cursor), key = \"limit\", value = limit)\n"
+            <> "  record.set_if[unknown](target = record.set_if[unknown](target = {}, key = \"cursor\", value = cursor), key = \"limit\", value = limit)\n"
             <> "}"
         )
         `shouldBe` []
@@ -2040,26 +2052,25 @@ spec = do
         )
         `shouldBe` []
 
-    it "json.text_at / reflection.constructor_of: the two total reads over an unknown payload" $
+    it "json.text with a fallback / reflection.constructor_of: the two total reads over an unknown payload" $
       compiledCodes
         ( "agent describe(error: unknown) -> string {\n"
             <> "  let kind = match (reflection.constructor_of(value = error)) {\n"
             <> "    case null -> \"crash\"\n"
             <> "    case name -> name\n"
             <> "  }\n"
-            <> "  let line = json.text_at(target = error, key = \"message\", fallback = \"(no message)\")\n"
+            <> "  let line = json.text(target = json.field(target = error, key = \"message\"), fallback = \"(no message)\")\n"
             <> "  f\"${kind}: ${line}\"\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "time civil labels: the stamp composes the four renders, and add_days round-trips date_label's shape" $
+    it "time civil labels: the stamp composes the renders, and a shifted date is civil arithmetic" $
       compiledCodes
         ( "agent lines(at: number, offset: integer) -> array[string] {\n"
-            <> "  let tomorrow = match (time.add_days(date = time.date_label(epoch_milliseconds = at, offset_minutes = offset), days = 1, offset_minutes = offset)) {\n"
-            <> "    case null -> \"(unreadable)\"\n"
-            <> "    case day -> day\n"
-            <> "  }\n"
+            <> "  let today = time.to_civil(epoch_milliseconds = at, offset_minutes = offset)\n"
+            <> "  let shifted = time.from_civil(value = time.civil(year = today.year, month = today.month, day = today.day + 1, hour = today.hour, minute = today.minute, second = today.second, millisecond = today.millisecond), offset_minutes = offset)\n"
+            <> "  let tomorrow = time.date_label(epoch_milliseconds = shifted, offset_minutes = offset)\n"
             <> "  [\n"
             <> "    time.stamp(epoch_milliseconds = at, offset_minutes = offset),\n"
             <> "    time.weekday_label(day = time.day_of_week(epoch_milliseconds = at, offset_minutes = offset)),\n"
@@ -2082,7 +2093,8 @@ spec = do
     it "captures an enclosing local, exactly as a named local agent does" $
       compiledCodes
         ( "agent scale_all(values: array[integer], factor: integer) -> array[integer] {\n"
-            <> "  array.map(target = values, transform = agent (value: integer) -> integer { value * factor })\n"
+            <> "  let scale = agent (value: integer) -> integer { value * factor }\n"
+            <> "  for (let value in values) { next scale(value = value) }\n"
             <> "}"
         )
         `shouldBe` []
@@ -2101,10 +2113,11 @@ spec = do
         ( "request note(text: string) -> integer\n"
             <> "agent named(lines: array[string]) -> array[integer] with note {\n"
             <> "  agent step(value: string) -> integer { note(text = value) }\n"
-            <> "  array.map(target = lines, transform = step)\n"
+            <> "  for (let line in lines) { next step(value = line) }\n"
             <> "}\n"
             <> "agent anonymous(lines: array[string]) -> array[integer] with note {\n"
-            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "  let step = agent (value: string) -> integer { note(text = value) }\n"
+            <> "  for (let line in lines) { next step(value = line) }\n"
             <> "}"
         )
         `shouldBe` []
@@ -2115,7 +2128,8 @@ spec = do
       compiledCodes
         ( "request note(text: string) -> integer\n"
             <> "agent anonymous(lines: array[string]) -> array[integer] with pure {\n"
-            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "  let step = agent (value: string) -> integer { note(text = value) }\n"
+            <> "  for (let line in lines) { next step(value = line) }\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
@@ -2127,7 +2141,8 @@ spec = do
             <> "  use handler(var seen: integer = 0) {\n"
             <> "    request note(text: string) -> integer { next seen + 1 with { seen = seen + 1 } }\n"
             <> "  }\n"
-            <> "  array.map(target = lines, transform = agent (value: string) -> integer { note(text = value) })\n"
+            <> "  let step = agent (value: string) -> integer { note(text = value) }\n"
+            <> "  for (let line in lines) { next step(value = line) }\n"
             <> "}"
         )
         `shouldBe` []
@@ -2136,7 +2151,8 @@ spec = do
       compiledCodes
         ( "request note(text: string) -> integer\n"
             <> "agent annotated(lines: array[string]) -> array[integer] with note {\n"
-            <> "  array.map(target = lines, transform = agent (value: string) -> integer with note { note(text = value) })\n"
+            <> "  let step = agent (value: string) -> integer with note { note(text = value) }\n"
+            <> "  for (let line in lines) { next step(value = line) }\n"
             <> "}"
         )
         `shouldBe` []
@@ -2154,7 +2170,8 @@ spec = do
     it "rejects generic parameters on an agent expression (K3027)" $
       compiledCodes
         ( "agent identity_of(values: array[integer]) -> array[integer] {\n"
-            <> "  array.map(target = values, transform = agent [T](value: T) -> T { value })\n"
+            <> "  let identity = agent [T](value: T) -> T { value }\n"
+            <> "  for (let value in values) { next identity(value = value) }\n"
             <> "}"
         )
         `shouldContain` ["K3027"]
@@ -2162,7 +2179,8 @@ spec = do
     it "names the offending generic parameter in the K3027 message" $
       compiledMessages
         ( "agent identity_of(values: array[integer]) -> array[integer] {\n"
-            <> "  array.map(target = values, transform = agent [T](value: T) -> T { value })\n"
+            <> "  let identity = agent [T](value: T) -> T { value }\n"
+            <> "  for (let value in values) { next identity(value = value) }\n"
             <> "}"
         )
         `shouldSatisfy` Text.isInfixOf "cannot declare generic parameters (`T`)"
@@ -2170,7 +2188,8 @@ spec = do
     it "reports a body error inside the closure (the body is checked as written)" $
       compiledCodes
         ( "agent bad(values: array[integer]) -> array[integer] {\n"
-            <> "  array.map(target = values, transform = agent (value: integer) -> integer { \"not an integer\" })\n"
+            <> "  let step = agent (value: integer) -> integer { \"not an integer\" }\n"
+            <> "  for (let value in values) { next step(value = value) }\n"
             <> "}"
         )
         `shouldContain` ["K3001"]

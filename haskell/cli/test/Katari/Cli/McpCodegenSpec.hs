@@ -150,7 +150,7 @@ golden =
       "",
       "@\"Fetch one issue.\\nSlow on \\\"cold\\\" repos.\"",
       "agent get_issue(filter: unknown | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.validation_error] {",
-      "  let arguments_0 = record.empty()",
+      "  let arguments_0 : record[unknown] = {}",
       "  let arguments_1 = record.set_if[unknown](target = arguments_0, key = \"filter\", value = filter)",
       "  let arguments_2 = record.set_if[unknown](target = arguments_1, key = \"labels\", value = labels)",
       "  let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = owner)",
@@ -222,7 +222,7 @@ callerModule =
       "  }",
       "  use github.connect(auth = mcp.oauth(name = \"github\"))",
       "  let issue = github.get_issue(owner = \"katari-lang\", repo = \"katari\")",
-      "  let pong = github.ping(arguments = record.empty())",
+      "  let pong = github.ping(arguments = {})",
       "  let names = describe_tools(tools = [github.get_issue])",
       "  f\"issue=${issue.title} pong=${json.stringify(value = pong)} names=${string.join(parts = names, separator = \",\")}\"",
       "}"

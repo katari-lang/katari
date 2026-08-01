@@ -34,44 +34,25 @@ primitive agent reverse[T](target: array[T]) -> array[T]
 source. Empty when @end@ <= @start@."
 primitive agent range(start: integer, end: integer) -> array[integer]
 
-@"The empty array."
-primitive agent empty() -> array[never]
-
-// The transformation trio below are ordinary `for` compositions, written here once so every program
-// does not respell the mapping / flatten-filter / accumulator idioms. Each calls its agent argument
-// once per element, in order, and carries that agent's effects (`E`).
-
-@"A new array with @transform@ applied to each element, in order."
-agent map[T, U, effect E](target: array[T], transform: agent (value: T) -> U with E) -> array[U] with E {
-  for (let value in target) { next transform(value = value) }
-}
+// `map` and `fold` are not here, and `[]` is the empty array. Mapping IS `for` (`for (let x in xs) { next
+// f(x) }`), accumulating IS `for`'s own `var` — the language already has one way to say each, and a second
+// spelling of the same loop only makes a reader ask which one a call site meant. `filter` below stays,
+// because its composition is not a loop a reader recognises but a flatten over per-element `[x]` / `[]` —
+// short, and easy to get subtly wrong.
 
 @"The elements for which @keep@ returns true, in their original order."
 agent filter[T, effect E](target: array[T], keep: agent (value: T) -> boolean with E) -> array[T] with E {
   flatten(target = for (let value in target) { next if (keep(value = value)) { [value] } else { [] } })
 }
 
-@"Fold the elements left to right: starting from @initial@, @step@ combines the accumulator with each
-element in turn, and the final accumulator is the result."
-agent fold[T, A, effect E](target: array[T], initial: A, step: agent (accumulator: A, value: T) -> A with E) -> A with E {
-  for (let value in target, var accumulator: A = initial) {
-    next with { accumulator = step(accumulator = accumulator, value = value) }
-  } then (_elements) { accumulator }
-}
-
 // Sorting uses the one scalar order of `<` (see `prelude.less_than`): numbers numerically, strings
-// by Unicode code point, and in a mixed union every number before every string. All three are stable —
+// by Unicode code point, and in a mixed union every number before every string. Both are stable —
 // equal elements keep their original order.
 
 @"The elements sorted ascending by the scalar order of `<`. Stable."
 primitive agent sort[T extends number | string](target: array[T]) -> array[T]
 
 @"The `[key, value]` tuples sorted ascending by key — stable, so equal keys keep their order. Composes
-directly with `record.entries` (deterministic iteration over a record); the plumbing under `sort_by`."
+directly with `record.entries` (deterministic iteration over a record), and a sort BY a projection is
+this over a `for` that pairs each element with its key."
 primitive agent sort_entries[K extends number | string, V](entries: array[[K, V]]) -> array[[K, V]]
-
-@"The elements sorted ascending (stable) by the key @key@ maps each element to — called once per element."
-agent sort_by[T, K extends number | string, effect E](target: array[T], key: agent (value: T) -> K with E) -> array[T] with E {
-  let keyed = for (let value in target) { next [key(value = value), value] }
-  for (let [_sort_key, value] in sort_entries(entries = keyed)) { next value }
-}

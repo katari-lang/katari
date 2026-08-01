@@ -9,12 +9,10 @@
 // `token` composes with `http.fetch` to reach any bearer-authenticated endpoint:
 //
 //   let bearer : string of private = oauth.token(name = "github")
-//   let headers = record.set(
-//     target = record.empty(),
-//     key = "Authorization",
-//     value = prelude.concat(left = "Bearer ", right = bearer),
+//   let response = http.fetch(
+//     url = "https://api.github.com/user",
+//     headers = { Authorization = f"Bearer ${bearer}" },
 //   )
-//   let response = http.fetch(url = "https://api.github.com/user", method = "GET", headers = headers, body = "")
 //
 // The token is a `string of private` (a secret): it may flow ONLY toward a submission sink — an http
 // `Authorization` header, whose values are `string of private` — and it is redacted at every user-facing

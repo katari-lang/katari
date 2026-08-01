@@ -7,7 +7,7 @@
 // Outbound, the whole integration is one line — the tools live for the extent of the `use` block, and
 // you pick how the server authenticates with the `auth` sum:
 //
-//   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.headers(values = record.empty()))
+//   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.headers(values = {}))
 //   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.oauth(name = "github"))
 //
 // `headers` covers anonymous access (an empty record), bearer keys and any custom scheme uniformly:
@@ -75,7 +75,7 @@ credential pauses the run on an authorization escalation instead of failing it. 
 data auth_error(message: string)
 
 @"Header-based access: @values@ ride on every request to the server (each value may be a secret,
-such as a bearer key). Anonymous access is `headers(values = record.empty())`."
+such as a bearer key). Anonymous access is `headers(values = {})`."
 data headers(@"The headers sent on every request, by name; a value may be a secret." values: record[string of private])
 
 @"A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;
@@ -98,7 +98,7 @@ effect scope
 // synonyms take no docs.)
 type tool[effect Scope] = agent never -> unknown with io | Scope | prelude.throw[server_error | auth_error]
 
-// A server's tools, keyed by tool name — call one by key, or hand `record.values(target = ...)` (the
+// A server's tools, keyed by tool name — call one by key, or hand the values (the
 // flat array of tools) to an AI loop wholesale. `Scope` is the marker the tools are gated by.
 type toolbox[effect Scope] = record[tool[Scope]]
 
@@ -165,8 +165,8 @@ data connection(
 data-driven form of `provide`. The marker is minted once, UNCONDITIONALLY, whatever the array holds:
 an optional connection is an `if` in the DATA (append it to the array or not), never a branch around
 the `use`, so conditional connections stop forking the program's shape (the 2×2 explosion). The
-continuation receives one toolbox per connection, in input order — flatten what you hand an AI loop
-(`array.map` + `record.values` + `array.flatten`). Connections open one by one in order and tear
+continuation receives one toolbox per connection, in input order — flatten what you hand an AI loop with
+`array.flatten(target = for (let box in boxes) { next for (let [_name, tool] in record.entries(target = box)) { next tool } })`. Connections open one by one in order and tear
 down in reverse; any connection's listing failure is the same typed error a lone `provide` raises,
 and tears the already-open ones down. An empty array runs @continuation@ with no toolboxes — the
 same row shape, so callers never branch on emptiness. This must be an external, not a composition:
@@ -177,16 +177,6 @@ external agent provide_all[effect Scope, R, effect E](
   @"The connections to open, in order; empty is fine." connections: array[connection],
   @"The scope body (bound by `use`): receives one toolbox per connection, in input order." continuation: agent (value: array[toolbox[Scope]]) -> R with E | Scope,
 ) -> R with E | io from "mcp"
-
-@"Flatten a `provide_all` result to one tool array — the `array.map` + `record.values` +
-`array.flatten` composition every AI loop's tool list respelled, packaged so the common case is one
-call: `array.concat(left = my_tools, right = mcp.all_tools(boxes = dynamic))`."
-agent all_tools[effect Scope](@"The toolboxes `provide_all` handed the continuation." boxes: array[toolbox[Scope]]) -> array[tool[Scope]] {
-  agent tools_of(value: toolbox[Scope]) -> array[tool[Scope]] {
-    record.values(target = value)
-  }
-  array.flatten(target = array.map(target = boxes, transform = tools_of))
-}
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
 minted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the

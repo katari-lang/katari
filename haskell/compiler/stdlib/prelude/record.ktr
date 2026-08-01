@@ -46,18 +46,13 @@ primitive agent size(target: record[unknown]) -> integer
 @"Every entry as a @[key, value]@ pair, in sorted key order — the record's `for`-iterable view."
 primitive agent entries[T](target: record[T]) -> array[[string, T]]
 
-@"Every value, in sorted key order — the value-side counterpart of `keys`."
-agent values[T](target: record[T]) -> array[T] {
-  // Iterating the entries directly (rather than keys plus a per-key `get`) keeps every read total:
-  // an entry's value is always present, so there is no impossible-null case to handle.
-  for (let [_, value] in entries(target = target)) {
-    next value
-  }
-}
-
 @"The two records' entries in one record; on a shared key the right value wins (the override
 direction of layered configuration, e.g. default headers extended per call)."
 primitive agent merge[T](left: record[T], right: record[T]) -> record[T]
 
-@"The empty record."
-primitive agent empty() -> record[never]
+// There is no `empty` and no `values`: `{}` is the empty record literal, and the values are `entries`
+// under a `for` that keeps the second half (`for (let [_, value] in entries(target = r)) { next value }`)
+// — the projection reads as what it is, and there is one way to iterate a record rather than two. ONE
+// PARSING NOTE about the literal: a bare `{}` immediately after a `->` (a match arm, an agent body) is
+// read as an empty BLOCK, which answers `null`; write `({})` there. Everywhere else — an argument, a
+// `let`, a tail expression — `{}` is the record.

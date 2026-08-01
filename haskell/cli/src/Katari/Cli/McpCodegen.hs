@@ -533,7 +533,7 @@ toolAgentLines context tool =
       -- The pass-through plan: the caller's tree IS the arguments object, nothing to fold.
       InputPassthrough -> []
       InputFields parameters ->
-        [indent 1 "let arguments_0 = record.empty()"]
+        [indent 1 "let arguments_0 : record[unknown] = {}"]
           <> concat (zipWith parameterFoldLines [0 ..] parameters)
 
 -- | One parameter's fold step: @arguments_i@ -> @arguments_(i+1)@, ONE line either way. A required
@@ -549,9 +549,10 @@ parameterFoldLines slot parameter =
       target = "arguments_" <> Text.pack (show (slot + 1))
       -- @record.set_if@ is instantiated EXPLICITLY. Its element type appears only under a union
       -- (@value: T | null@), which the solver cannot decompose into a lower bound on @T@, so an
-      -- uninstantiated call against the @record.empty()@ seed would solve @T@ to @never@ and reject
-      -- every value. @unknown@ is the right instantiation here regardless: the fold's product is
-      -- @mcp.call@'s @arguments: unknown@ tree, and a mapped parameter widens into it losslessly.
+      -- uninstantiated call would have nothing to solve @T@ from and would reject every value.
+      -- @unknown@ is the right instantiation here regardless: the fold's product is @mcp.call@'s
+      -- @arguments: unknown@ tree, and a mapped parameter widens into it losslessly — which is also
+      -- why the seed is annotated @record[unknown]@ rather than left to infer off an empty literal.
       setter = if parameter.optional then "record.set_if[unknown]" else "record.set"
    in [ indent
           1

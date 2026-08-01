@@ -112,7 +112,7 @@ spec = do
     -- `()` means NO parameters and `f()` means NO arguments — the parser inserts nothing. The whole
     -- zero-argument story rests on that literal reading (an object type names only what it requires,
     -- so a nullary agent still fits a `(value: null)` slot); a sugar that filled in a `value` here
-    -- would silently change what `agent main() -> string` and `record.empty()` mean.
+    -- would silently change what `agent main() -> string` and `record.merge(...)` mean.
     it "parses an empty parameter list as no parameters, and a bare call as no arguments" $ do
       module' <- parseClean "agent thunk() -> integer { 1 }\nagent caller() -> integer { thunk() }"
       case module'.declarations of
@@ -265,7 +265,7 @@ spec = do
         _ -> expectationFailure "expected one agent"
 
     it "still rejects a non-literal expression as a default" $
-      shouldFail "agent f(items: array[string] ?= record.empty()) -> integer { 0 }"
+      shouldFail "agent f(items: array[string] ?= array.reverse(target = [])) -> integer { 0 }"
 
     it "rejects a call expression inside a container default" $
       shouldFail "agent f(items: array[string] ?= [make()]) -> integer { 0 }"

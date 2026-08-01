@@ -260,8 +260,8 @@ spec = describe "lowerModule (via compile)" $ do
     it "rejects leaking a secret into a public `string` return (the secret-flow invariant)" $
       compileErrorCodes "agent f() -> string { env.get_secret(key = \"K\") }" `shouldNotBe` []
 
-    it "types `env.get_all` as a `record[string]`" $
-      compileErrorCodes "agent f() -> record[string] { env.get_all() }" `shouldBe` []
+    it "types `env.get_or` as a public `string` (the non-secret side is total, never private)" $
+      compileErrorCodes "agent f() -> string { env.get_or(key = \"K\", fallback = \"\") }" `shouldBe` []
 
   describe "record literals" $ do
     it "accepts a string-literal key an identifier cannot spell" $
@@ -564,7 +564,7 @@ spec = describe "lowerModule (via compile)" $ do
 
   -- The nullary agent — `agent f() -> T { ... }` and `f()` — is the language's own zero-argument form,
   -- not a hole a sugar has to fill. It is pinned here because a whole family of stdlib slots is typed
-  -- `agent (value: null) -> T` (`prelude.catch`, `store.shared`, `region.post`, `replay.*`), and the
+  -- `agent (value: null) -> T` (`prelude.catch`, `store.shared`, `store.exclusive`, `supervise.*`), and the
   -- reason a nullary agent may stand in one is structural: an object type names only the fields it
   -- REQUIRES, so `{value: null}` is a subtype of `{}` and an agent's parameter record is contravariant.
   -- That single fact is what lets an app drop the `(value: null)` / `value = null` ritual without any
