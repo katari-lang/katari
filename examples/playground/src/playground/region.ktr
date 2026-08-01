@@ -72,7 +72,7 @@ agent fan_out() -> array[integer] {
 // awaited at the closing brace, results as plain values in fork order — the right tool when the
 // set is known up front and every result is wanted. A region decouples all of it: `fork` returns
 // immediately and the fiber runs on independently, so you may fork a dynamic number, spawn more
-// from inside a handler, `cancel` one by handle or id, and hear deliveries at `watch` as they
+// from inside a handler, `cancel_by_id` one by the id the runtime minted, and hear deliveries at `watch` as they
 // complete. `fan_out` above rebuilds the parallel map out of region pieces to show the mapping —
 // three extra moves (a delivery request, a collector, a termination throw) buy the detachment;
 // `subscribe` below is what only a region can express.
