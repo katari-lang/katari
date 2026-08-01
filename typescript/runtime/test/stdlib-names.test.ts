@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { PANIC_REQUEST } from "../src/runtime/engine/common.js";
 import { OAUTH_AUTHORIZE_REQUEST } from "../src/runtime/external/credentials.js";
+import { withoutCommentsAndDocstrings } from "./katari-source.js";
 
 const stdlibDirectory = new URL("../../../haskell/compiler/stdlib/", import.meta.url);
 const runtimeSourceDirectory = new URL("../src/", import.meta.url);
@@ -67,8 +68,9 @@ function moduleNameOf(relativePath: string): string {
 }
 
 /** Every top-level stdlib declaration, as its fully qualified name mapped to the form that introduced it.
- *  Anchored at column 0, so a handler implementation nested inside a `use handler` and a docstring mention
- *  are both skipped — only declarations are collected. */
+ *  Comments and docstrings come out first (prose may begin a line with a declaration form), and what is
+ *  left is anchored at column 0, so a handler implementation nested inside a `use handler` is skipped too
+ *  — only declarations are collected. */
 function stdlibDeclarations(): Map<string, string> {
   const declarations = new Map<string, string>();
   const subModulePaths = readdirSync(new URL("prelude/", stdlibDirectory)).map(
@@ -78,7 +80,9 @@ function stdlibDeclarations(): Map<string, string> {
   const pattern = new RegExp(`^(${DECLARATION_FORMS}) ([A-Za-z0-9_]+)`, "gm");
   for (const relativePath of relativePaths) {
     const module = moduleNameOf(relativePath);
-    const source = readFileSync(new URL(relativePath, stdlibDirectory), "utf8");
+    const source = withoutCommentsAndDocstrings(
+      readFileSync(new URL(relativePath, stdlibDirectory), "utf8"),
+    );
     for (const match of source.matchAll(pattern)) {
       const [, form, name] = match;
       if (form !== undefined && name !== undefined) declarations.set(`${module}.${name}`, form);

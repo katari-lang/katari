@@ -23,6 +23,7 @@ import { describe, expect, test } from "vitest";
 import { PANIC_REQUEST } from "../src/runtime/engine/common.js";
 import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
 import { isFailureRequest, SUPERVISE_INTERRUPTED_REQUEST } from "../src/runtime/escalation-filter.js";
+import { withoutCommentsAndDocstrings } from "./katari-source.js";
 
 const stdlibDirectory = new URL("../../../haskell/compiler/stdlib/", import.meta.url);
 
@@ -46,7 +47,8 @@ function stdlibRelativePaths(): string[] {
  *
  * The scan balances parentheses and skips string literals, because neither the first `->` nor the first
  * `)` after the name is reliable: a parameter can be an agent type carrying its own arrow (`task: agent
- * (value: null) -> unknown`), and a docstring can carry either character inside quotes. An optional
+ * (value: null) -> unknown`), and a default's string literal can carry either character inside quotes
+ * (docstrings are already gone by the time this runs). An optional
  * generic list precedes the parameters and holds no parentheses in any stdlib declaration, so skipping to
  * its `]` is enough.
  */
@@ -85,14 +87,17 @@ function resultTypeAfter(source: string, start: number): string | null {
 }
 
 /** Every TOP-LEVEL `request` declared across the stdlib, as its fully qualified name paired with the
- *  leading token of its result type. Anchored at column 0 so a handler IMPLEMENTATION (`request throw(…)
- *  -> never { … }`, always indented inside a `use handler`) and a docstring mention are both skipped —
- *  only declarations are collected. */
+ *  leading token of its result type. Comments and docstrings come out first (prose may begin a line with
+ *  `request `, and one did), and what is left is anchored at column 0, so a handler IMPLEMENTATION
+ *  (`request throw(…) -> never { … }`, always indented inside a `use handler`) is skipped too — only
+ *  declarations are collected. */
 function stdlibRequests(): Map<string, string | null> {
   const requests = new Map<string, string | null>();
   for (const relativePath of stdlibRelativePaths()) {
     const module = moduleNameOf(relativePath);
-    const source = readFileSync(new URL(relativePath, stdlibDirectory), "utf8");
+    const source = withoutCommentsAndDocstrings(
+      readFileSync(new URL(relativePath, stdlibDirectory), "utf8"),
+    );
     for (const match of source.matchAll(/^request ([A-Za-z0-9_]+)/gm)) {
       const name = match[1];
       if (name === undefined || match.index === undefined) continue;

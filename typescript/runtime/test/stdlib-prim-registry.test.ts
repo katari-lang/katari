@@ -20,6 +20,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
+import { withoutCommentsAndDocstrings } from "./katari-source.js";
 
 const repoRoot = new URL("../../../", import.meta.url);
 const stdlibDir = new URL("haskell/compiler/stdlib/", repoRoot);
@@ -36,15 +37,17 @@ function captures(text: string, pattern: RegExp): string[] {
   return [...text.matchAll(pattern)].flatMap((match) => (match[1] === undefined ? [] : [match[1]]));
 }
 
-/** Every `primitive agent NAME` declared across the stdlib, as its fully qualified `prelude.…` name. */
+/** Every `primitive agent NAME` declared across the stdlib, as its fully qualified `prelude.…` name.
+ *  Comments and docstrings come out first (prose may begin a line with `primitive agent `), and what is
+ *  left is anchored at column 0 — a top-level declaration is the only thing that can start a line there. */
 function stdlibPrimitiveNames(): Set<string> {
   const names = new Set<string>();
   const subModulePaths = readdirSync(new URL("prelude/", stdlibDir)).map((name) => `prelude/${name}`);
   const relativePaths = ["prelude.ktr", ...subModulePaths].filter((path) => path.endsWith(".ktr"));
   for (const relativePath of relativePaths) {
     const module = moduleNameOf(relativePath);
-    const source = readFileSync(new URL(relativePath, stdlibDir), "utf8");
-    for (const name of captures(source, /primitive agent ([A-Za-z0-9_]+)/g)) {
+    const source = withoutCommentsAndDocstrings(readFileSync(new URL(relativePath, stdlibDir), "utf8"));
+    for (const name of captures(source, /^primitive agent ([A-Za-z0-9_]+)/gm)) {
       names.add(`${module}.${name}`);
     }
   }
