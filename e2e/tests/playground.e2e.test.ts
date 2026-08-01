@@ -228,7 +228,7 @@ test("playground.basics.main: data/match, for, parallel for, handlers, prelude",
 
 test("playground.store.guarded_names: safe_segment answers a value, an unsafe scope path panics", async () => {
   // The two halves of the store's name defence, end to end. `safe_segment` canonicalises (trimmed and
-  // lower-cased) or answers `null` — an outcome the app renders. `store.scope` on a path that is not
+  // lower-cased) or answers `null` — an outcome the app renders. `store.workspace` on a path that is not
   // made of such segments is a DEFECT and takes the runtime's own failure channel instead, which the
   // ambient `panic` clause catches here only to prove it fired.
   const { stdout } = await katari(["run", "playground.store.guarded_names", "--project", "playground"]);
@@ -238,8 +238,8 @@ test("playground.store.guarded_names: safe_segment answers a value, an unsafe sc
 });
 
 test("playground.store.main_root: an uninstalled store.exclusive is served by the runtime as the project-wide root domain", async () => {
-  // Scenario 19 — the root-served serial domain. `main_root` performs `store.modify` (which rides
-  // `store.exclusive`) with NO workspace / serialize installed, so the escalation reaches the run root
+  // Scenario 19 — the root-served serial domain. `main_root` performs a `store.exclusive`
+  // read-modify-write with NO workspace installed, so the escalation reaches the run root
   // and the runtime runs the critical section itself, against project-root keys, in the project-wide
   // durable FIFO. Two consecutive runs see the counter advance — the section really ran, atomically,
   // and its answer crossed back into the program.
@@ -325,11 +325,14 @@ test("playground.mcp_demo.main: the built-in MCP client mints the server's tools
   }
 });
 
-test("playground.errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {
+test("playground.errors.main: typed throw caught by handler AND by value, panic caught, missing-secret fallback", async () => {
   const { stdout } = await katari(["run", "playground.errors.main", "--project", "playground"]);
   // The caught payload names ITSELF: `reflection.constructor_of` reads the value's own constructor
   // tag, which is the identity a handler holding an `unknown` has when it cannot name the type.
   expect(stdout).toContain("playground.errors.not_even: 7 is odd — no half");
+  // The same failure met the OTHER way: `prelude.catch` folds the throw into the result, so the payload
+  // arrives as an ordinary union member rather than through a handler's `break`.
+  expect(stdout).toContain("9 is odd — no half");
   expect(stdout).toContain("half=6");
   expect(stdout).toContain("panic caught: division by zero");
   expect(stdout).toContain("no secret under playground.no_such_key");
@@ -337,13 +340,13 @@ test("playground.errors.main: typed throw caught, panic caught, missing-secret f
 
 test("playground.time.civil_labels: the civil renders are exact arithmetic over a fixed instant", async () => {
   // No clock is read, so the whole line is deterministic: the stamp joins date / weekday / time /
-  // offset, `add_days` advances the same `YYYY-MM-DD` shape (noon-anchored, so a DST step cannot move
-  // the answer onto the neighbouring date), an impossible date is `null` rather than a clamped one, and
-  // a half-hour zone renders its minutes.
+  // offset; a week on is CIVIL ARITHMETIC (fields out, `day + 7`, fields back) rather than a date
+  // algebra over the label; an out-of-range field normalises through `from_civil` (February 30th is
+  // March 2nd) instead of answering null; and a half-hour zone renders its minutes.
   const { stdout } = await katari(["run", "playground.time.civil_labels", "--project", "playground"]);
   expect(stdout).toContain("2026-07-26 (Sun) 14:32 +09:00");
   expect(stdout).toContain("next week=2026-08-02");
-  expect(stdout).toContain("(no such date)");
+  expect(stdout).toContain("2026-02-30 normalizes to 2026-03-02");
   expect(stdout).toContain("half-hour zone=-05:30");
 });
 
