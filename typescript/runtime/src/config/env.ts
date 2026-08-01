@@ -111,14 +111,17 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(64 * 1024 * 1024),
-  /** The ceiling on an ordinary `/api` request body, and the (larger) one for a file upload. Unbounded
-   *  reads are a trivial memory-exhaustion vector: a deploy buffers its body roughly three times over
-   *  (raw text, the screening parse, the validator's), and an upload is buffered whole. */
+  /** The ceiling on an ordinary `/api` request body, and the one for a file upload. Unbounded reads
+   *  are a trivial memory-exhaustion vector: a deploy buffers its body roughly three times over
+   *  (raw text, the screening parse, the validator's), and an upload is buffered whole. The default is
+   *  sized to a real deploy — a snapshot carries the IR plus every bundled FFI sidecar, which reaches
+   *  tens of megabytes — and the surface is bearer-authenticated, so the cap is about a mistake, not
+   *  an attacker. */
   KATARI_MAX_REQUEST_BYTES: z.coerce
     .number()
     .int()
     .positive()
-    .default(8 * 1024 * 1024),
+    .default(64 * 1024 * 1024),
   KATARI_MAX_UPLOAD_BYTES: z.coerce
     .number()
     .int()

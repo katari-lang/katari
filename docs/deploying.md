@@ -104,7 +104,7 @@ blob bucket), and set `HttpPutResponseHopLimit: 1` with IMDSv2 required on EC2-b
 | `KATARI_PUBLIC_URL` | — | **Required** under `NODE_ENV=production`. The outside address `webhook.inbound` mints its URLs under. |
 | `CORS_ORIGIN` | `*` | Pin it to the console's origin. Harmless as a wildcard (auth is a header, not a cookie) but there is no reason to leave it open. |
 | `KATARI_RATE_LIMIT_PER_MINUTE` | `120` | Per client address, on the unauthenticated capability paths and on failed authentication. |
-| `KATARI_MAX_REQUEST_BYTES` | 8 MiB | Ordinary `/api` bodies. A deploy buffers its body about three times over. |
+| `KATARI_MAX_REQUEST_BYTES` | 64 MiB | Ordinary `/api` bodies — a deploy's snapshot (IR plus bundled sidecars) arrives as one. Buffered about three times over. |
 | `KATARI_MAX_UPLOAD_BYTES` | 64 MiB | File uploads. |
 | `KATARI_HTTP_TIMEOUT_MS` | 300000 | Ceiling on one `http.fetch`. |
 | `KATARI_HTTP_MAX_RESPONSE_BYTES` | 64 MiB | Ceiling on one response body. |
