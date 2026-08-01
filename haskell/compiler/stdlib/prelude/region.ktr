@@ -22,8 +22,19 @@
 // `Scope` it drags along has nowhere to be discharged, so there is no live nursery to address it
 // against — a type error at the use site. A scope marker is a phantom (it names no operation, is never performed and never handled,
 // and vanishes at lowering); `scope` is the built-in one, but — exactly as `mcp` advises — DECLARE
-// ONE MARKER PER NURSERY when you nest them, so two regions' fibers never share a scope and a fiber
-// from one can never be `cancel`led in the other.
+// ONE MARKER PER NURSERY when you nest them, so two regions' scopes never MERGE: a distinct marker is
+// what keeps a nursery's handle unusable outside the `provide` that opened it, where ONE shared marker
+// lets a handle whose own `provide` has already returned stay well-typed inside the other's extent.
+//
+// WHAT THE MARKER DOES NOT GATE: THE IDS. The scope gates the OPERATIONS, not the data they carry.
+// `cancel_by_id` addresses a fiber by a `string`, and a fiber id is DATA a program legitimately holds
+// from anywhere — another nursery's `roster`, a `crashed` / `failed` event, a store round-trip, a
+// model-facing stop tool — so no type could tell a foreign id from a native one, and none tries. The
+// isolation of one nursery's fibers from another's is the RUNTIME's here, and it is exact: each
+// `provide` mints a RANDOM scope identity, and every operation routes against THAT scope's own running
+// set alone. So a cancel aimed at another nursery's fiber fails CLOSED — the id matches nothing in the
+// nursery it was addressed to and comes back as the ordinary `unknown_fiber` outcome, which the caller
+// renders. Not a compile error, and not a silent crossing either.
 //
 // THE SCOPE IDENTITY lives in the marker NAME, not in any runtime value. `provide` is generic over the
 // marker it discharges, and DISCHARGE IS PROVIDE'S ALONE — only `provide` opens the nursery, so a
@@ -205,8 +216,11 @@ An id rather than a handle because an id is DATA: it survives a store round-trip
 model-facing stop tool, and needs no live handle threaded through the program that holds it. A live fiber is
 cancelled and confirmed (`cancelled`); an id matching no running fiber of THIS nursery — settled,
 already cancelled, or never real — comes back as `unknown_fiber`, a value to render, not a panic
-(ids are often model-supplied, so a stale id is anticipated input). Scope-gated (`with Scope`):
-callable only inside the opening `provide`."
+(ids are often model-supplied, so a stale id is anticipated input). AN ID MINTED BY ANOTHER NURSERY IS
+EXACTLY SUCH A MISS: routing is per nursery scope, so a foreign id matches nothing in this one's
+running set and answers `unknown_fiber` — a cross-nursery cancel fails closed at runtime rather than
+being rejected by the type (the id is a `string`, and nothing about a `string` names its nursery).
+Scope-gated (`with Scope`): callable only inside the opening `provide`."
 external agent cancel_by_id[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
   @"The runtime-minted fiber id to tear down." id: string,

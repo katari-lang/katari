@@ -1685,9 +1685,19 @@ spec = do
   -- marker discipline as `mcp.provide`. `provide` opens the nursery and discharges its scope marker;
   -- `fork` spawns a child bounded by the ceiling `E`, applied to the whole argument record of the call it
   -- defers; `cancel_by_id` stops one by the id the runtime minted; `watch` re-emits the fibers'
-  -- escalations as `E`. Two soundness properties are checked end to end: every operation is gated on the
-  -- nursery's scope marker, which the handle pins INVARIANTLY (so two distinct markers do not merge into a
-  -- union), and a child's effect may not exceed the ceiling.
+  -- escalations as `E`. Three properties are checked here, and they are the three the TYPES own: every
+  -- operation is gated on the nursery's scope marker, which the handle pins INVARIANTLY (so a handle
+  -- cannot leave the `provide` that opened it), a child's effect may not exceed the ceiling, and `watch`
+  -- re-emits the two ending events, so covering them is a compile-time obligation.
+  --
+  -- WHAT THESE TESTS DELIBERATELY DO NOT COVER, since `cancel` by handle gave way to `cancel_by_id`:
+  -- addressing ANOTHER nursery's fiber. The old by-handle entry point carried `fiber[Scope]`, so a
+  -- foreign handle was a type error; an id is a bare `string` a program legitimately holds from a
+  -- `roster`, a `crashed` / `failed` event or a store round-trip, so nothing in the type names its
+  -- nursery and no marker discipline can reject one. That isolation is the RUNTIME's — each `provide`
+  -- mints a random scope and every operation routes against that scope's own running set, so a foreign
+  -- id answers `unknown_fiber` — and it is pinned in `region-reactor.test.ts` ("cancel_by_id with an id
+  -- matching no running fiber answers unknown_fiber(id), not an error"), not here.
   describe "region (structured concurrency nursery)" $ do
     let botEvents =
           "request on_message(source: string, msg: string) -> null\n"
@@ -1772,28 +1782,6 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
-    it "rejects forking a task whose effect exceeds the nursery's ceiling (K3001)" $
-      -- The ceiling is an upper bound on EVERY fiber, and it is what makes `watch` a total obligation:
-      -- a child raising something the ceiling does not name could surface at a watch whose handler was
-      -- checked against the ceiling alone. (Throws are the one documented exception — `fork`'s task row
-      -- widens by `prelude.throw[unknown]`, since the boundary traps them as `failed`.)
-      compiledCodes
-        ( tickWorker
-            <> "request shout(text: string) -> null\n"
-            <> "agent loud(label: string) -> null with shout {\n  let a = shout(text = label)\n  null\n}\n"
-            <> "agent bot() -> never with io {\n"
-            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
-            <> "  use handler {\n"
-            <> "    request tick() -> null { null }\n"
-            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
-            <> "    request region.failed(id: string, name: string, error: unknown) -> null { null }\n"
-            <> "  }\n"
-            <> "  let f = region.fork(nursery = r, task = loud, argument = { label = \"a\" })\n"
-            <> "  region.watch(nursery = r)\n"
-            <> "}"
-        )
-        `shouldContain` ["K3001"]
-
     it "forks a THROWING task under a throw-free ceiling: `fork` widens its task row by prelude.throw[unknown]" $
       -- The ceiling is `io` alone — no throw anywhere in it — yet a task that raises
       -- `prelude.throw[boom] | io` still forks, because `fork`'s task parameter is declared
@@ -1821,6 +1809,11 @@ spec = do
 
     it "rejects forking a child whose effect exceeds the nursery's ceiling E (K3001)" $
       -- The nursery ceiling is `on_message` only; `rogue_watch` also raises `rogue`, which does not fit.
+      -- The ceiling is an upper bound on EVERY fiber, and it is what makes `watch` a total obligation: a
+      -- child raising something the ceiling does not name could surface at a watch whose handler was
+      -- checked against the ceiling alone. (Throws are the one documented exception — the test above
+      -- pins `fork`'s task row widening by `prelude.throw[unknown]`, since the boundary traps them as
+      -- `failed`.)
       compiledCodes
         ( "request on_message(source: string, msg: string) -> null\n"
             <> "request rogue(x: string) -> null\n"
