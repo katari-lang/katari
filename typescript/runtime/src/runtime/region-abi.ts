@@ -1,6 +1,6 @@
 // The region handle ABI: the namespaced marker fields a `nursery[Scope, E]` / `fiber[Scope]` handle
 // carries its identities under. A handle is minted by the region reactor (`actor/region-reactor.ts`) and
-// read back by BOTH sides of the layering — the reactor routes a `fork` / `watch` / `cancel` by them, and
+// read back by BOTH sides of the layering — the reactor routes a `fork` / `watch` / `cancel_by_id` by them, and
 // the `fiber_id` prim (`engine/interop-prims.ts`) reads a fiber's public id straight off the handle with
 // no reactor round-trip. The engine must not import actor code, so the layout cannot live in the reactor;
 // it does not belong in the generic engine either (nothing in the engine's own machinery knows what a

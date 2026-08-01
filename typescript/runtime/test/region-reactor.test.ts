@@ -164,8 +164,8 @@ function forkIr(bodies: {
    *  at its instance root, exercised by the defaults test. Empty for every other fixture. */
   taskDefaults?: Record<string, DefaultValue>;
 }): IRModule {
-  // A `canceller` fiber body (wave 5): defaults to a no-op fiber. The cancel tests override it with a body that
-  // gates on a request then cancels a handle it was forked with (to panic a join parked concurrently).
+  // A second fiber body a test can fork alongside `task`: defaults to a no-op that settles at once (what the
+  // roster test forks as its already-settled fiber), overridable for a fixture that needs two distinct bodies.
   const canceller: Operation[] = bodies.canceller ?? [
     { kind: "loadLiteral", output: 221, value: { kind: "null" } },
     { kind: "exit", target: 22, value: 221 },
@@ -270,15 +270,6 @@ function forkIr(bodies: {
         },
         parameters: { parameter: 170 },
       },
-      // prelude.region.cancel (wave 5): tears one fiber down early, routed by its handle.
-      18: {
-        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
-        parameters: {},
-      },
-      19: {
-        block: { kind: "external", key: "prelude.region.cancel", input: 180, reactor: "region" },
-        parameters: { parameter: 180 },
-      },
       // hold2: a second holding request (distinct from ask_value), so a continuation can hold AFTER a cancel to
       // keep its nursery alive while a test observes the cancelled fiber's instance is gone.
       20: {
@@ -289,8 +280,7 @@ function forkIr(bodies: {
         block: { kind: "request", name: createAgentName("hold2"), input: 200 },
         parameters: { parameter: 200 },
       },
-      // canceller: a fiber body a continuation forks alongside a worker — the parked-join-cancel test overrides
-      // it to gate then cancel the worker's handle (its parameter record carries `{ nursery, handle }`).
+      // canceller: the second fiber body a continuation can fork alongside a worker (see `bodies.canceller`).
       22: {
         block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
@@ -305,7 +295,6 @@ function forkIr(bodies: {
       [createAgentName("prelude.region.provide")]: { block: 2, private: false },
       [createAgentName("prelude.region.fork")]: { block: 4, private: false },
       [createAgentName("fiber_report")]: { block: 14, private: false },
-      [createAgentName("prelude.region.cancel")]: { block: 18, private: false },
       [createAgentName("continuation")]: { block: 6, private: false },
       [createAgentName("ask_value")]: { block: 8, private: false },
       [createAgentName("fiber_ask")]: { block: 10, private: false },
@@ -1427,11 +1416,11 @@ describe("region reactor", () => {
     expect(persistence.outboxSize()).toBe(0);
   });
 
-  test("cancel tears a running fiber's instance down while the nursery stays alive", async () => {
+  test("cancel_by_id tears a running fiber's instance down while the nursery stays alive", async () => {
     // The continuation forks a fiber that BLOCKS on `fiber_ask`, holds on gate1 (so the fiber is provably
-    // running), cancels the fiber, then holds on gate2 (so the provide is still ALIVE while we observe). The
-    // cancelled fiber's core instance is torn down — its live-instance count drops — even though the nursery
-    // did not return: proof the cancel itself (not the provide's teardown) stopped the fiber's execution.
+    // running), cancels the fiber by its id, then holds on gate2 (so the provide is still ALIVE while we
+    // observe). The cancelled fiber's core instance is torn down — its live-instance count drops — even though
+    // the nursery did not return: proof the cancel itself (not the provide's teardown) stopped the fiber.
     const persistence = new StoringPersistence();
     const forkGate1CancelGate2: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
@@ -1453,6 +1442,8 @@ describe("region reactor", () => {
         argument: 64,
         output: 65,
       },
+      // The fiber's id, read off the returned handle — the same field `fiber_id` reads.
+      { kind: "getField", source: 65, field: "$katari_region_fiber", output: 72 },
       // gate1: hold while the worker fiber is running, so the test can sample the live-instance count WITH it.
       { kind: "makeRecord", entries: [], output: 66 },
       {
@@ -1466,13 +1457,13 @@ describe("region reactor", () => {
         kind: "makeRecord",
         entries: [
           ["nursery", 61],
-          ["handle", 65],
+          ["id", 72],
         ],
         output: 68,
       },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
         argument: 68,
         output: 69,
       },
@@ -1487,7 +1478,7 @@ describe("region reactor", () => {
       { kind: "exit", target: 6, value: 71 },
     ];
     const actor = makeActor(
-      forkIr({ continuation: forkGate1CancelGate2, task: askingTask }),
+      withRegistryAgents(forkIr({ continuation: forkGate1CancelGate2, task: askingTask })),
       persistence,
     );
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -1503,8 +1494,8 @@ describe("region reactor", () => {
     });
     const withFiber = persistence.instanceCount();
 
-    // Release gate1: the continuation cancels the worker, then holds on gate2. The cancel settles `null` only
-    // after the fiber's teardown confirms, so by the time gate2 is up the fiber's instance is gone.
+    // Release gate1: the continuation cancels the worker, then holds on gate2. The cancel settles its
+    // `cancelled(id)` only after the fiber's teardown confirms, so by the time gate2 is up the instance is gone.
     await actor.answerEscalation(gate1.escalation, { kind: "null" });
     await waitUntil(() =>
       actor.listOpenEscalations().find((open) => open.request === createAgentName("hold2")),
@@ -1531,11 +1522,13 @@ describe("region reactor", () => {
     await expect(result).resolves.toEqual({ kind: "string", value: "done" });
   });
 
-  test("cancelling an already-settled fiber is an idempotent no-op that still succeeds", async () => {
+  test("cancelling a REAL fiber that has already settled answers unknown_fiber(id), not a failure", async () => {
     // The continuation forks a fiber that settles AT ONCE (escalating nothing, so it retires with no watch to
-    // service it), holds until the fiber has retired, then cancels the now-settled fiber. The cancel finds
-    // nothing running — an idempotent no-op — yet still succeeds with `null`, and the continuation returns a
-    // constant the run resolves with.
+    // service it), holds until the fiber has retired, then cancels that fiber by the id its own fork minted.
+    // The cancel finds nothing running, and — an id being data, not a capability — answers with the typed
+    // `unknown_fiber(id)` miss rather than failing: cancelling something already gone is SAFE. This is the
+    // once-real-but-settled half of the miss (the made-up-id half is covered below), so the id it carries is
+    // the runtime's own.
     const persistence = new StoringPersistence();
     const forkHoldCancelReturn: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
@@ -1557,6 +1550,7 @@ describe("region reactor", () => {
         argument: 64,
         output: 65,
       },
+      { kind: "getField", source: 65, field: "$katari_region_fiber", output: 72 },
       { kind: "makeRecord", entries: [], output: 66 },
       {
         kind: "delegate",
@@ -1568,21 +1562,20 @@ describe("region reactor", () => {
         kind: "makeRecord",
         entries: [
           ["nursery", 61],
-          ["handle", 65],
+          ["id", 72],
         ],
         output: 68,
       },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
         argument: 68,
         output: 69,
       },
-      { kind: "loadLiteral", output: 70, value: { kind: "string", value: "cancel-noop" } },
-      { kind: "exit", target: 6, value: 70 },
+      { kind: "exit", target: 6, value: 69 },
     ];
     const actor = makeActor(
-      forkIr({ continuation: forkHoldCancelReturn, task: settlingTask }),
+      withRegistryAgents(forkIr({ continuation: forkHoldCancelReturn, task: settlingTask })),
       persistence,
     );
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -1598,52 +1591,54 @@ describe("region reactor", () => {
     });
     await actor.answerEscalation(hold.escalation, { kind: "null" });
 
-    await expect(result).resolves.toEqual({ kind: "string", value: "cancel-noop" });
+    const value = await result;
+    if (value.kind !== "record") throw new Error("expected a cancel_outcome data value");
+    expect(value.ctor).toBe(createAgentName("prelude.region.unknown_fiber"));
+    // The id is the runtime's OWN — the settled fiber really existed, and the miss names it.
+    const id = value.fields.id;
+    if (id?.kind !== "string") throw new Error("unknown_fiber must carry a string id");
+    expect(id.value).toMatch(/^fiber:/);
     const done = await waitUntil(() => {
       const record = persistence.peekRun(run);
       return record?.state === "done" ? record : undefined;
     });
-    expect(done.result).toEqual({ kind: "string", value: "cancel-noop" });
+    expect(done.result).toEqual(value);
     expect(persistence.instanceCount()).toBe(0);
     expect(persistence.scopeCount()).toBe(0);
     expect(persistence.envelopeCount("region")).toBe(0);
     expect(persistence.outboxSize()).toBe(0);
   });
 
-  test("cancelling a forged fiber handle (an unknown scope) panics", async () => {
-    // The `cancel` twin of the forged-join case: a forged handle whose scope names no live nursery is refused
-    // as a panic, automatically rejecting the hostile-wire handle.
+  test("cancelling through a forged NURSERY handle (an unknown scope) panics", async () => {
+    // The two arguments of a cancel are gated differently, and this is the capability half: the NURSERY handle
+    // pins the call to a live scope, so a forged one — its random scope matching nothing — is an
+    // engine-invariant break refused as a panic, exactly like a forged `fork` / `watch` / `roster`. (The id
+    // half is data, and a miss there is the `unknown_fiber` value above, not a panic.)
     const cancelForged: Operation[] = [
-      { kind: "getField", source: 60, field: "value", output: 61 },
-      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "loadLiteral", output: 61, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "makeRecord", entries: [["$katari_region_scope", 61]], output: 62 },
       { kind: "loadLiteral", output: 63, value: { kind: "string", value: "fiber:forged" } },
       {
         kind: "makeRecord",
         entries: [
-          ["$katari_region_scope", 62],
-          ["$katari_region_fiber", 63],
+          ["nursery", 62],
+          ["id", 63],
         ],
         output: 64,
       },
       {
-        kind: "makeRecord",
-        entries: [
-          ["nursery", 61],
-          ["handle", 64],
-        ],
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
+        argument: 64,
         output: 65,
       },
-      {
-        kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
-        argument: 65,
-        output: 66,
-      },
-      { kind: "exit", target: 6, value: 66 },
+      { kind: "exit", target: 6, value: 65 },
     ];
-    const actor = makeActor(forkIr({ continuation: cancelForged, task: returningTask }));
+    const actor = makeActor(
+      withRegistryAgents(forkIr({ continuation: cancelForged, task: returningTask })),
+    );
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
-    await expect(result).rejects.toThrow(/region\.cancel.*not cancellable/);
+    await expect(result).rejects.toThrow(/region\.cancel_by_id.*is not live/);
   });
 
   test("watch re-emits a fiber's escalation at the handler installed around it, whose answer returns to the fiber", async () => {
@@ -1796,6 +1791,7 @@ describe("region reactor", () => {
         argument: 152,
         output: 153,
       },
+      { kind: "getField", source: 153, field: "$katari_region_fiber", output: 162 },
       { kind: "makeRecord", entries: [], output: 154 },
       {
         kind: "delegate",
@@ -1807,13 +1803,13 @@ describe("region reactor", () => {
         kind: "makeRecord",
         entries: [
           ["nursery", 61],
-          ["handle", 153],
+          ["id", 162],
         ],
         output: 156,
       },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
         argument: 156,
         output: 157,
       },
@@ -1834,13 +1830,13 @@ describe("region reactor", () => {
       { kind: "exit", target: 14, value: 161 },
     ];
     const ir = withGate(watchIr({ handleBody }));
-    // The cancel wrapper and a second gate (`gate2`) the body pauses on after the cancel.
+    // The cancel-by-id wrapper and a second gate (`gate2`) the body pauses on after the cancel.
     ir.blocks[30] = {
       block: { kind: "agent", body: 31, schema: EMPTY_SCHEMA, description: "", defaults: {} },
       parameters: {},
     };
     ir.blocks[31] = {
-      block: { kind: "external", key: "prelude.region.cancel", input: 300, reactor: "region" },
+      block: { kind: "external", key: "prelude.region.cancel_by_id", input: 300, reactor: "region" },
       parameters: { parameter: 300 },
     };
     ir.blocks[32] = {
@@ -1851,7 +1847,7 @@ describe("region reactor", () => {
       block: { kind: "request", name: createAgentName("gate2"), input: 320 },
       parameters: { parameter: 320 },
     };
-    ir.entries[createAgentName("prelude.region.cancel")] = { block: 30, private: false };
+    ir.entries[createAgentName("prelude.region.cancel_by_id")] = { block: 30, private: false };
     ir.entries[createAgentName("gate2")] = { block: 32, private: false };
 
     const actor = makeActor(ir, persistence);

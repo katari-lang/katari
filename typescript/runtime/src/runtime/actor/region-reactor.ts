@@ -23,16 +23,6 @@
 // `parallel` is the fork-JOIN story, a region is the fork-ESCALATE story — so nothing durable accumulates
 // for fibers nobody awaits, which is exactly what a never-closing resident nursery needs.
 //
-// `cancel` tears ONE fiber down early. Like `fork` it is its OWN call, routed by the fiber HANDLE (its scope
-// names the nursery). It sends a single `terminate` to that fiber's inner delegation — the SINGLE-fiber form
-// of the base's whole-nursery `terminateChildren` cascade — and settles with `null` once the teardown
-// confirms. A cancel
-// of a fiber that has already SETTLED (its outcome buffered) or is otherwise gone is an idempotent no-op that
-// still succeeds, dropping any buffered outcome so the post-condition ("the fiber is unknown") holds
-// regardless of whether the fiber raced the cancel to completion. A forged / dead-scope handle names no live
-// nursery, so it PANICS — the same engine-invariant backstop as `fork` and `watch`, which also automatically
-// rejects a hostile-wire handle (its random scope matches no live nursery).
-//
 // `watch` is the nursery's WHITE HOLE: it re-emits the fibers' escalations into the enclosing program as the
 // ceiling effect `E`, so a handler installed AROUND the watch (a position that still holds the nursery handle)
 // services the fibers' requests. A fiber's escalation would normally relay UP through its `provide` (the base
@@ -59,9 +49,14 @@
 // THE NURSERY IS THE REGISTRY (the stdlib's `region.ktr` contract): anything that talks ABOUT fibers reads
 // the runtime's own truth, never a Katari-side mirror. `fork` takes an optional NAME tag, recorded durably on
 // the provide's `names` map while the fiber runs; `roster` answers the RUNNING set as `fiber_info(id, name)`
-// data values in fork order, straight off the running map; `cancel_by_id` addresses a fiber by the
-// runtime-minted id (a live one runs the exact `cancel` teardown and answers `cancelled(id)`; a stale id — an
-// anticipated, often model-supplied miss — answers `unknown_fiber(id)`, never a panic); and a fiber's two
+// data values in fork order, straight off the running map; `cancel_by_id` tears ONE fiber down early, by the
+// runtime-minted id — it sends a single `terminate` to that fiber's inner delegation (the SINGLE-fiber form
+// of the base's whole-nursery `terminateChildren` cascade) and is held open until the teardown confirms,
+// answering `cancelled(id)`. A stale id — an anticipated, often model-supplied miss — answers
+// `unknown_fiber(id)` rather than panicking, so the post-condition ("no fiber of this nursery has this id")
+// holds however the fiber went; the NURSERY handle is the capability half of the call, and a forged /
+// dead-scope one PANICS like a `fork` / `watch`, the engine-invariant backstop that automatically rejects a
+// hostile-wire handle (its random scope matches no live nursery). Finally, a fiber's two
 // ABRUPT ENDINGS are intercepted at `onEscalate` and re-emitted as typed events — a PANIC as
 // `crashed(id, name, message)`, an uncaught `prelude.throw` as `failed(id, name, error)`. Both are SYNTHETIC
 // mailbox entries with no child leg (the fiber is over; the runtime tears it down like a cancel, and the
@@ -80,8 +75,8 @@
 // scope and resuming its continuation and running fibers as durable core work — there is no external process,
 // so recovery has nothing to reconcile (like `webhook` / `time`). A `fork` persists its (task + argument)
 // re-dispatch and simply re-spawns on reload: its only effect is opening an internal delegation, so re-running
-// an interrupted one is safe (a committed fork is already gone). A `cancel` persists its (scope + fiber); it,
-// too, has no external effect to reconcile. None of these mint a public capability token (unlike `mcp.serve` /
+// an interrupted one is safe (a committed fork is already gone). A `cancel_by_id` persists its (scope + fiber
+// id); it, too, has no external effect to reconcile. None of these mint a public capability token (unlike `mcp.serve` /
 // `webhook`, a nursery has no inbound URL).
 
 import { randomBytes } from "node:crypto";
@@ -165,7 +160,7 @@ const CONTINUATION_CALL = "continuation";
 
 /** The prefix every fiber's inner-call token (its id) carries, so a fiber token is disjoint from
  *  `CONTINUATION_CALL` and recognisable among a provide's inner-call bridges — which `repopulateRunning`
- *  filters on reload to rebuild the running-fiber set a `cancel` routes against. */
+ *  filters on reload to rebuild the running-fiber set a `cancel_by_id` / `roster` routes against. */
 const FIBER_TOKEN_PREFIX = "fiber:";
 
 /** One fiber escalation waiting in a nursery's mailbox — held until a `watch` re-emits it (a watch-less nursery
@@ -175,7 +170,7 @@ const FIBER_TOKEN_PREFIX = "fiber:";
  *  rather than dangling in-transit. */
 interface MailboxEntry {
   /** The fiber's own delegation — the leg an answer descends to (via the relay `relayAskUnder` opens), and the
-   *  key a `cancel` drops a fiber's not-yet-emitted escalations by. `null` marks a SYNTHETIC entry — a
+   *  key a `cancel_by_id` drops a fiber's not-yet-emitted escalations by. `null` marks a SYNTHETIC entry — a
    *  runtime-authored ending event (`crashed` / `failed`) whose fiber is already over, so there is no leg to
    *  answer: its
    *  re-emission relays under fresh ids that name no live delegation, and the base's moot-answer guard
@@ -191,27 +186,17 @@ interface MailboxEntry {
 /** What a region call holds, a sum every lifecycle method dispatches once: a `provide` scope (its scope id +
  *  the not-yet-dispatched continuation + the mailbox + the running fibers' name tags — persisted, so the
  *  scope survives a restart), a `fork` (the task + argument + name it spawns a fiber from — persisted, so an
- *  interrupted fork re-spawns), a `cancel` (the scope + fiber id it tears down, read from the handle —
- *  persisted, so an interrupted cancel re-runs its idempotent teardown), a `cancel_by_id` (the scope + the
- *  data-addressed fiber id — persisted the same way), a `roster` (the scope whose running set it reads — a
- *  pure read, re-completable after a restart), a `watch` (the scope whose fibers' escalations it re-emits,
- *  read from the handle — held open, never settling), or an `operation` — an unknown dispatch key (compiler /
- *  wire drift), which fails the call with a clear completion. */
+ *  interrupted fork re-spawns), a `cancel_by_id` (the scope it is gated by + the data-addressed fiber id it
+ *  tears down — persisted, so an interrupted cancel re-runs its idempotent teardown), a `roster` (the scope
+ *  whose running set it reads — a pure read, re-completable after a restart), a `watch` (the scope whose
+ *  fibers' escalations it re-emits, read from the handle — held open, never settling), or an `operation` — an
+ *  unknown dispatch key (compiler / wire drift), which fails the call with a clear completion. */
 type RegionPayload =
-  | {
-      kind: "cancel";
-      /** The nursery scope and fiber id the cancel tears down, read from the fiber HANDLE (its own scope names
-       *  the nursery that spawned it). Either is `null` when the handle was malformed — an
-       *  uncancellable fiber, refused as a panic. Persisted, so a cancel interrupted before its teardown
-       *  confirmed re-runs identically after a restart (a re-sent terminate is idempotent). */
-      scope: string | null;
-      fiber: string | null;
-    }
   | {
       kind: "cancel_by_id";
       /** The nursery scope, read from the NURSERY handle (a dead / forged one is an invariant break, refused
-       *  as a panic — unlike the id, which is anticipated data). Persisted like a `cancel`, so an interrupted
-       *  teardown re-runs idempotently after a restart. */
+       *  as a panic — unlike the id, which is anticipated data). Persisted, so an interrupted teardown
+       *  re-runs idempotently after a restart (a re-sent terminate is a no-op). */
       scope: string | null;
       /** The runtime-minted fiber id to tear down, read from the plain `id` argument (`null` when it was not
        *  a string — folded into the unknown-id miss, since ids are data, not capabilities). */
@@ -299,7 +284,6 @@ export type RegionExtension =
       argument: Value | null;
       name: string;
     }
-  | { kind: "cancel"; scopeId: string | null; fiberId: string | null }
   | { kind: "cancel_by_id"; scopeId: string | null; fiberId: string | null }
   | { kind: "roster"; scopeId: string | null }
   | {
@@ -336,8 +320,6 @@ export function encodeRegionExtension(extension: RegionExtension): Json {
         argument: asJson(extension.argument),
         name: extension.name,
       };
-    case "cancel":
-      return { kind: "cancel", scopeId: extension.scopeId, fiberId: extension.fiberId };
     case "cancel_by_id":
       return { kind: "cancel_by_id", scopeId: extension.scopeId, fiberId: extension.fiberId };
     case "roster":
@@ -381,12 +363,6 @@ export function decodeRegionExtension(extension: Json): RegionExtension {
         name: typeof name === "string" ? name : "",
       };
     }
-    case "cancel":
-      return {
-        kind: "cancel",
-        scopeId: warmFieldOf<string | null>(document, "scopeId"),
-        fiberId: warmFieldOf<string | null>(document, "fiberId"),
-      };
     case "cancel_by_id":
       return {
         kind: "cancel_by_id",
@@ -429,7 +405,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** The live provide scopes, by their identity: the provide call each opened (a `fork` opens its fiber as an
    *  inner delegation of THIS call), and that nursery's RUNNING fibers (their inner-delegation ids, so a later
-   *  `cancel` finds them). Registered at dispatch / reload of a running provide, released at drop —
+   *  `cancel_by_id` finds them). Registered at dispatch / reload of a running provide, released at drop —
    *  `fork` checks membership here (the requires-a-live-provide gate). A SETTLED fiber lives nowhere: it is
    *  retired on the spot and its `null` outcome discarded (results ride escalations); the running map is
    *  in-memory routing whose durable twin is the base inner-call bridges. */
@@ -439,7 +415,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  until the terminate this reactor sent to the fiber's inner delegation confirms (its `cancelled` outcome
    *  lands in `retireFiber`, which settles the cancel with `null`). In-memory only (like `mcp`'s served-call
    *  waiters): the durable twin is the cancel's own row plus the fiber's inner-call bridge, so a restart
-   *  re-parks it by re-running `startCancel` in `recover` against the reloaded running-fiber set (a re-sent
+   *  re-parks it by re-running `startCancelById` in `recover` against the reloaded running-fiber set (a re-sent
    *  terminate is idempotent). */
   private readonly cancelWaiters = new Map<string, DelegationId>();
 
@@ -475,7 +451,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   /** Register a provide's scope as live, mapping it to the provide call that opened it (the parent a `fork`
    *  spawns its fiber under). Called at a fresh dispatch and at every reload of a running provide, so a `fork`
    *  finds its nursery. `openScope` itself starts with an empty running-fiber set; on a reload `recover`
-   *  rebuilds it at once from the durable inner-call bridges (`repopulateRunning`), so a `cancel` can route to a
+   *  rebuilds it at once from the durable inner-call bridges (`repopulateRunning`), so a `cancel_by_id` can route to a
    *  fiber that outlived the restart. A fiber that settles after the reload is buffered on-demand regardless. */
   private openScope(scope: string, provide: DelegationId): void {
     this.scopes.set(scope, { provide, running: new Map() });
@@ -585,13 +561,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       this.schedule(() => this.startFork(delegation));
       return;
     }
-    if (payload.kind === "cancel") {
-      // Sending the fiber's terminate is a `send`, which must happen inside a turn — hand it back to the loop.
-      this.schedule(() => this.startCancel(delegation));
-      return;
-    }
     if (payload.kind === "cancel_by_id") {
-      // The id-addressed cancel shares the terminate path, so it too re-enters the loop for its `send`s.
+      // Sending the fiber's terminate is a `send`, which must happen inside a turn — hand it back to the loop.
       this.schedule(() => this.startCancelById(delegation));
       return;
     }
@@ -809,51 +780,13 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     });
   }
 
-  /** Tear ONE fiber down early (a reactor turn). Route on the handle's scope + fiber id: a live fiber has its
-   *  inner delegation terminated (the single-fiber form of the provide's cancel cascade) and the cancel is held
-   *  open until that teardown confirms; a fiber already SETTLED or gone is an idempotent no-op that still
-   *  succeeds. A handle whose
-   *  scope is not a live nursery — a forged / hostile-wire handle (its random scope matches nothing) or a dead
-   *  scope — PANICS (the checker pins the handle's scope to a live nursery, so this is an engine-invariant
-   *  break; `cancel` declares no throw and region has no error sum, the same backstop as `fork`). */
-  private startCancel(delegation: DelegationId): void {
-    const payload = this.payloadOf(delegation);
-    if (payload === undefined || payload.kind !== "cancel") return; // resolved / cancelled meanwhile
-    const { scope, fiber } = payload;
-    const scopeState = scope === null ? undefined : this.scopes.get(scope);
-    if (scope === null || fiber === null || scopeState === undefined) {
-      this.panicUncancellableFiber(delegation, fiber);
-      return;
-    }
-    const running = scopeState.running.get(fiber);
-    if (running !== undefined) {
-      // A cancel is already tearing this fiber down (a concurrent double-cancel — two fibers sharing the
-      // handle): the fiber is already going, so this one is idempotently redundant. Succeed at once without
-      // disturbing the first cancel's waiter, which settles when the teardown confirms (overwriting it would
-      // orphan the first cancel, hanging it until the nursery drops).
-      if (this.cancelWaiters.has(fiber)) {
-        this.settleCancel(delegation);
-        return;
-      }
-      // A live fiber: terminate its inner delegation and hold this cancel open until the teardown confirms
-      // in `retireFiber`.
-      // Drop this fiber's not-yet-emitted escalations so a watch never re-emits a cancelled fiber's requests.
-      this.dropFiberMailbox(scopeState.provide, running);
-      this.cancelWaiters.set(fiber, delegation);
-      this.terminateFiber(scopeState.provide, running);
-      return;
-    }
-    // Not running: the fiber already settled (retired, its outcome discarded) or was already cancelled.
-    // A cancel is idempotent — succeed with `null`.
-    this.settleCancel(delegation);
-  }
-
-  /** Tear down the fiber the runtime knows by ID (a reactor turn) — the data-addressed form of `cancel`, for
-   *  callers whose currency is ids rather than held handles. The NURSERY handle still gates: a dead / forged
-   *  scope is an invariant break, refused as a panic like `watch` / `fork`. The id, by contrast, is
-   *  anticipated input (often model-supplied): one matching no running fiber answers with the
-   *  `unknown_fiber` outcome, and a live one runs exactly the `cancel` teardown, settling with `cancelled`
-   *  once the teardown confirms in `retireFiber`. A fiber another cancel is already tearing down completes
+  /** Tear ONE fiber down early, by the id the runtime minted (a reactor turn) — the only way to stop a single
+   *  fiber, since a fiber handle is identity only. The NURSERY handle gates: a dead / forged scope is an
+   *  engine-invariant break (the checker pins the handle's scope to a live nursery), refused as a panic like
+   *  `watch` / `fork`. The id, by contrast, is anticipated input (often model-supplied): one matching no
+   *  running fiber answers with the `unknown_fiber` outcome, and a live one has its inner delegation
+   *  terminated (the single-fiber form of the provide's cancel cascade), settling with `cancelled` once the
+   *  teardown confirms in `retireFiber`. A fiber another cancel is already tearing down completes
    *  at once with `cancelled` — the fiber is going either way, and waiting would only race the first
    *  cancel's waiter. */
   private startCancelById(delegation: DelegationId): void {
@@ -880,8 +813,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       this.completeWithOutcome(delegation, CANCELLED_CONSTRUCTOR, fiber);
       return;
     }
-    // The live-fiber path is byte-for-byte the plain cancel's: drop the fiber's queued escalations, park
-    // this call as the teardown's waiter, terminate the inner delegation.
+    // A live fiber: drop its not-yet-emitted escalations (so a watch never re-emits a cancelled fiber's
+    // requests), park this call as the teardown's waiter, and terminate its inner delegation.
     this.dropFiberMailbox(scopeState.provide, running);
     this.cancelWaiters.set(fiber, delegation);
     this.terminateFiber(scopeState.provide, running);
@@ -964,24 +897,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     });
   }
 
-  /** Settle a cancel with `null` (its declared result) once the fiber it targeted is gone. */
-  private settleCancel(delegation: DelegationId): void {
-    this.complete({ delegation, outcome: { kind: "result", value: null } });
-  }
-
-  /** Fail a cancel whose handle names no live nursery scope (malformed / forged, or a dead scope) as a panic —
-   *  the engine-invariant backstop, and the automatic rejection of a hostile-wire
-   *  handle whose random scope matches nothing. */
-  private panicUncancellableFiber(delegation: DelegationId, fiber: string | null): void {
-    this.complete({
-      delegation,
-      outcome: {
-        kind: "error",
-        message: `region.cancel: the fiber ${fiber ?? "(malformed handle)"} is not cancellable; its handle names no live nursery scope (a forged handle, or its region.provide has returned)`,
-      },
-    });
-  }
-
   /** A settled inner delegation. The CONTINUATION is the whole provide call — feed its outcome back as the
    *  completion on a fresh turn (values lower to the completion's wire Json and decode back at the base,
    *  `reveal` so content survives the internal round-trip). Every other token is a FIBER's settlement:
@@ -999,9 +914,9 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     this.schedule(() => this.retireFiber(delivery.delegation, delivery.call));
   }
 
-  /** A settled fiber, on a fresh turn: RETIRE it. A CANCEL awaiting this fiber's teardown settles — whether
-   *  the outcome is the terminate's `cancelled` or a `result` the fiber raced to before the terminate landed,
-   *  the fiber is gone either way. The outcome itself is DISCARDED unconditionally: there is no `join`, tasks
+  /** A settled fiber, on a fresh turn: RETIRE it. A CANCEL awaiting this fiber's teardown settles with its
+   *  `cancelled(id)` — whether the outcome is the terminate's `cancelled` or a `result` the fiber raced to
+   *  before the terminate landed, the fiber is gone either way. The outcome itself is DISCARDED unconditionally: there is no `join`, tasks
    *  are `-> null` (the stdlib's fork pins it), so a settled value carries nothing — results ride the fiber's
    *  escalations, delivered before it could end. Nothing durable remains of a finished fiber, which is what a
    *  never-closing resident nursery needs. (A stale-IR fiber that somehow settles with a resource-carrying
@@ -1020,19 +935,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     const cancelling = this.cancelWaiters.get(fiber);
     if (cancelling !== undefined) {
       this.cancelWaiters.delete(fiber);
-      this.settleCancelWaiter(cancelling, fiber);
+      this.completeWithOutcome(cancelling, CANCELLED_CONSTRUCTOR, fiber);
     }
-  }
-
-  /** Settle a confirmed teardown's waiting cancel according to ITS OWN call shape: a plain `cancel` declares
-   *  `null` (unchanged), while an id-addressed `cancel_by_id` declares the `cancelled` outcome naming the
-   *  fiber — the one place the two cancel forms diverge. */
-  private settleCancelWaiter(delegation: DelegationId, fiber: string): void {
-    if (this.payloadOf(delegation)?.kind === "cancel_by_id") {
-      this.completeWithOutcome(delegation, CANCELLED_CONSTRUCTOR, fiber);
-      return;
-    }
-    this.settleCancel(delegation);
   }
 
   // ─── watch: the white hole (fiber escalations re-emitted at the watch's position) ─────────────────
@@ -1041,7 +945,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  a white hole of its scope, then drain any escalations the mailbox is already holding (the ones that beat
    *  the watch's registration — the durable backlog buffered until this moment). The call is
    *  HELD OPEN — never completed here, since `watch` returns `never` (it only ever re-emits). A dead / forged
-   *  scope is refused as a panic, the same requires-a-live-provide backstop as `fork` / `cancel`. */
+   *  scope is refused as a panic, the same requires-a-live-provide backstop as `fork` / `cancel_by_id`. */
   private startWatch(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined || payload.kind !== "watch") return; // resolved / cancelled meanwhile
@@ -1109,7 +1013,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** A fiber ENDED ABRUPTLY in a way it cannot report itself — it panicked, or an uncaught `prelude.throw`
    *  left it. The fiber is over at this instant (neither ending resumes), so instead of mailboxing the raw
-   *  failure ask: tear the fiber down exactly like a `cancel` (drop its queued escalations, terminate its
+   *  failure ask: tear the fiber down exactly like a `cancel_by_id` (drop its queued escalations, terminate its
    *  inner delegation — but with NO waiter, since nobody asked), and report the ending as DATA — the
    *  SYNTHETIC mailbox entry `report`, which the two callers build as `crashed` / `failed`. The entry rides
    *  the same FIFO as ordinary entries, so it surfaces at the watch once one registers; having no child leg,
@@ -1282,7 +1186,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     return undefined;
   }
 
-  /** Drop a fiber's NOT-YET-EMITTED escalations from its nursery's mailbox — a `cancel` makes the fiber
+  /** Drop a fiber's NOT-YET-EMITTED escalations from its nursery's mailbox — a `cancel_by_id` makes the fiber
    *  unknown, so its queued requests must never be re-emitted (an escalation already re-emitted at a watch is
    *  left to answer moot, since its cancelled fiber's delegation is gone). */
   private dropFiberMailbox(provide: DelegationId, fiberDelegation: DelegationId): void {
@@ -1314,7 +1218,8 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  re-spawns: a fork's only effect is opening an inner delegation, so re-running an interrupted one is safe
    *  (a committed fork is already gone — reaching here means its spawn never committed). A reloaded CANCEL re-runs its idempotent teardown: it
    *  re-terminates the fiber if it is still running (a re-sent terminate is a no-op on an already-cancelling
-   *  delegation), else succeeds at once (the fiber's teardown committed before the crash — it is gone). A
+   *  delegation), else answers `unknown_fiber` at once (the id-addressed contract — the fiber's teardown
+   *  committed before the crash, so it is gone however it went). A
    *  reloaded WATCH re-registers as its scope's white hole SYNCHRONOUSLY (before any scheduled pump), its
    *  outstanding relays (possibly many) restored from the durable row so each handler's answer still descends to
    *  its own fiber; the
@@ -1329,13 +1234,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       case "fork":
         this.schedule(() => this.startFork(delegation));
         return;
-      case "cancel":
-        this.schedule(() => this.startCancel(delegation));
-        return;
       case "cancel_by_id":
-        // Same shape as a reloaded cancel: re-run the idempotent teardown against the reloaded running
-        // set — a re-sent terminate is a no-op, and a fiber whose teardown committed answers `unknown_fiber`
-        // (the id-addressed contract: the fiber is gone, however it went).
         this.schedule(() => this.startCancelById(delegation));
         return;
       case "roster":
@@ -1373,7 +1272,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** Rebuild a reloaded provide's running-fiber set from its durable inner-call bridges: every bridge whose
    *  token carries the fiber prefix is a still-running fiber (the continuation's own bridge is filtered out by
-   *  the prefix), so a `cancel` / `cancel_by_id` / `roster` arriving after a restart routes against it. A
+   *  the prefix), so a `cancel_by_id` / `roster` arriving after a restart routes against it. A
    *  settled fiber is NOT here — it was retired on the spot, and nothing durable remains of it. Runs
    *  synchronously in `recover` (not scheduled), so every scope is fully populated before any scheduled
    *  operation turn reads it. */
@@ -1387,7 +1286,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** A cancel's transport half: confirm on a fresh turn (a provide has no external work of its own — its
    *  children, the continuation and later its fibers, drain through the base's cancel cascade; the scope closes
-   *  at drop). A waiting `cancel` and an `operation` call likewise just confirm — each owns
+   *  at drop). A waiting `cancel_by_id` and an `operation` call likewise just confirm — each owns
    *  no work beyond an in-memory waiter, which its drop hook forgets. */
   protected abort(delegation: DelegationId): void {
     this.schedule(() => this.complete({ delegation, outcome: { kind: "cancelled" } }));
@@ -1414,7 +1313,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       return;
     }
     if (
-      (payload.kind === "cancel" || payload.kind === "cancel_by_id") &&
+      payload.kind === "cancel_by_id" &&
       payload.fiber !== null &&
       this.cancelWaiters.get(payload.fiber) === delegation
     ) {
@@ -1443,12 +1342,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           task: payload.task,
           argument: payload.argument,
           name: payload.name,
-        });
-      case "cancel":
-        return encodeRegionExtension({
-          kind: "cancel",
-          scopeId: payload.scope,
-          fiberId: payload.fiber,
         });
       case "cancel_by_id":
         return encodeRegionExtension({
@@ -1497,12 +1390,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           relays: [],
           innerCalls: [],
         };
-      case "cancel":
-        return {
-          payload: { kind: "cancel", scope: decoded.scopeId, fiber: decoded.fiberId },
-          relays: [],
-          innerCalls: [],
-        };
       case "cancel_by_id":
         return {
           payload: { kind: "cancel_by_id", scope: decoded.scopeId, fiber: decoded.fiberId },
@@ -1534,7 +1421,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     super.reset();
     this.scopes.clear();
     // Cancel waiters and watch registrations are in-memory routing; a reset (poisoned commit) rebuilds them
-    // from the reloaded rows — each waiting cancel's `startCancel`, and each watch's registration + the
+    // from the reloaded rows — each waiting cancel's `startCancelById`, and each watch's registration + the
     // provide's mailbox re-pump, in `recover`.
     this.cancelWaiters.clear();
     this.watchesByScope.clear();
@@ -1543,7 +1430,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 }
 
 /** One live nursery's routing state: the provide call that opened it (a `fork`'s fiber parents on this), and
- *  its RUNNING fibers by id, in fork order (their inner-delegation ids — a `cancel` tears one down, a
+ *  its RUNNING fibers by id, in fork order (their inner-delegation ids — a `cancel_by_id` tears one down, a
  *  `roster` lists them). A settled fiber simply leaves this map — nothing durable remains of it. */
 interface ScopeState {
   provide: DelegationId;
@@ -1551,8 +1438,8 @@ interface ScopeState {
 }
 
 /** Mint the nursery handle `region.provide` hands its continuation for `scope`: an opaque record carrying only
- *  the scope identity, under the namespaced marker field. A `fork` / `watch` / `roster` / `cancel` reads the
- *  identity from here to route an operation to THIS nursery. */
+ *  the scope identity, under the namespaced marker field. A `fork` / `watch` / `roster` / `cancel_by_id`
+ *  reads the identity from here to route an operation to THIS nursery. */
 function mintNursery(scope: string): Value {
   return {
     kind: "record",
@@ -1566,19 +1453,6 @@ function scopeOfNursery(nursery: Value | null): string | null {
   if (nursery === null || nursery.kind !== "record") return null;
   const scope = nursery.fields[NURSERY_SCOPE_FIELD];
   return scope !== undefined && scope.kind === "string" ? scope.value : null;
-}
-
-/** The scope + fiber id a fiber HANDLE carries (each `null` when the handle is malformed) — a `cancel` reads
- *  both from the handle, since the handle's own scope names the nursery that spawned the fiber (so the fiber is
- *  cancelled where it lives, not in whatever `nursery` argument the call was handed). */
-function fiberHandleOf(handle: Value | null): { scope: string | null; fiber: string | null } {
-  if (handle === null || handle.kind !== "record") return { scope: null, fiber: null };
-  const scope = handle.fields[NURSERY_SCOPE_FIELD];
-  const fiber = handle.fields[NURSERY_FIBER_FIELD];
-  return {
-    scope: scope !== undefined && scope.kind === "string" ? scope.value : null,
-    fiber: fiber !== undefined && fiber.kind === "string" ? fiber.value : null,
-  };
 }
 
 /** The panic message a fiber died with, read from the panic ask's `{ msg }` record for the `crashed`
@@ -1614,9 +1488,10 @@ function mintFiberId(): string {
 }
 
 /** Mint the `fiber[Scope]` handle `fork` returns, as the completion's wire Json: an opaque record carrying
- *  its nursery's scope identity and its own fiber id, under the namespaced marker fields — so a `cancel`
- *  routes back to THIS fiber of THIS nursery. Plain string leaves and no reserved wire discriminator,
- *  so the base's `jsonToValue` reconstructs it as a bare record with no ack-decoding seam of its own. */
+ *  its nursery's scope identity and its own fiber id, under the namespaced marker fields. The handle is
+ *  IDENTITY ONLY — the `fiber_id` prim reads the id straight off it (no reactor round-trip), and that id is
+ *  what a `cancel_by_id` addresses. Plain string leaves and no reserved wire discriminator, so the base's
+ *  `jsonToValue` reconstructs it as a bare record with no ack-decoding seam of its own. */
 function mintFiberHandle(scope: string, fiber: string): Json {
   return { [NURSERY_SCOPE_FIELD]: scope, [NURSERY_FIBER_FIELD]: fiber };
 }
