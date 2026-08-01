@@ -99,3 +99,41 @@ the payload. `-> never` means a throw cannot be resumed: a handler recovers by `
 the handle (or rethrows)."
 request throw[T](@"The error payload; a handler naming this payload type catches it." error: T) -> never
 
+@"Run @task@ and fold its `throw` into the RESULT: the answer is @task@'s value, or — when it threw —
+the thrown payload itself, as a plain `T | Err` union to `match` on. This is the ONE general way a
+program turns the error CHANNEL into an error VALUE, and it exists because the hand-written form is
+four lines of ceremony whose only variation is a type name: install a handler, `break` the payload out
+of the handle, and re-spell the payload type twice. Written `catch(task = agent () -> ... { ... })`,
+the whole thing is one expression.
+
+WHAT IT REPLACES, and why they are gone: a total twin of a throwing reader (`json.try_validate` beside
+`json.validate`), a bulk pre-check that folds every failure to a boolean (`credentials.check`), a
+`_as`-suffixed variant that validates a request's answer — each was the same fold, specialised once per
+call site. One general form means the composition is written where it is needed, in the caller's own
+words, instead of being anticipated per operation.
+
+IT CATCHES THE WHOLE THROW ROW, not a chosen part of it: the row is `E lacks prelude.throw`, so
+whatever @task@ can throw comes back as @Err@ and nothing throwing survives into @catch@'s own row.
+Partial capture — catch these payloads, let the rest keep flying — is NOT expressible here and stays a
+hand-written handler with a rethrow arm, because the union would have to be split against a rigid type
+variable. That is the deliberate line: `catch` is for the boundary where a failure BECOMES data, a
+handler is for the boundary where a failure is REROUTED.
+
+TWO THINGS TO KNOW. A @task@ that throws NOTHING leaves @Err@ with no lower bound and fails to infer
+(K3016) — write `catch[T, never]` if you really mean it, though catching a task that cannot throw says
+nothing worth saying. And the answer is a bare union, so an instantiation where @T@ and @Err@ OVERLAP
+cannot tell the two apart afterwards — the ordinary shapes do not (a value and a `data` error are
+structurally disjoint), but a `catch[unknown, ...]` deliberately blurs them."
+agent catch[T, Err, effect E lacks prelude.throw](
+  @"The work to run; its throws are folded into the result. Written inline as an anonymous nullary agent (`agent () -> T with ... { ... }`) — the `(value: null)` here is the accepting bound, not a shape to imitate." task: agent (value: null) -> T with E | prelude.throw[Err],
+) -> T | Err with E {
+  // The whole mechanism: one handler that `break`s the payload out of the handle, so a throw leaves as
+  // the handle's value. Nothing resumes — `throw` is `-> never` — so there is no other way out.
+  use handler {
+    request prelude.throw(error: Err) -> never {
+      break error
+    }
+  }
+  task(value = null)
+}
+
