@@ -26,7 +26,9 @@
 // request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
 // control retry. `auth_error` / `api_error` (at the foot of this module) are the CLASSIFIED reading of a
 // non-2xx that an authenticated API integration wants instead of the bare status — `classify_status` is
-// the one classifier that produces them.
+// the one classifier that produces them, and `post_json` is the one caller that throws what it produces.
+// There is deliberately no SECOND vocabulary for the same fact: a non-2xx either stays a `status` the
+// caller branches on, or becomes an `api_failure` — never a third type meaning "non-2xx" again.
 
 // `post_json` parses its reply back to a value. The `json` module qualifier is shadowed HERE by this
 // module's own `json` body variant (below), so import `parse` / `parse_error` by name to reach them.
@@ -78,17 +80,21 @@ data multipart_file(name: string, filename: string, content: file)
 type multipart_part = multipart_text | multipart_file
 
 @"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ and @body@.
-The @body@ is one of `http.text` / `http.binary` / `http.multipart` / `http.json` (a `file` in any of them
-is read from the blob store at the send boundary, never materialised earlier). Each header value AND a
-private body surface (a `text`'s content, a `json`'s tree) may be a secret, submitted to @url@'s server,
-while @url@ and @method@ stay public. Returns the response @status@ code, its @headers@ (names lowercased;
-repeated headers joined with \", \") and its @body@ text. A request that never completes throws `fetch_error`
-(catchable with `use handler { request throw(error: http.fetch_error) -> never { ... } }`)."
+Only @url@ is required: the defaults spell a plain read (`http.fetch(url = ...)` is a GET with no headers
+and no body), which is the shape most calls take, and every other request writes exactly the parameters
+that differ from it. The @body@ is one of `http.text` / `http.binary` / `http.multipart` / `http.json` (a
+`file` in any of them is read from the blob store at the send boundary, never materialised earlier), or
+`null` for NO body at all — the honest spelling of a GET, which used to be respelt as an empty `text`
+body the transport then dropped. Each header value AND a private body surface (a `text`'s content, a
+`json`'s tree) may be a secret, submitted to @url@'s server, while @url@ and @method@ stay public. Returns
+the response @status@ code, its @headers@ (names lowercased; repeated headers joined with \", \") and its
+@body@ text. A request that never completes throws `fetch_error` (catchable with `use handler { request
+throw(error: http.fetch_error) -> never { ... } }`)."
 external agent fetch(
   @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
-  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
-  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
-  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive); the default reads. For GET / HEAD the @body@ is not sent." method: string ?= "GET",
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private] ?= {},
+  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`, or `null` for NO body; dropped for GET / HEAD." body: body | null ?= null,
 ) -> { status: integer, headers: record[string], body: string } with io | prelude.throw[fetch_error] from "http"
 
 @"Perform an HTTP request to @url@ with @method@, the given @headers@ and @body@ — EXACTLY `fetch`'s
@@ -109,14 +115,10 @@ lowercased; repeated headers joined with \", \"), and the downloaded @file@. A r
 throws `fetch_error`, exactly like `fetch`."
 external agent fetch_file(
   @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
-  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
-  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
-  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive); the default reads. For GET / HEAD the @body@ is not sent." method: string ?= "GET",
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private] ?= {},
+  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`, or `null` for NO body; dropped for GET / HEAD." body: body | null ?= null,
 ) -> { status: integer, headers: record[string], file: file } with io | prelude.throw[fetch_error] from "http"
-
-@"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
-arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
-data status_error(@"The response's non-2xx status code." status: integer, @"The response body text." body: string)
 
 @"POST @body@ — a JSON value tree — to @url@ as application/json with the given @headers@, and return the
 reply PARSED into its document value. This is the canonical one-call shape of a JSON API integration: build
@@ -125,15 +127,30 @@ the body as an ordinary record / array / scalar tree, post it, and read the repl
 — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for Gemini — or a `refresh_token`
 in the body of an OAuth exchange): both are submitted only to @url@'s server, which stays public. A `file`
 placed anywhere in @body@ rides as base64 (the `http.json` slot contract). The Content-Type defaults to
-application/json unless a header overrides it. A non-2xx status throws `status_error` (its body text
-attached); a transport failure throws `fetch_error`; a 2xx body that is not JSON throws `json.parse_error`
-(a JSON API that broke its promise) — an empty 2xx body is `null`. To send already-serialized text, or to
-keep the raw reply text, call `fetch` directly."
+application/json unless a header overrides it.
+
+A NON-2xX IS CLASSIFIED HERE, not merely reported: it throws `api_failure` — `auth_error` for 401 / 403,
+`api_error` for everything else — carrying the status, @context@ and the server's own body. That is the
+whole reason this wrapper takes a @context@: a thrown failure travels away from its call site, so WHICH
+call failed has to ride with it, in the caller's own words (\"tavily.search\", \"gmail.send\"), and a human
+or a model reading the error gets both halves without a renderer splitting a sentence.
+
+Classifying HERE rather than at the caller is what keeps the vocabulary single. A raw \"non-2xx\" error type
+alongside `api_failure` meant the same fact wore two types — every package that wanted a retry policy or a
+re-auth converter re-classified the first into the second, in a shim that was the same three lines each
+time and had to be remembered. There is now one type for a rejected call, produced in one place, and the
+status rides on it so a downstream policy reads a NUMBER (408 / 429 / 5xx are worth repeating) instead of
+searching an English sentence.
+
+A transport failure throws `fetch_error`; a 2xx body that is not JSON throws `json.parse_error` (a JSON API
+that broke its promise) — an empty 2xx body is `null`. To send already-serialized text, to keep the raw
+reply text, or to branch on a status rather than throw on it, call `fetch` directly."
 agent post_json(
   @"The absolute URL to POST to; public by type." url: string,
   @"The JSON body as a value tree (records / arrays / scalars / files, mixed); may carry secrets." body: unknown of private,
-  @"Extra headers by name (the caller wins over the application/json default on a shared name); values may be secrets." headers: record[string of private],
-) -> unknown with io | prelude.throw[status_error | fetch_error | parse_error] {
+  @"Which call this is, in the caller's own words (e.g. \"gmail.send\") — it rides on the thrown failure, which is read far from here." context: string,
+  @"Extra headers by name (the caller wins over the application/json default on a shared name); values may be secrets." headers: record[string of private] ?= {},
+) -> unknown with io | prelude.throw[api_failure | fetch_error | parse_error] {
   // Post the value tree as an `http.json` body: it serialises the tree (files -> base64 in place) and
   // sets the application/json Content-Type as a default the caller's headers can override.
   let response = fetch(url = url, method = "POST", headers = headers, body = json(value = body))
@@ -146,31 +163,18 @@ agent post_json(
       parse(text = response.body)
     }
   } else {
-    prelude.throw(error = status_error(status = response.status, body = response.body))
+    // ONE classification, at the ONE boundary where this module reads a response as an API's answer.
+    prelude.throw(error = classify_status(status = response.status, context = context, message = response.body))
   }
-}
-
-@"GET @url@ with @headers@ — `fetch` with the method fixed to \"GET\" and NO body (a GET carries none),
-the shape a read-only API call takes, so the caller drops the `body = http.text(content = \"\")` a GET
-otherwise respells. Returns the same `{ status, headers, body }` as `fetch`: branch on @status@ for a
-non-2xx reply, catch `fetch_error` for a transport failure. Each header value may be a secret, submitted
-only to @url@'s server. To send a body, or for any other method, call `fetch` directly."
-agent get(
-  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
-  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
-) -> { status: integer, headers: record[string], body: string } with io | prelude.throw[fetch_error] {
-  // A GET drops its body at the transport, so the empty text body is a placeholder the reactor ignores.
-  fetch(url = url, method = "GET", headers = headers, body = text(content = ""))
 }
 
 // ─── the classified failure of an AUTHENTICATED API call ──────────────────────────────────────────────
 //
-// `fetch_error` and `status_error` above are what the TRANSPORT can say: one for a request that never
-// completed, one for a reply that arrived carrying a non-2xx status. `status_error` stays exactly as it is,
-// the raw layer's fact — `post_json` throws it and nothing here changes that. Neither answers the question
-// a package wrapping an authenticated API actually has to answer at that boundary — WHO HAS TO ACT. The two
-// variants below draw exactly that line, and nothing else: `auth_error` is the failure that may need a
-// HUMAN before any retry can succeed, `api_error` is every failure that cannot.
+// `fetch_error` above is what the TRANSPORT can say about a request that never completed, and a `fetch`
+// caller reads a reply that DID arrive off its bare `status`. Neither answers the question a package
+// wrapping an authenticated API actually has to answer at that boundary — WHO HAS TO ACT. The two variants
+// below draw exactly that line, and nothing else: `auth_error` is the failure that may need a HUMAN before
+// any retry can succeed, `api_error` is every failure that cannot.
 //
 // It lives in the stdlib because it was already the same sum in every package that had one. `gmail` and
 // `google_calendar` each declared this pair, at the same statuses, with the same paragraph in each doc, and
