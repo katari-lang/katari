@@ -14,22 +14,30 @@
 //     provider. Under `use store.workspace(path = "core")` every operation's key is prefixed with
 //     `core/`, and `exclusive` — the critical section a read-modify-write takes its atomicity from —
 //     is served by that same install, one section at a time. Nested workspaces accumulate prefixes
-//     and nest domains; the outermost bare perform is project-root access, and an `exclusive` no
-//     program handler catches is served at the PROJECT ROOT in one durable, project-wide FIFO across
-//     every run. An agent dispatched inside a workspace lives in that directory BY CONSTRUCTION — it
-//     holds no value it could widen. A path is `/`-separated `safe_segment`s and a malformed one
-//     panics, because that construction is only as sound as the strings a program puts in it.
+//     and nest domains, ONE LANE PER WORKSPACE: two workspaces are two FIFOs, so their sections
+//     interleave freely and a section is atomic against the traffic that can reach ITS keys, never
+//     against the whole project. The outermost bare perform is project-root access, and an
+//     `exclusive` no program handler catches is served at the PROJECT ROOT in one durable,
+//     project-wide FIFO across every run. An agent dispatched inside a workspace lives in that
+//     directory BY CONSTRUCTION — it holds no value it could widen. A path is `/`-separated
+//     `safe_segment`s and a malformed one panics, because that construction is only as sound as the
+//     strings a program puts in it.
 //
-//     THE TWO HALVES ARE ONE WORD ON PURPOSE. A prefix without a lane and a lane without a prefix
-//     both have spellings here (a nested workspace at a sub-path is the first; a nested workspace
-//     whose path is the lane's own name is the second), and neither has a use that the fused form
-//     does not serve — while the split form had a failure mode the fused one cannot have: a facility
-//     that opened a prefix and forgot the domain wrote read-modify-writes into the project-wide root
-//     FIFO, which is legal, invisible, and wrong.
+//     THE TWO HALVES ARE ONE WORD ON PURPOSE, and the fusion is TOTAL: nothing here spells a prefix
+//     without its lane, or a lane without its prefix. Both USES are still served — want a private
+//     lane and a nested workspace is one, at the cost of a directory segment you were free to name;
+//     want a private directory and its lane comes along, which is what you wanted anyway — so what
+//     the split form actually bought was its failure mode: a facility that opened a prefix and forgot
+//     the domain wrote read-modify-writes into the project-wide root FIFO, which is legal, invisible,
+//     and wrong.
 //   - FACILITY: a workspace-relative toolset — a package (a memory, a task list) whose tools open
 //     ONE fixed subdirectory (`use store.workspace(path = "memory")`) around their own operations.
 //     The path is the package's constant; WHERE the facility's data lives is the CALLING workspace's
-//     decision, which is the whole inversion.
+//     decision, which is the whole inversion. That one install is the facility's LANE as well as its
+//     directory, so its critical sections serialize against each other and interleave with the app's;
+//     and because a section already runs inside the prefix of the workspace serving it, a facility
+//     NEVER re-opens its own subdirectory inside an `exclusive` task — that would spell
+//     `app/memory/memory/...`.
 //   - SHARED PLACE (`share` / `shared`): data several workspaces must read never travels by path
 //     escape — there is deliberately no `..`. It travels as a REQUEST served ABOVE the workspaces,
 //     whose clause opens the shared subtree in its own body; a workspace can never capture what it
@@ -219,12 +227,17 @@ handler calls it in its own body, so two exclusives of one domain can never inte
 handler's FIFO is the atomicity, even against a `parallel for` tool batch. The row is FIXED to the
 store operations: a critical section reads, computes and writes, NOTHING ELSE — any other input is
 computed BEFORE entering and closed over — so a section can never block on a model, a network, or
-another domain. TWO GEOMETRY FACTS, both load-bearing: the task runs AT THE WORKSPACE INSTALL SITE,
-not at this perform site — so a facility's subdirectory prefix must be applied INSIDE the task body
-(`use store.workspace(path = \"memory\")` as the task's first move; a workspace around the perform
-site does not travel with the task, but the install site's own enclosing workspaces do apply). And an
-`exclusive` binds to the NEAREST enclosing workspace: an inner domain shadows an outer one BY DESIGN
-— the nearest domain is the semantics, exactly as the nearest prefix is. The task's answer crosses
+another domain. TWO GEOMETRY FACTS, both load-bearing. FIRST, an `exclusive` binds to the NEAREST
+enclosing `workspace`: an inner domain shadows an outer one BY DESIGN — the nearest domain is the
+semantics, exactly as the nearest prefix is. SECOND, because the two halves are ONE install, the task
+runs INSIDE THE PREFIX OF THE VERY WORKSPACE SERVING IT — a section's keys resolve exactly where an
+ordinary read written beside the perform would, so nothing has to be re-stated to make the read and
+the write land together. A task therefore opens a workspace of its own ONLY to descend FURTHER (a
+subdirectory this section alone wants), NEVER to repeat the directory it already stands in: a facility
+that opens `memory` around its perform AND again as the task's first move writes to
+`app/memory/memory/...`. WHAT ATOMICITY MEANS HERE follows from the first fact — one lane per
+workspace, so a section excludes the other sections of THIS workspace and interleaves with every other
+lane's, which is exactly the traffic that can reach these keys. The task's answer crosses
 the handler as `unknown`; narrow it back with a `match` (or `json.validate[T]`). With NO workspace
 installed above the perform, the RUNTIME serves it as the outermost domain — the task runs at the
 PROJECT ROOT (project-root keys) in one durable, project-wide FIFO across every run."
@@ -246,7 +259,11 @@ a working directory:
   - THE DOMAIN. One sequential handler serves `exclusive` by calling the section in its own body, so
     the FIFO applies critical sections one at a time, in arrival order — which is the whole point (a
     parallel clause would forfeit the atomicity). Sections re-perform their store operations from
-    THIS install site, so they land under THIS workspace's prefix.
+    THIS install site, so they land under THIS workspace's prefix — a section stands where the
+    workspace stands, and descends further only if it opens a workspace of its own. ONE LANE PER
+    WORKSPACE, deliberately: two workspaces are two FIFOs, so a facility's sections and the app's
+    sections INTERLEAVE, each atomic against its own lane. That is the traffic that can touch its
+    keys, which is the only traffic atomicity was ever about.
 
 The install order between them is fixed here and is not a preference: the prefix handlers sit OUTSIDE
 the domain, so a critical section's keys resolve through the workspace it was opened in. A nested
@@ -333,9 +350,11 @@ agent workspace[R, effect E](
 
 @"Run @task@ AT THE NEAREST ENCLOSING `share`'s install site — that site's workspaces, that site's
 serial domain — and hand back what it answered: the ONE request by which a desk reaches knowledge
-living ABOVE its own workspace. The geometry is `exclusive`'s, and both halves are load-bearing. The
-task is a CLOSURE that travels UP and runs THERE, so a workspace around this PERFORM does not travel
-with it (the INSTALL site's own enclosing workspaces do apply) — which means a subdirectory of the
+living ABOVE its own workspace. The rule is `exclusive`'s — a task runs at its server's INSTALL
+site — but the server here is a `share` and not a workspace, and that is the whole difference: a
+`share` is installed ABOVE the desks, so the desk's own workspaces sit BELOW it and do NOT travel with
+the task (only the install site's own enclosing workspaces apply). Where an `exclusive`'s section
+lands already prefixed, a `shared` task lands in the SHARED place — which means a subdirectory of the
 shared place is opened INSIDE the task body (`use store.workspace(path = \"shared/soul\")` as its first
 move), and that is exactly what lets one `share` serve every shared cell instead of one named request
 per cell. And it binds to the NEAREST enclosing `share`: an inner shared place shadows an outer one BY
