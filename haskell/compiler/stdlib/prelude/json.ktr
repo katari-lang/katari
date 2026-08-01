@@ -1,36 +1,8 @@
 // The `prelude.json` sub-module: the JSON boundary, over PLAIN Katari values. A JSON document is not a
-// dedicated tree type — it is an ordinary value: a record / array / string / integer / number / boolean /
-// null (the "document shape"). A program traverses a parsed reply with shape filters (`case record(r)` /
-// `case array(a)` / `case string(s)`) and the total readers below, and builds one with ordinary record /
-// array literals. Referenced by the default-import qualifier: `json.parse(...)`, `json.field(...)`.
-//
-// A value renders to / from bare JSON through ONE codec, shared with the FFI boundary. Every reserved wire
+// dedicated tree type — it is an ordinary record / array / string / integer / number / boolean / null.
+// One codec, shared with the FFI boundary, renders values to and from bare JSON; every reserved wire
 // key lives in the `$katari_` namespace (a `file` is `{ $katari_ref: id }`, a `data` value is
-// `{ $katari_constructor: name, $katari_value: { ...fields } }`, an agent / closure / tool its own handle
-// object), which a program never authors — so a bare record needs no escaping, and the reserved keys are
-// disjoint from any document a program writes.
-//
-//   - `parse : string -> unknown`   text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
-//   - `validate[T] : unknown -> T`  check a value against T's schema (returns it unchanged, or throws)
-//   - `stringify[T] : T -> string`  ANY value -> its (compact, canonical) JSON text
-//
-// The typed TEXT boundary is the first two composed — `validate[T](value = parse(text = ...))` — and the
-// TOTAL read of a value whose shape may not fit is `prelude.catch` over `validate`, which hands the
-// `validation_error` back as a value to `match` (`store.get_or[T]` is that composition, packaged for the
-// store's own boundary). Both used to carry their own name here (`parse_as`, `try_validate`); neither
-// encoded a judgement its composition does not.
-//
-// `parse` and `stringify` are inverses through that codec: a document (record / array / scalar) round-trips
-// verbatim, so `stringify(parse(s)) == s` (modulo whitespace / number normalisation). `parse` interprets the
-// `$katari_` markers — external JSON never carries such a key, so a real document is unaffected — and a
-// `file` / `data` / callable value likewise stringifies to its handle object. `stringify` is TOTAL and
-// CANONICAL (one value, one text); it is also the READ CHANNEL that lets an AI SEE a handle / data value (an
-// error render, a handle embed, a tool result shown back to a model). A secret operand taints the whole
-// result (the monotonic information-flow rule).
-//
-// Errors: malformed text throws `parse_error` (`parse`); a value that does not conform to the requested
-// type's schema throws `validation_error` (`validate`), naming the offending path. `stringify` and the
-// total readers at the foot of this module never throw.
+// `{ $katari_constructor: name, $katari_value: {...} }`), which a program never authors.
 
 @"A JSON document failed to parse: the text is not JSON. Thrown by `parse`."
 data parse_error(message: string)
@@ -39,43 +11,32 @@ data parse_error(message: string)
 offending path."
 data validation_error(message: string)
 
-@"Parse JSON text into the value it denotes — a record / array / string / integer / number / boolean / null,
-or a `file` where the text carries a `$katari_ref` handle. Traverse a document with shape filters
-(`case record(r)`) and the readers below, or pin its shape with `validate[T]` on the result. A number
-without a fractional part parses as `integer`. Malformed text throws `parse_error`."
+@"Parse JSON text into the value it denotes — a record / array / string / integer / number / boolean /
+null, or a `file` where the text carries a `$katari_ref` handle. A number without a fractional part
+parses as `integer`. Malformed text throws `parse_error`."
 primitive agent parse(@"The text of one complete JSON document." text: string) -> unknown with prelude.throw[parse_error]
 
-@"Check @value@ against T's schema and return it unchanged, or throw `validation_error` naming the offending
-path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only in the result,
-so it cannot be inferred)."
+@"Check @value@ against T's schema and return it unchanged, or throw `validation_error` naming the
+offending path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only
+in the result, so it cannot be inferred)."
 primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
 
-@"Render ANY value as its (compact) JSON text — TOTAL and CANONICAL (one value, one text). A document value
-(record / array / string / integer / number / boolean / null) round-trips verbatim, so `stringify(parse(s))`
-is `s` up to whitespace; a `file` becomes its `$katari_ref` handle object, a `data` value nests its fields
-under `$katari_value` (`{ $katari_constructor: name, $katari_value: { ...fields } }`), and an agent / closure
-/ tool its handle object. `stringify` is the READ CHANNEL for showing an AI a handle / data value (an error
-render, a handle embed, a tool result rendered back to a model). A secret operand taints the whole result
-(the monotonic information-flow rule)."
+@"Render ANY value as its compact JSON text — total and canonical (one value, one text). A document
+value round-trips verbatim, while a `file`, a `data` value and a callable each become their handle
+object, which makes this the read channel for showing an AI such a value. A secret operand taints the
+whole result."
 primitive agent stringify[T](value: T) -> string
 
-// The total readers — plain Katari over `unknown`, for picking values out of a document of unknown or
-// irregular shape (an AI reply, a third-party API response) without a shape filter at every step. The
-// subject parameter is named `target`, uniform with the other container lookups (`record.get`,
-// `array.get`). Each reader is TOTAL: a missing key, an out-of-range index or a wrong shape yields `null` /
-// `""` / an empty container rather than an error, so probes chain freely — `text(target = field(target =
-// element(target = parsed, index = 0), key = "content"))` — and absence is checked once, at the end, where
-// it matters. For a document whose shape IS known, prefer the typed boundary
-// (`validate[T](value = parse(text = ...))`), which validates instead of defaulting. Where a genuine shape
-// branch is wanted, use a shape filter
-// directly (`match (node) { case record(r) -> ... case array(a) -> ... case _ -> node }`).
+// The total readers: plain Katari over `unknown`, for picking values out of a document of unknown or
+// irregular shape without a shape filter at every step. A missing key, an out-of-range index or a
+// wrong shape yields `null` / `""` / an empty container rather than an error, so probes chain freely.
 
 @"The record @target@ holds (its entries), or the empty record if @target@ is not a record."
 agent entries(target: unknown) -> record[unknown] {
   match (target) {
     case record(record_value) -> record_value
-    // Parenthesised because a bare `{}` after `->` is an empty BLOCK (which answers `null`), not the
-    // empty record literal — the one place in the language where the two brace forms collide.
+    // Parenthesised because a bare `{}` after `->` parses as an empty block (answering `null`), not
+    // as the empty record literal.
     case _ -> ({})
   }
 }
@@ -104,18 +65,9 @@ agent element(target: unknown, index: integer) -> unknown {
   }
 }
 
-@"The string @target@ holds, or @fallback@ when it holds anything else — the reader a document walker
-reaches for at nearly every step, since a renderer over an AI reply or a store row wants a NAMED TEXT
-FIELD far more often than any other shape.
-
-@fallback@ is what makes it more than a shape filter, and it defaults to `\"\"` so the ordinary
-degrade-to-empty read needs no argument. Without it a caller wanting a placeholder (\"(untitled)\",
-\"unknown\") had to compare the answer to the empty string afterwards, which cannot tell an ABSENT field
-from one holding `\"\"` — and that comparison is precisely where the two get conflated.
-
-Composed with `field` it is the whole named-text read: `text(target = field(target = reply, key =
-\"content\"), fallback = \"(none)\")`. That composition used to have its own name (`text_at`); it does not
-need one now that the fallback lives here, and nesting `field` for a deeper read stays as readable."
+@"The string @target@ holds, or @fallback@ when it holds anything else — including the `null` an absent
+`field` answers. @fallback@ defaults to `\"\"`, so the ordinary degrade-to-empty read needs no argument;
+give it a placeholder to tell an absent field from one holding `\"\"`."
 agent text(
   @"The document to read; any non-string answers @fallback@." target: unknown,
   @"The value when @target@ is not a string — including the `null` an absent `field` answers." fallback: string ?= "",

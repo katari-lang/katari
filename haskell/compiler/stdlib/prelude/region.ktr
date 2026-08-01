@@ -1,119 +1,46 @@
-// The `prelude.region` sub-module: STRUCTURED CONCURRENCY as ordinary agent values — a nursery. A
-// `region` opens a scope in which child agents (fibers) run concurrently; the scope has a single
-// entry and a single exit, so no fiber outlives the `provide` that opened it. This is the same scope
-// story `mcp.provide` uses (a `runST`-shaped provider that mints a marker for its continuation and
-// discharges it from its own result row), specialised to concurrency: `provide` opens the nursery,
-// `fork` spawns a fiber into it, `cancel_by_id` tears one down, and `watch` re-emits the fibers'
-// escalations as effects the enclosing program handles. There is deliberately NO `join`: a fiber is
-// a detached worker, not a future — everything it produces leaves through its escalations, its task
-// is `-> null`, and what it settles with is discarded. `parallel` (for / [ ]) is the fork-JOIN
-// story (structured children, awaited, results as values); a region is the fork-ESCALATE story
-// (detached children, outliving their forking turn, heard at `watch`). In one line: parallel waits,
-// a region listens. Everything routes to the runtime's
-// `region` reactor (an in-runtime scheduler, like `http.fetch`'s in-runtime fetch — no FFI sidecar).
+// The `prelude.region` sub-module: structured concurrency as ordinary agent values — a nursery.
+// `provide` opens a scope, `fork` spawns a detached fiber into it, `cancel_by_id` tears one down, and
+// `watch` re-emits the fibers' escalations as effects the enclosing program handles. There is
+// no `join`: a fiber is a detached worker rather than a future. `parallel` waits, a region
+// listens. Every operation routes to the runtime's `region` reactor, so each performs `io`.
 //
-// THE SCOPE STORY. A fiber is a live child of exactly one nursery, not a value that may outlive it: it
-// exists only WHILE its `provide` is running. `provide` is a scoped provider (the ST-monad `runST`
-// shape) — it opens the nursery, hands the continuation a `nursery[Scope, E]` handle, and DISCHARGES
-// the caller-chosen `Scope` marker from its own result row. A `fiber` carries `Scope` in its effect
-// row (`fiber[Scope]` below), and every operation is gated `with Scope`, so a `fork` or a
-// `cancel_by_id` is only well-typed inside a row that still carries that scope — which only
-// `provide`'s continuation does. A fiber therefore cannot escape its `provide`: return one and the
-// `Scope` it drags along has nowhere to be discharged, so there is no live nursery to address it
-// against — a type error at the use site. A scope marker is a phantom (it names no operation, is never performed and never handled,
-// and vanishes at lowering); `scope` is the built-in one, but — exactly as `mcp` advises — DECLARE
-// ONE MARKER PER NURSERY when you nest them, so two regions' scopes never MERGE: a distinct marker is
-// what keeps a nursery's handle unusable outside the `provide` that opened it, where ONE shared marker
-// lets a handle whose own `provide` has already returned stay well-typed inside the other's extent.
+// The scope: `provide` mints a caller-chosen `Scope` marker for its continuation's row and discharges
+// it from its own, and every operation is gated `with Scope`, so no fiber or handle outlives the
+// `provide` that opened it. The marker gates the operations, not the ids they carry — a fiber id is
+// plain data, so a cancel aimed at another nursery's fiber answers `unknown_fiber` at runtime. Two
+// nurseries under one marker share a scope; a distinct marker per nursery keeps them apart.
 //
-// WHAT THE MARKER DOES NOT GATE: THE IDS. The scope gates the OPERATIONS, not the data they carry.
-// `cancel_by_id` addresses a fiber by a `string`, and a fiber id is DATA a program legitimately holds
-// from anywhere — another nursery's `roster`, a `crashed` / `failed` event, a store round-trip, a
-// model-facing stop tool — so no type could tell a foreign id from a native one, and none tries. The
-// isolation of one nursery's fibers from another's is the RUNTIME's here, and it is exact: each
-// `provide` mints a RANDOM scope identity, and every operation routes against THAT scope's own running
-// set alone. So a cancel aimed at another nursery's fiber fails CLOSED — the id matches nothing in the
-// nursery it was addressed to and comes back as the ordinary `unknown_fiber` outcome, which the caller
-// renders. Not a compile error, and not a silent crossing either.
-//
-// THE SCOPE IDENTITY lives in the marker NAME, not in any runtime value. `provide` is generic over the
-// marker it discharges, and DISCHARGE IS PROVIDE'S ALONE — only `provide` opens the nursery, so a
-// context that can address a fiber cannot be forged without one. Distinct nullary markers never merge
-// and never widen into one another, so two nested nurseries compose as a plain union of two scopes with
-// no covariance to reason about.
-//
-// THE FIBER-EFFECT CEILING `E`. A nursery fixes, up front, the effects its fibers may raise: `provide`'s
-// second type argument. `fork` accepts a child agent only if its effect fits under `E` (effect
-// subtyping — a child that raises less is fine, one that raises more is a type error), so the ceiling is
-// an upper bound on every fiber. The nursery handle carries `E` INVARIANTLY (it appears both
-// contravariantly and covariantly in `nursery` below), which pins `E` to exactly the ceiling `provide`
-// fixed: neither `fork` (which needs `E` as the ceiling) nor `watch` (which re-emits all of it) can
-// widen or narrow it. This is what makes the handler story below sound.
-//
-// Every operation here routes to the runtime's `region` reactor (an external call), so — like
-// `http.fetch` / `time.now` — each performs `io`; every operation's row carries `| io`.
-//
-// WATCH IS THE WHITE HOLE. A fiber's escalations do not surface at its `fork` — a `fork` returns
-// immediately with a handle. They surface at `watch`, whose result row is
-// `E | crashed | failed | Scope | io`: `watch` is the one place the fibers' requests well up into the
-// enclosing program, so a `handler` (or any effect row) installed around `watch` catches them. Because
-// every fiber's effect fits under `E` and `watch` re-emits the FULL `E` — plus the runtime's own two
-// ENDING events, a fiber's panic reported as `crashed` and a fiber's uncaught throw as `failed` — a
-// handler that covers `E | crashed | failed` covers everything any fiber can surface: the ceiling and
-// the white hole together make "handle the region" a total obligation, checked by `katari check`
-// alone. A FIBER'S THROW NEEDS NO GUARD AT ITS FORK: the watch boundary traps an uncaught throw and
-// delivers it as `failed`, so a nursery ceiling never has to be widened with `prelude.throw` merely to
-// keep a fiber's failure from unwinding the region. `watch` returns `never`: it only ever raises,
-// never yields a value.
-//
-// This is `mcp.provide` (a scoped marker discharged by a `runST` signature) crossed with `parallel` (a
-// set of concurrent children), with no runtime surface a program can reach except through the agents
-// below — so the composition is locked at type-check time.
+// A fiber runs under the region's `watch`: its escalations surface there and nowhere else. `provide`'s
+// second type argument `E` bounds every fiber's effect and is carried invariantly by the handle, and
+// `watch` re-emits the full `E` plus the runtime's two ending events, so a row covering
+// `E | crashed | failed` around the watch covers everything any fiber can surface.
 
-// The built-in nursery scope marker: a nullary phantom, carried in a fiber's effect row and in every
-// operation's row, never performable, never handleable. `provide` mints it for its continuation's row
-// and discharges it from its own, so a fiber tagged `scope` cannot outlive the `provide` that opened
-// its nursery. Nest nurseries under DISTINCT markers (declare your own module-local `effect`) so their
-// scopes never merge — distinct nullary markers never widen into one another.
 @"The built-in nursery scope: a nullary phantom marker, carried in a fiber's effect row and every operation's row, never performable, never handleable. `provide` mints it for its continuation and discharges it from its own row, so a fiber cannot outlive its nursery. Declare your own marker per nursery when nesting, so two regions' scopes never merge."
 effect scope
 
-// A running child of a nursery, as an opaque handle value. `Scope` rides its effect row (the same
-// agent-row position `mcp`'s `tool[Scope]` uses), so `fiber[a]` is NOT a subtype of `fiber[b]` for
-// distinct scope markers `a` / `b`, and a handle cannot outlive the `provide` whose marker it carries.
-// A fiber carries NO result type: a fiber's outputs ride its escalations (they surface at `watch`),
-// and what it settles with is discarded — so the handle is IDENTITY ONLY, and `fiber_id` is the whole
-// of what a program does with one (the id is what `cancel_by_id` addresses). A `data` phantom `Scope`
-// would compare bivariantly (unconstrained) and silently let a handle cross regions; carrying `Scope`
-// in an effect row routes the comparison through effect-row subtyping, which requires the scope
-// present. (Type synonyms take no docs.)
+// A running child of a nursery, as an opaque handle. `Scope` rides its effect row rather than a `data`
+// phantom (which would compare bivariantly and silently let a handle cross regions), so the comparison
+// routes through effect-row subtyping. A fiber carries no result type — its outputs ride its
+// escalations — so the handle is identity only. (Type synonyms take no docs.)
 type fiber[effect Scope] = agent never -> null with Scope
 
-// The nursery handle `provide` hands its continuation — the `r` every operation takes first. It
-// witnesses the two things the operations recover by unification: the scope marker `Scope` and the
-// fiber-effect ceiling `E`. Both are carried INVARIANTLY — each appears once contravariantly (a field
-// of the argument object) and once covariantly (a field of the result object) — so unifying a handle
-// pins `Scope` and `E` to EXACTLY what `provide` fixed. That exactness is load-bearing twice over: for
-// `Scope`, an operation recovers it from the nursery and then demands the caller's row still carry it
-// (an upper AND lower bound), which is what keeps a nursery's operations inside the `provide` that
-// opened it — a covariant-only scope would let a call infer the mere UNION of two scopes and admit the
-// mismatch. For `E`, `fork` reads it as the ceiling a child may not exceed while `watch` re-emits
-// precisely it, so it must be neither widened nor narrowed. The inner agents are never called (their argument is `never`); each exists only to
-// carry `Scope` or `E` in an isolated effect row, at one polarity.
+// The nursery handle `provide` hands its continuation. `Scope` and `E` each appear once
+// contravariantly and once covariantly, so unifying a handle pins both to exactly what `provide`
+// fixed: an operation finds `Scope` still in the caller's row (an upper and lower bound), and `E` is
+// neither widened by `fork` nor narrowed by `watch`. The inner agents are never called; each exists
+// only to carry a marker at one polarity.
 type nursery[effect Scope, effect E] = agent (gate: agent never -> unknown with Scope, bound: agent never -> unknown with E) -> {gate: agent never -> unknown with Scope, bound: agent never -> unknown with E}
 
-@"Open a nursery for the extent of @continuation@, as a scoped provider — the `use region.provide[region.scope, E](...)` form. It hands @continuation@ a `nursery[Scope, E]` handle whose fibers may raise at most the effects `E`, and settles with the continuation's result. `Scope` rides the continuation's row (that is what a `fork` / `watch` / `cancel_by_id` raises) and is DISCHARGED from `provide`'s own row, so no fiber outlives the block: the nursery closes when @continuation@ returns (its still-running fibers are cancelled). Pin `Scope` and the ceiling `E` as the first two type arguments (`region.provide[region.scope, my_effects]`); `R` and the residual outer row are inferred from the continuation. Discharging `Scope` is `provide`'s alone (only it opens the nursery), so a live nursery context cannot be forged. NEST UNDER DISTINCT MARKERS: share one marker across two nurseries and their scopes MERGE (fibers become mutually cancellable), so declare a module-local `effect` per nursery when nesting."
+@"Open a nursery for the extent of @continuation@, as a scoped provider — the `use region.provide[region.scope, E](...)` form. It hands @continuation@ a `nursery[Scope, E]` handle whose fibers may raise at most the effects `E`, and settles with the continuation's result. `Scope` rides the continuation's row and is discharged from `provide`'s own, so no fiber outlives the block: the nursery closes when @continuation@ returns, cancelling its still-running fibers. Pin `Scope` and the ceiling `E` as the first two type arguments; `R` and the residual outer row are inferred. Two nurseries sharing one marker share a scope, so their fibers become mutually cancellable; a distinct marker per nursery keeps them apart."
 external agent provide[effect Scope, effect E, R, effect Eouter](
   @"The nursery body (bound by `use`): receives the handle, and its fibers run exactly while it does." continuation: agent (value: nursery[Scope, E]) -> R with Eouter | Scope,
 ) -> R with Eouter | io from "region"
 
-@"Spawn @task@ as a fiber in the nursery @nursery@, applied to @argument@ — the whole ARGUMENT RECORD of the call the fiber will make — and return immediately with a `fiber[Scope]` handle (identity only; read its runtime-minted id with `fiber_id`, which is what `cancel_by_id` addresses). A fork is a DEFERRED CALL, so its argument is spelt exactly as a call's arguments are: `region.fork(nursery = box, task = deliver, argument = { source = \"mail:core\", hop = 1 })` runs `deliver(source = \"mail:core\", hop = 1)` in a fiber. @task@ keeps its OWN parameter names — nothing here fixes a name on it — and a NULLARY task is forked with `argument = {}`. (The @argument@ record may carry extra fields; parameter records are contravariant, so a wider record still fits.) @name@ is an optional opaque tag the runtime echoes back wherever it talks about this fiber (`roster`, `crashed`, `failed`) — give one to any fiber something might later need to name.
+@"Spawn @task@ as a fiber in @nursery@, applied to @argument@ — the whole argument record of the call the fiber will make — and return immediately with a `fiber[Scope]` handle (identity only; `fiber_id` reads the id `cancel_by_id` addresses). A fork is a deferred call, so `region.fork(nursery = box, task = deliver, argument = { source = \"mail:core\", hop = 1 })` runs `deliver(source = \"mail:core\", hop = 1)`; @task@ keeps its own parameter names, a nullary task is forked with `argument = {}`, and a wider record fits (parameter records are contravariant). @name@ is an optional opaque tag the runtime echoes back in `roster`, `crashed` and `failed`.
 
-@task@ is `-> null`: A FIBER CARRIES NO RESULT. Everything a fiber produces leaves through its ESCALATIONS (surfacing at `watch`) — a task with something to deliver performs a request carrying it as its LAST act, and what the task returns is discarded when it settles. The type makes the discipline total: a `-> T` task does not fit, so a result cannot be silently dropped — it must have been delivered (or deliberately not produced) before the task can end. (`-> never` bodies — a watcher that runs until cancelled — fit by subtyping.)
+@task@ is `-> null`: a fiber carries no result, and everything it produces leaves through its escalations, which surface at `watch`. Its effect fits under the ceiling `E`, except its throws: the task parameter's row is `E | prelude.throw[unknown]`, because an uncaught throw is trapped at `watch` and delivered as the typed `failed` event rather than crossing the region as a throw, so a throwing task forks under a throw-free ceiling.
 
-@task@'s effect must fit under the ceiling `E` (a child that raises less is fine; one that raises more is a type error) — EXCEPT ITS THROWS: the task parameter's row is `E | prelude.throw[unknown]`, so a throwing task forks under a throw-free ceiling. That is not a loophole but the boundary's contract made type: an uncaught throw never crosses the region AS a throw (it is trapped at `watch` and delivered as the typed `failed` event), so the ceiling — what `watch` actually re-emits — stays free of `prelude.throw`, and every fiber is bounded by `E` plus the two ending events, which is exactly what makes `watch` a total obligation. The fiber's escalations do not surface here; they well up at `watch`. A FIBER'S UNCAUGHT THROW NEEDS NO GUARD AND NO CEILING ENTRY: catch inside the task what the task can genuinely answer, and leave the rest to `failed`.
-
-FORKING INTO ANOTHER NURSERY'S HANDLE (cross-nursery mail — a router handing work to a resident's own inbox) IS SUPPORTED AND HAS ONE RULE: send a NAMED agent and PLAIN DATA. Routing follows the handle alone, so a fork is delivered to the nursery that handle belongs to whatever context performs it — but the forked closure's captured ENVIRONMENT moves with it, into an instance the SENDER does not own. An INLINE closure that captures the sender's own handlers therefore hands them to a scope that may die first, taking the still-living sender's environment with it. A named agent applied to a record of plain data captures nothing, so nothing can be taken; write the mail as `region.fork(nursery = their_box, task = their_mail_agent, argument = { ...plain fields... })` and keep closures for forks into a nursery you own. (Forking into a DEAD nursery panics rather than answering a typed error — delivery is at-most-once; fold it with `supervise.once` + `signal_panics` where a lost message must be noticed.)
+A fork routes by the handle alone, so forking into another nursery's handle is cross-nursery mail. The forked closure's captured environment travels with it into an instance the sender does not own, so such a fork sends a named agent applied to plain data, which captures nothing; inline closures belong to forks into a nursery the caller owns. Forking into a settled nursery panics — delivery is at-most-once.
 
 Scope-gated (`with Scope`): callable only inside the `provide` that opened this nursery."
 external agent fork[effect Scope, effect E, A](
@@ -123,30 +50,19 @@ external agent fork[effect Scope, effect E, A](
   @"An opaque name tag, echoed by `roster`, `crashed` and `failed`; empty means unnamed." name: string ?= "",
 ) -> fiber[Scope] with Scope | io from "region"
 
-@"The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`, plus the runtime's own `crashed` and `failed` events. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E | crashed | failed`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E | crashed | failed` here covers everything any fiber can surface. This is the ONE channel out of a fiber: a normal completion is silent (the settled `null` is discarded — a task that has something to say says it as its last act), a cancellation is silent (the canceller knows), and the TWO endings a task cannot report itself arrive as typed events — a PANIC as `crashed`, an uncaught `prelude.throw` as `failed`. In both the runtime tears the ended fiber down and reports the ending as data, so what a death MEANS is your handler's decision, not an unwinding accident; and because the throw is trapped HERE, no `fork` has to wrap its task in a throw guard just to keep the region standing. Scope-gated (`with Scope`): callable only inside the opening `provide`. A fiber may escalate BEFORE any `watch` is installed (it forks, then waits on an FFI / http / AI call, and the watch is set up only later): every such escalation is held DURABLY and re-emitted the moment a `watch` registers, in arrival order — so a watch installed arbitrarily late still receives every earlier escalation, and a fiber need not delay its first raise until a watch is up. WATCH IS TRANSPARENT — IT IMPOSES NO SERIALIZATION OF ITS OWN. It re-emits EVERY fiber escalation CONCURRENTLY, the moment it arrives, so the ONLY serialization point is the RECEIVING handler: a sequential (stateful `var`) handler serializes its OWN invocations at its FIFO, in ARRIVAL order, while a `parallel handler` runs them concurrently. So two escalations to DIFFERENT handlers are ALWAYS concurrent (a handler blocked on one — say a human-latency approval — never starves another), and two to the SAME var handler serialize at that handler in arrival order (a chat loop keeps ONE var handler and stays in order for free). ONE watch is enough: it interleaves every fiber's stream by construction — do NOT run several to gain concurrency (the concurrency is already there; the desks are told apart by their handlers, not by extra watches)."
+@"Re-emit the nursery's fibers' escalations into the enclosing program as the ceiling effect `E`, plus the runtime's own `crashed` and `failed` events. It returns `never` — it only ever raises — so a handler (or any row covering `E | crashed | failed`) wraps it, and that covers everything any fiber can surface. This is the one channel out of a fiber: a normal completion and a cancellation are silent, and the two endings a task cannot report itself arrive as typed events — a panic as `crashed`, an uncaught `prelude.throw` as `failed`.
+
+An escalation raised before any `watch` is installed is held durably and re-emitted in arrival order the moment one registers, so a watch installed later receives every earlier escalation. `watch` re-emits every escalation concurrently and adds no serialization of its own; the serialization point is the receiving handler, so two escalations to different handlers run concurrently, while two to the same stateful (`var`) handler run one at a time in arrival order. One watch interleaves every fiber's stream, so a second adds no concurrency.
+
+Scope-gated (`with Scope`): callable only inside the opening `provide`."
 external agent watch[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
 ) -> never with E | crashed | failed | Scope | io from "region"
 
-// ── the nursery IS the registry: names, ids, roster, cancel-by-id, and the ending events ─────────
-//
-// Anything that wants to talk ABOUT fibers — start one by name, stop one by id, list what is
-// running — needs those facts SOMEWHERE, and the runtime nursery already owns every one of them
-// (it mints fiber ids, tracks liveness, and sees every ending). So the registry role lives in the
-// nursery itself, not in a Katari-side mirror: `fork` takes an optional @name@ tag, `roster` reads
-// the live set straight from the runtime, `cancel_by_id` addresses a fiber by the id the runtime
-// minted, and a fiber's ABRUPT ENDING re-emits at `watch` as a typed event — `crashed` for a panic,
-// `failed` for an uncaught throw. There is no mirror to keep in sync, so there is no retire protocol
-// and no drift — the runtime's truth is the only copy. What the runtime deliberately does NOT own is
-// the INTERPRETATION: both events are data, and what a death means (report it to a model, restart the
-// fiber, kill the region) is a handler the enclosing program writes.
-//
-// THE TWO ENDING EVENTS STAY TWO, because the questions they answer are different. `failed` carries a
-// value a correct program can meet and reason about (an upstream refusal, a malformed reply) and its
-// payload is the domain error itself; `crashed` carries a program DEFECT and can only carry a message.
-// A handler that wants to treat them alike says so in two arms; one merged event would have forced
-// every handler that does NOT to reconstruct the distinction from a message string. Their payload
-// SHAPE is deliberately parallel — `(id, name, <the reason>)` — so the two arms read as one pair.
+// The nursery is the registry: the runtime mints the fiber ids, tracks liveness and sees every ending,
+// so there is no Katari-side mirror to keep in sync. It does not own the interpretation — both ending
+// events are data, and what a death means is a handler's decision. The two events stay two because
+// their payloads differ: `failed` carries a typed domain value, `crashed` carries a defect's message.
 
 @"One running fiber, as `roster` reports it: the runtime-minted @id@ (the same id `cancel_by_id`
 addresses and `crashed` names) and the @name@ tag its `fork` carried (empty when the fork gave
@@ -158,68 +74,50 @@ data cancelled(@"The id of the fiber that was cancelled." id: string)
 
 @"A `cancel_by_id` outcome: no running fiber of this nursery has this id — it already settled, was
 already cancelled, or the id never existed. Not an error: ids are data (often model-supplied), so a
-stale one is an anticipated miss the caller renders, not an invariant break."
+stale one is an anticipated miss the caller renders."
 data unknown_fiber(@"The id that matched nothing." id: string)
 
 // What a cancel-by-id found. (Type synonyms take no docs.)
 type cancel_outcome = cancelled | unknown_fiber
 
-@"A fiber CRASHED — re-emitted at `watch` by the runtime in place of the fiber's unhandled panic:
-the fiber is dead at that instant (a panic never resumes), so the runtime tears it down and reports
-the ending as DATA instead of letting the raw panic unwind your watch context. Fire-and-forget
-(`-> null`): handle it above your `watch` and decide what a crash MEANS — report it to a model,
-fork a replacement, or re-raise to bring the region down. It rides `watch`'s row, so handling it is
-part of the region's total obligation. Not meant to be performed by programs (the runtime is its
-one author); a program that performs it anyway merely reports a fictitious crash to its own
-handler."
+@"A fiber crashed — re-emitted at `watch` in place of the fiber's unhandled panic. The fiber is dead at
+that instant (a panic never resumes), so the runtime tears it down and reports the ending as data
+rather than letting the panic unwind the watch context. Fire-and-forget (`-> null`): a handler above
+the `watch` decides what a crash means — report it, fork a replacement, or re-raise to bring the region
+down. The runtime is its one author."
 request crashed(
   @"The runtime-minted id of the fiber that crashed." id: string,
   @"The name tag its fork carried (empty when the fork gave none)." name: string,
   @"The panic message the fiber died with." message: string,
 ) -> null
 
-@"A fiber FAILED — re-emitted at `watch` by the runtime in place of the fiber's uncaught
-`prelude.throw`: the throw left the fiber's task with nothing inside it left to catch it, so the
-runtime tears the fiber down and reports the thrown value as DATA instead of letting the throw
-unwind your watch context. @error@ is the thrown value ITSELF, untouched, so a handler `match`es it
-exactly as a `prelude.throw` handler would. Fire-and-forget (`-> null`): handle it above your
-`watch` and decide what the failure MEANS — report it, fork a replacement, or re-raise to bring the
-region down. It rides `watch`'s row, so handling it is part of the region's total obligation. THIS
-IS WHY A FORK NEEDS NO THROW GUARD: an uncaught fiber throw can no longer ride the ceiling out of
-the region, so a `fork`'s task row carries only the throws the task itself handles. NOT `crashed`:
-a throw is a failure a CORRECT program meets and its payload is typed domain data, while a panic is
-a defect in the program and carries only a message — same `(id, name, <reason>)` shape, different
-question. Not meant to be performed by programs (the runtime is its one author); a program that
-performs it anyway merely reports a fictitious failure to its own handler."
+@"A fiber failed — re-emitted at `watch` in place of the fiber's uncaught `prelude.throw`, which had
+nothing left inside the task to catch it. @error@ is the thrown value itself, untouched, so a handler
+`match`es it exactly as a `prelude.throw` handler would. Fire-and-forget (`-> null`): a handler above
+the `watch` decides what the failure means. The throw is trapped here rather than riding the ceiling
+out of the region, which is why a `fork` carries no throw guard. Distinct from `crashed`: a throw's
+payload is typed domain data, while a panic carries only a message. The runtime is its one author."
 request failed(
   @"The runtime-minted id of the fiber that failed." id: string,
   @"The name tag its fork carried (empty when the fork gave none)." name: string,
   @"The value the fiber threw, exactly as it was thrown." error: unknown,
 ) -> null
 
-@"The runtime-minted id of a fiber handle — the same id `roster` lists, `cancel_by_id` addresses
-and `crashed` names, read straight off the handle (a pure read, no runtime round-trip). Use it to
-tell a model (or a log) which fiber a fresh `fork` just started."
+@"The runtime-minted id of a fiber handle — the same id `roster` lists, `cancel_by_id` addresses and
+`crashed` names, read straight off the handle (a pure read, no runtime round-trip)."
 primitive agent fiber_id(@"The fiber handle `fork` returned." handle: agent never -> null with all) -> string
 
-@"The RUNNING fibers of @nursery@, straight from the runtime's own liveness — one `fiber_info` per
-live fiber, in fork order. There is no Katari-side copy of this set, so it can never be stale: a
-settled or cancelled fiber is simply absent. Scope-gated (`with Scope`): callable only inside the
-opening `provide`."
+@"The running fibers of @nursery@, straight from the runtime's own liveness — one `fiber_info` per live
+fiber, in fork order. There is no Katari-side copy, so a settled or cancelled fiber is simply absent.
+Scope-gated (`with Scope`): callable only inside the opening `provide`."
 external agent roster[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
 ) -> array[fiber_info] with Scope | io from "region"
 
-@"Tear down the fiber the runtime knows by @id@ — the ONE way to stop a fiber, addressed by the id the
-runtime minted (`fiber_id` reads it off a handle; `roster` lists it; `crashed` and `failed` name it).
-An id rather than a handle because an id is DATA: it survives a store round-trip, rides into a
-model-facing stop tool, and needs no live handle threaded through the program that holds it. A live fiber is
-cancelled and confirmed (`cancelled`); an id matching no running fiber of THIS nursery — settled,
-already cancelled, or never real — comes back as `unknown_fiber`, a value to render, not a panic
-(ids are often model-supplied, so a stale id is anticipated input). AN ID MINTED BY ANOTHER NURSERY IS
-EXACTLY SUCH A MISS: routing is per nursery scope, so a foreign id matches nothing in this one's
-running set and answers `unknown_fiber` — a cross-nursery cancel fails closed at runtime rather than
-being rejected by the type (the id is a `string`, and nothing about a `string` names its nursery).
+@"Tear down the fiber the runtime knows by @id@ — the one way to stop a fiber. An id rather than a
+handle because an id is data: it survives a store round-trip and rides into a model-facing stop tool. A
+live fiber answers `cancelled`; an id matching no running fiber of this nursery — settled, already
+cancelled, never real, or minted by another nursery — answers `unknown_fiber`, a value to render.
 Scope-gated (`with Scope`): callable only inside the opening `provide`."
 external agent cancel_by_id[effect Scope, effect E](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],

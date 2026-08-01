@@ -1,6 +1,5 @@
-// The `prelude.array` sub-module: operations over `array[T]` beyond what the language gives
-// directly (literals, `for` mapping). Called qualified — `array.get`, `array.length` — via the
-// default import. The parameter is named `target` throughout (uniform with `prelude.record`).
+// The `prelude.array` sub-module: operations over `array[T]` beyond what the language gives directly
+// (literals, `for` mapping). Called qualified — `array.get`, `array.length` — via the default import.
 
 @"The element at @index@ (0-based), or `null` when the index is out of bounds."
 primitive agent get[T](target: array[T], index: integer) -> T | null
@@ -23,36 +22,25 @@ primitive agent contains[T](target: array[T], value: T) -> boolean
 @"The index of the first element equal to @value@ (structural equality), or `null` when none is."
 primitive agent index_of[T](target: array[T], value: T) -> integer | null
 
-@"The arrays' elements concatenated in order — one level of nesting removed. With `for`'s mapping
-this is also the filter idiom: map each element to `[x]` or `[]`, then flatten."
+@"The arrays' elements concatenated in order — one level of nesting removed."
 primitive agent flatten[T](target: array[array[T]]) -> array[T]
 
 @"The elements in reverse order."
 primitive agent reverse[T](target: array[T]) -> array[T]
 
-@"The integers from @start@ (inclusive) to @end@ (exclusive), in order — `for`'s counted-loop
-source. Empty when @end@ <= @start@."
+@"The integers from @start@ (inclusive) to @end@ (exclusive), in order — `for`'s counted-loop source.
+Empty when @end@ <= @start@."
 primitive agent range(start: integer, end: integer) -> array[integer]
-
-// `map` and `fold` are not here, and `[]` is the empty array. Mapping IS `for` (`for (let x in xs) { next
-// f(x) }`), accumulating IS `for`'s own `var` — the language already has one way to say each, and a second
-// spelling of the same loop only makes a reader ask which one a call site meant. `filter` below stays,
-// because its composition is not a loop a reader recognises but a flatten over per-element `[x]` / `[]` —
-// short, and easy to get subtly wrong.
 
 @"The elements for which @keep@ returns true, in their original order."
 agent filter[T, effect E](target: array[T], keep: agent (value: T) -> boolean with E) -> array[T] with E {
   flatten(target = for (let value in target) { next if (keep(value = value)) { [value] } else { [] } })
 }
 
-// Sorting uses the one scalar order of `<` (see `prelude.less_than`): numbers numerically, strings
-// by Unicode code point, and in a mixed union every number before every string. Both are stable —
-// equal elements keep their original order.
-
-@"The elements sorted ascending by the scalar order of `<`. Stable."
+@"The elements sorted ascending by the scalar order of `<` (numbers numerically, strings by Unicode
+code point; in a mixed union, numbers before strings). Stable."
 primitive agent sort[T extends number | string](target: array[T]) -> array[T]
 
-@"The `[key, value]` tuples sorted ascending by key — stable, so equal keys keep their order. Composes
-directly with `record.entries` (deterministic iteration over a record), and a sort BY a projection is
-this over a `for` that pairs each element with its key."
+@"The `[key, value]` tuples sorted ascending by key, by the scalar order of `<`. Stable, so equal keys
+keep their original order; composes with `record.entries`."
 primitive agent sort_entries[K extends number | string, V](entries: array[[K, V]]) -> array[[K, V]]

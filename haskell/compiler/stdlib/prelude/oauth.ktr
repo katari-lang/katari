@@ -1,73 +1,24 @@
-// The `prelude.oauth` sub-module: on-demand OAuth bearer tokens for any workflow. `token` is an `external`
-// whose calls route to the runtime's `oauth` reactor (in-runtime, like `http.fetch` — no FFI sidecar) via
-// the `from "oauth"` clause. It is called as `oauth.token`.
-//
-// WHAT IT IS FOR. Any workflow that must call an OAuth-protected API names a stored CREDENTIAL and asks the
-// runtime for a usable bearer token; the runtime holds the token material (it never enters the program) and
-// refreshes it on demand. The credential is registered and authorized out of band — an operator registers
-// an OAuth client (the `oauth_clients` registry) and logs in once, or the FIRST use triggers the login. So
-// `token` composes with `http.fetch` to reach any bearer-authenticated endpoint:
-//
-//   let bearer : string of private = oauth.token(name = "github")
-//   let response = http.fetch(
-//     url = "https://api.github.com/user",
-//     headers = { Authorization = f"Bearer ${bearer}" },
-//   )
-//
-// The token is a `string of private` (a secret): it may flow ONLY toward a submission sink — an http
-// `Authorization` header, whose values are `string of private` — and it is redacted at every user-facing
-// boundary (a run result, the trace). This is the same information-flow contract as `env.get_secret`; the
-// difference is that the runtime, not the operator's env, owns and rotates the token.
-//
-// TOKEN CACHING, AND ITS WORST CASE. Ask on every use — `token` is not something to hoist into a `var`
-// and reuse. Each ask re-reads the stored credential and answers from its RECORDED EXPIRY: while the
-// stored clock still says valid (with a ~60-second margin, so a refresh lands before a token dies under
-// an in-flight call) the stored access token comes straight back; once due, the runtime runs a
-// `refresh_token` grant against the token endpoint saved at acquisition, persists the rotation, and
-// answers with the fresh token. Concurrent asks for one credential share a SINGLE refresh — a rotated
-// refresh token is often single-use, so two racing grants would burn it. A credential whose grant
-// declared no lifetime at all has no expiry to consult and is served until the server rejects it.
-//
-// The consequence to design around: the stored expiry is the ONLY input. There is no channel for a
-// program to tell the runtime "the token you just gave me was refused", so an access token REVOKED
-// before its stored expiry keeps being served — every call gets the dead token until the recorded
-// lifetime runs out. The worst case is therefore bounded by one access-token lifetime (about an hour for
-// Google), and it surfaces as the API's own 401 / 403, never as an `oauth` error. The recovery is
-// ordinary: turn that downstream auth failure into a `supervise.interrupted` (see `prelude.supervise`), and
-// each re-run asks afresh — once the stored lifetime passes, the ask refreshes, and a refresh the token
-// endpoint REFUSES parks the run on the authorization escalation below rather than failing it.
-//
-// THE PAUSE-AND-ASK CONTRACT. When the named credential has no usable token — it was never authorized, or
-// its refresh died beyond what the runtime can fix, even mid-run — `token` does NOT fail. The run PAUSES on
-// a user-facing `prelude.oauth.authorize` escalation; the admin console renders it as an authorization
-// request, and completing the browser flow (or a proactive login before the run) establishes the credential
-// and resumes the run right where it stopped. So a workflow author never handles "not logged in" — it is a
-// pause, not an error. A pause the runtime cannot resolve without a human is never a throw.
-//
-// Because it is an external call it performs io (the un-dischargeable `io` effect, which propagates to the
-// run root) — the strict, non-lifting call path, the same as `http.fetch`.
+// The `prelude.oauth` sub-module: on-demand OAuth bearer tokens. `token` routes to the runtime's
+// `oauth` reactor (in-runtime, like `http.fetch`) and so performs `io`. The runtime holds the token
+// material and refreshes it; no token ever enters the program, and a credential that needs a human
+// pauses the run on an authorization escalation rather than failing it.
 
 @"The OAuth token could not be resolved for a TRANSIENT reason — a network error, or the token endpoint
-failing (5xx) while refreshing. Thrown by `token`. Catch it to control retry — a retried call re-resolves.
-(A credential that needs a human to (re)authorize is never a throw: the run pauses on an authorization
-escalation instead.)"
+failing (5xx) while refreshing. Thrown by `token`; a retried call re-resolves. (A credential that needs
+a human to (re)authorize is never a throw: the run pauses on an authorization escalation instead.)"
 data server_error(message: string)
 
-@"Resolve a usable OAuth bearer token for the stored credential @name@, as a private string (the token is
-tainted secret and may flow only to a submission sink — an http `Authorization` header — never to a
-user-facing boundary). The runtime holds the token material and refreshes it on demand, so no token ever
-enters the program. When @name@ has no usable token (never authorized, or refresh-dead), the run PAUSES on
-a `prelude.oauth.authorize` escalation and resumes once the credential is established (the runtime-hosted
-browser flow, or a proactive login) — it does not fail. A transient resolution failure throws
-`server_error` (catchable with `use handler { request throw(error: oauth.server_error) -> never { ... } }`);
-uncaught, it fails the run.
+@"Resolve a usable OAuth bearer token for the stored credential @name@, as a private string — it may
+flow only to a submission sink such as an http `Authorization` header, never to a user-facing boundary.
+When @name@ has no usable token (never authorized, or refresh-dead) the run pauses on a
+`prelude.oauth.authorize` escalation and resumes once the credential is established; a transient
+resolution failure throws `server_error`.
 
-ASK EVERY TIME — never cache the answer in a `var`. Each ask re-reads the stored credential and serves it
-while the RECORDED expiry holds (with a ~60s refresh margin), refreshing once due; the runtime owns the
-caching, so a program that keeps its own copy only defeats the refresh. The flip side, which callers must
-design around: because the stored expiry is the only input, a token revoked BEFORE it expires keeps being
-served, and the API answers 401 / 403 for up to one access-token lifetime. Convert that downstream failure
-into a `supervise.interrupted` to recover automatically — see this module's header."
+Ask on every use rather than holding the answer in a `var`: the runtime serves the stored token while
+its recorded expiry holds (with a ~60s refresh margin) and refreshes once due, so the runtime owns the
+caching. That recorded expiry is the only input, so a token revoked before it expires keeps being
+served and the API answers 401 / 403 for up to one access-token lifetime; converting that downstream
+failure into a `supervise.interrupted` recovers, since each re-run asks afresh."
 external agent token(
   @"The registered name of a stored credential (e.g. \"github\"); the name itself is not a secret." name: string,
 ) -> string of private with io | prelude.throw[server_error] from "oauth"

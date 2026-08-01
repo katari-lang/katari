@@ -1,7 +1,5 @@
-// The `prelude.record` sub-module: operations over the homogeneous string-keyed map `record[T]`
-// (the shape of a parsed JSON object's entries, an env listing, ...). Called qualified —
-// `record.get`, `record.keys` — via the default import. The parameter is named `target` throughout
-// (uniform with `prelude.array`).
+// The `prelude.record` sub-module: operations over the homogeneous string-keyed map `record[T]` (a
+// parsed JSON object's entries, an env listing, ...). Called qualified via the default import.
 
 @"Read the value under @key@, or `null` when the key is absent."
 primitive agent get[T](target: record[T], key: string) -> T | null
@@ -9,17 +7,10 @@ primitive agent get[T](target: record[T], key: string) -> T | null
 @"A copy of the record with @value@ under @key@ (replacing an existing entry)."
 primitive agent set[T](target: record[T], key: string, value: T) -> record[T]
 
-@"A copy of the record with @value@ under @key@ WHEN @value@ is present, and @target@ unchanged when it
-is `null` — the canonical form of a CONDITIONALLY built optional field. An omitted key and a key holding
-`null` are different documents at every boundary that matters (a REST API reads the first as \"leave it
-alone\" and the second as \"set it to nothing\"), so the choice between them cannot be made by writing
-`null` into the record; it has to be made by not writing the key. Spelled by hand that is a four-line
-`match` per field, and a request object with six optional parameters is twenty-four lines of identical
-plumbing whose only variation is a key name — which is exactly where a wrong key or a wrong source
-variable hides. Chained, the whole build is one expression per field:
-`set_if(target = set_if(target = empty(), key = \"cursor\", value = cursor), key = \"limit\", value = limit)`.
-To store an explicit JSON null instead, call `set` — this agent reads `null` as ABSENCE, which is the
-Katari-wide meaning of the value and the reason the two operations stay separate."
+@"A copy of the record with @value@ under @key@ when @value@ is present, and @target@ unchanged when it
+is `null` — the way to build a conditionally present field, since an omitted key and a key holding
+`null` are different documents at the boundaries that read them. To store an explicit JSON null
+instead, call `set`; this agent reads `null` as absence."
 agent set_if[T](
   @"The record being built." target: record[T],
   @"The key to set when @value@ is present." key: string,
@@ -46,13 +37,9 @@ primitive agent size(target: record[unknown]) -> integer
 @"Every entry as a @[key, value]@ pair, in sorted key order — the record's `for`-iterable view."
 primitive agent entries[T](target: record[T]) -> array[[string, T]]
 
-@"The two records' entries in one record; on a shared key the right value wins (the override
-direction of layered configuration, e.g. default headers extended per call)."
+@"The two records' entries in one record; on a shared key the right value wins (the override direction
+of layered configuration, e.g. default headers extended per call)."
 primitive agent merge[T](left: record[T], right: record[T]) -> record[T]
 
-// There is no `empty` and no `values`: `{}` is the empty record literal, and the values are `entries`
-// under a `for` that keeps the second half (`for (let [_, value] in entries(target = r)) { next value }`)
-// — the projection reads as what it is, and there is one way to iterate a record rather than two. ONE
-// PARSING NOTE about the literal: a bare `{}` immediately after a `->` (a match arm, an agent body) is
-// read as an empty BLOCK, which answers `null`; write `({})` there. Everywhere else — an argument, a
-// `let`, a tail expression — `{}` is the record.
+// `{}` is the empty record literal — except immediately after a `->` (a match arm, an agent body),
+// where a bare `{}` parses as an empty block and answers `null`; write `({})` there.

@@ -1,7 +1,5 @@
-// The `prelude.math` sub-module: numeric operations beyond the arithmetic operators. Called
-// qualified — `math.floor`, `math.max` — via the default import. The rounding trio is the only
-// number -> integer conversion in the language (`/` always yields `number`), so integer arithmetic
-// over divided quantities goes through here.
+// The `prelude.math` sub-module: numeric operations beyond the arithmetic operators. The rounding
+// trio is the only number -> integer conversion in the language (`/` always yields `number`).
 
 @"The absolute value; preserves integer."
 primitive agent abs[T extends number](value: T) -> T
@@ -22,8 +20,7 @@ primitive agent ceil(value: number) -> integer
 @"The nearest integer (half away from zero, the grade-school rule — not banker's rounding)."
 primitive agent round(value: number) -> integer
 
-@"@base@ raised to the @exponent@ power. Yields a `number`: a negative or fractional @exponent@ takes an
-integer @base@ off the integers (`pow(base = 2, exponent = -1)` is 0.5), so the type cannot promise integer,
-exactly as `/` cannot — floor the result when an integer is wanted. A non-finite result (0 to a negative
-power, or a negative base to a fractional power) panics, like a zero divisor."
+@"@base@ raised to the @exponent@ power, as a `number`: a negative or fractional @exponent@ takes an
+integer @base@ off the integers, so the type cannot promise integer — floor the result when an integer
+is wanted. A non-finite result (0 to a negative power, a negative base to a fractional power) panics."
 primitive agent pow(base: number, exponent: number) -> number

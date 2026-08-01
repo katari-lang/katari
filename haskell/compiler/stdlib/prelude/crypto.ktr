@@ -1,52 +1,28 @@
-// The `prelude.crypto` sub-module: minimal cryptographic primitives. Like the rest of the prelude's
-// primitive surface these are the smallest general capabilities the runtime must supply because no
-// Katari composition can express them — policy (what to hash, whether to salt) stays in the program.
+// The `prelude.crypto` sub-module: the cryptographic primitives no Katari composition can express.
+// Policy — what to hash, whether to key it — stays in the program.
 
 @"The SHA-256 digest of @text@'s UTF-8 bytes, as 64 lowercase hex characters. Deterministic and pure,
-so a replay recomputes the same digest. Typical uses: a content dedupe key, or a stable tag for an
-external identifier — but note that a plain digest of an ENUMERABLE input (a numeric user id, an
-email) is reversible by dictionary: anyone can hash every candidate and match. For a tag that must
-not be reversible, use `hmac_sha256` with a secret key. Takes PUBLIC text only — hashing a secret
-would raise a declassification question (is the digest of a secret still secret?) that this plain
-digest deliberately leaves unanswered; `hmac_sha256` answers it for the keyed form."
+so a replay recomputes the same digest. @text@ is public by type. A digest of an enumerable input (a
+user id, an email) is reversible by dictionary; `hmac_sha256` is the irreversible form."
 primitive agent sha256(@"The text to digest, hashed as its UTF-8 bytes." text: string) -> string
 
-@"The HMAC-SHA-256 tag of @text@ under the secret @key@, as 64 lowercase hex characters — the
-IRREVERSIBLE tag `sha256` cannot give over an enumerable input: without the key a dictionary attack
-is impossible, so hashing a user id with a secret key yields a pseudonym that is stable for one key
-and opaque to everyone without it (a chat bot's abuse-attribution tag is the canonical use; rotating
-the key rotates every pseudonym). The result is deliberately PUBLIC despite the private key: an HMAC
-tag reveals nothing about the key by construction — irreversibility IS the sound declassification —
-so this is the one prim whose result the runtime does not taint private. Deterministic, so a replay
-recomputes the same tag."
+@"The HMAC-SHA-256 tag of @text@ under the secret @key@, as 64 lowercase hex characters —
+irreversible even over an enumerable input, unlike `sha256`. Deterministic, so a replay recomputes the
+same tag. The result is public despite the private key: irreversibility is the sound declassification,
+so this is the one prim whose result the runtime does not taint private."
 primitive agent hmac_sha256(
   @"The secret key material; the tag is stable per key and unforgeable without it." key: string of private,
   @"The text to tag, as its UTF-8 bytes; public, like `sha256`'s." text: string,
 ) -> string
 
-@"A short, STABLE, IRREVERSIBLE stand-in for @value@ under the secret @key@ — the first @length@ hex
-characters of its HMAC-SHA-256 tag. The same value under the same key always yields the same
-pseudonym, two different values effectively never collide at the default width, and nobody without
-the key can go backwards or forwards: they can neither read the original out of the tag nor check a
-guess against it.
-
-This is two lines over `hmac_sha256` and it is here for WHICH two lines. The thing being pseudonymised
-is always an identifier — a chat user id, an email address, an account number — and an identifier is
-ENUMERABLE, which is exactly the input a plain `sha256` fails on: anyone can hash every candidate id
-and match the digest, so the \"anonymous\" tag names its subject to the first person who tries. The
-composition that reaches for `sha256` is short, natural, and wrong, and it is wrong SILENTLY — the
-output looks identical. Encoding the keyed choice in the name is the point; the slicing is incidental.
-
-@length@ is a collision / brevity trade, not a security one (truncating an HMAC does not make it
-reversible): 8 hex characters distinguish on the order of tens of thousands of subjects before a
-birthday collision is likely, which is the scale of a chat community. Widen it for a bigger population.
-ROTATING THE KEY ROTATES EVERY PSEUDONYM — that is the erasure story, and the reason the key belongs in
-the project's secret env rather than in the source. The result is PUBLIC despite the private key, for
-`hmac_sha256`'s reason: irreversibility IS the sound declassification, so a pseudonym may be shown to a
-model, written to a store, or rendered into a message."
+@"A short, stable, irreversible stand-in for @value@ under the secret @key@ — the first @length@ hex
+characters of its HMAC-SHA-256 tag. Keyed rather than a plain `sha256` because the thing being
+pseudonymised is an identifier, which is enumerable. @length@ is a collision / brevity trade, not a
+security one (8 hex characters distinguish tens of thousands of subjects); rotating @key@ rotates every
+pseudonym. The result is public, like `hmac_sha256`'s."
 agent pseudonym(
   @"The secret key the pseudonym is stable under; rotating it rotates every pseudonym." key: string of private,
-  @"The identifier to stand in for — a user id, an address; public, and enumerable, which is why the tag is keyed." value: string,
+  @"The identifier to stand in for — a user id, an address; public, and enumerable." value: string,
   @"How many hex characters to keep; a collision / brevity trade, not a security one." length: integer ?= 8,
 ) -> string {
   string.slice(value = hmac_sha256(key = key, text = value), start = 0, end = length)

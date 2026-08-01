@@ -1,36 +1,23 @@
-// The `prelude.time` sub-module: durable wall-clock time. `now`, `sleep`, `sleep_until` and `watch` are
-// `external`s whose calls route to the runtime's `time` reactor (in-runtime, like `http.fetch` — no FFI
-// sidecar) via the `from "time"` clause. They are called as `time.now`, `time.sleep`, `time.sleep_until`
-// and `time.watch`.
-//
-// WHY THESE ARE EXTERNAL CALLS, NOT PRIMS. A prim runs as pure computation inside a turn, and the
-// runtime's replay contract is that a turn is a deterministic function of its durable inputs (uncommitted
-// turns re-run from those inputs after a commit failure or restart). A prim reading the wall clock —
-// `Date.now()` — breaks exactly that contract: a replayed turn would observe a different instant than its
-// first execution did. Routing `now` through the reactor moves the clock read OUTSIDE the turn: the
-// instant arrives as a `delegateAck` the caller's turn merely consumes, and the commit that lands that
-// consumption makes the value durable atomically with everything that observed it — after which no replay
-// recomputes it. (A restart BEFORE that commit re-resolves the still-open call from the current clock,
-// which is sound: nothing durable observed the earlier instant.) The same reactor owns the timers `sleep`
-// / `watch` wait on, so their deadlines persist and re-arm across a restart.
-//
-// Because these are external calls they perform io (the un-dischargeable `io` effect, which propagates to
-// the run root) — the strict, non-lifting call path, the same as `http.fetch`.
+// The `prelude.time` sub-module: durable wall-clock time. `now`, `sleep`, `sleep_until` and `watch`
+// route to the runtime's `time` reactor (in-runtime, like `http.fetch`), so each performs `io`.
+// They are externals rather than prims because a turn must be a deterministic function of its durable
+// inputs: routing the clock read outside the turn is what keeps a replayed turn observing the same
+// instant, and it is the same reactor that owns the timers `sleep` / `watch` persist and re-arm on.
 
-@"The current wall-clock time, as epoch milliseconds (whole milliseconds since 1970-01-01T00:00:00Z).
-The instant becomes durable together with the work that first observes it, so once any downstream step has
-seen the value it never changes under replay or recovery. (A restart in the narrow window before that
-commit re-reads the clock and resolves a fresh instant — sound, because nothing durable saw the first.)"
+@"The current wall-clock time, as epoch milliseconds. The instant becomes durable together with the
+work that first observes it, so once any downstream step has seen the value it never changes under
+replay or recovery. (A restart in the narrow window before that commit re-reads the clock — sound,
+because nothing durable saw the first.)"
 external agent now() -> number with io from "time"
 
-@"Sleep for @milliseconds@ before resolving with `null`. The wake deadline (now + @milliseconds@) is
-persisted: a runtime restart re-arms the timer, and a deadline that already passed while the runtime was
-down resolves immediately on recovery. A @milliseconds@ that is zero or negative resolves at once."
+@"Sleep for @milliseconds@ before resolving with `null`. The wake deadline is persisted: a runtime
+restart re-arms the timer, and a deadline that already passed while the runtime was down resolves
+immediately on recovery. A @milliseconds@ that is zero or negative resolves at once."
 external agent sleep(@"The delay, in milliseconds; zero or negative resolves at once." milliseconds: number) -> null with io from "time"
 
-@"Sleep until the absolute epoch-millisecond instant @time@, then resolve with `null`. The same durable
-deadline as `sleep`, but pinned to an absolute wall-clock instant rather than a relative delay — an
-instant already in the past resolves immediately."
+@"Sleep until the absolute epoch-millisecond instant @time@, then resolve with `null` — the same
+durable deadline as `sleep`, pinned to an absolute instant rather than a relative delay. An instant
+already in the past resolves immediately."
 external agent sleep_until(@"The absolute wake instant, in epoch milliseconds; a past instant resolves at once." time: number) -> null with io from "time"
 
 @"A fixed interval: an occurrence every @milliseconds@ after the watch starts (the first occurrence is
@@ -38,9 +25,9 @@ one interval in, not at the start). @milliseconds@ must be positive."
 data interval(@"The gap between occurrences, in milliseconds; a non-positive gap panics the watch." milliseconds: number)
 
 @"A cron schedule: the occurrences of the standard cron @expression@ (the 5-field form, or the 6-field
-form whose leading field is seconds) read in the IANA @timezone@ (e.g. \"Asia/Tokyo\", \"UTC\"). The
-timezone is required and explicit — there is no ambient default, because \"every day at 09:00\" means a
-different instant in each zone and the runtime must not guess which one."
+form whose leading field is seconds) read in the IANA @timezone@. The timezone is required and
+explicit — there is no ambient default, because \"every day at 09:00\" means a different instant in each
+zone."
 data cron(
   @"5 fields, or 6 with a leading seconds field; a malformed expression panics the watch." expression: string,
   @"An IANA zone name; an unknown zone panics the watch." timezone: string,
@@ -50,30 +37,20 @@ data cron(
 type schedule = interval | cron
 
 @"Call @deliver_to@ once per @schedule@ occurrence, forever, passing the occurrence's scheduled epoch
-millisecond as @time@. `watch` never resolves on its own (`-> never`); it runs until the run is
-cancelled, at which point the in-flight delivery is cancelled and the watch tears down. @deliver_to@'s
-effects @E@ flow to the caller's handlers unchanged.
+millisecond as @time@. It never resolves on its own (`-> never`) and runs until the run is cancelled;
+@deliver_to@'s effects @E@ flow to the caller's handlers unchanged.
 
-Durability. The next occurrence is persisted; a restart re-arms it. If one or more occurrences were
-missed while the runtime was down, `watch` fires EXACTLY ONCE immediately on recovery (the earliest
-missed occurrence's scheduled time — it does not backfill every missed one), then continues on schedule.
-Deliveries are serialized: the next occurrence is not armed until the current delivery settles, so a
-@deliver_to@ slower than the interval simply rate-limits the ticks rather than queueing them.
-
-No built-in retry. A @deliver_to@ that throws or panics is NOT retried — the failure propagates and kills
-the watch, exactly as an uncaught failure in any callee does. Resilience is composed at the call site (a
-`supervise` provider plus a converter around @deliver_to@), never baked into `watch`."
+The next occurrence is persisted and re-armed across a restart. If occurrences were missed while the
+runtime was down, `watch` fires exactly once immediately on recovery (the earliest missed occurrence's
+scheduled time — it does not backfill), then continues on schedule. Deliveries are serialized: the next
+occurrence is not armed until the current delivery settles, so a slow @deliver_to@ rate-limits the ticks
+rather than queueing them. There is no built-in retry: a @deliver_to@ that throws or panics propagates
+and ends the watch, and resilience is composed at the call site with a `supervise` provider and a
+converter."
 external agent watch[effect E](
   @"When occurrences fire: an `interval(...)` or a `cron(...)` value." schedule: schedule,
   @"Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant." deliver_to: agent (time: number) -> null with E,
 ) -> never with E | io from "time"
-
-// ── with_deadline: the first-wins race, packaged ─────────────────────────────────────────────────
-//
-// The race an app used to hand-roll (two `parallel` arms performing a settle request, a handler
-// `break`ing with the first) — writable generically now that `lacks` exists: the task's effect row
-// stays open, constrained only to not perform the settle channel itself. The outcome is a SUM, not an
-// in-band string: the app decides what a timeout renders as.
 
 @"The task settled first: its value."
 data completed[T](@"The task's result." value: T)
@@ -86,16 +63,14 @@ type raced[T] = completed[T] | deadline_passed
 
 @"`with_deadline`'s settle channel — performed by whichever arm finishes first, handled (and `break`ed
 on) inside `with_deadline` alone. Its `lacks` constraint is what reserves it: a task cannot perform it,
-so the handler peel stays sound over the task's still-generic row. Only the `with_deadline` handler
-inside the program answers it: the runtime never machine-answers `race_settled`, so nothing outside the
-run resolves it."
+so the handler peel stays sound over the task's still-generic row. The runtime never machine-answers
+it, so nothing outside the run resolves it."
 request race_settled[T](@"The settling side's outcome." outcome: T) -> null
 
 @"Race @task@ against a @milliseconds@ deadline and return whichever settled first: `completed` with
 the task's value, or `deadline_passed` — the loser's arm is cancelled (the ordinary cancel cascade; an
-in-flight external call is interrupted at-most-once, like any cancel). The task's own throws are NOT
-caught here — they escalate as usual; catch them (`prelude.catch`, or a handler) around or inside the
-task as the app prefers."
+in-flight external call is interrupted at-most-once, like any cancel). The task's own throws escalate
+as usual; a handler around or inside the task catches them."
 agent with_deadline[T, effect E lacks race_settled](
   @"The budget, in milliseconds." milliseconds: number,
   @"The task to race; its row may be anything that does not perform `race_settled`." task: agent (value: null) -> T with E,
@@ -114,20 +89,11 @@ agent with_deadline[T, effect E lacks race_settled](
   deadline_passed()
 }
 
-// ── the civil (wall-clock) calendar: pure arithmetic over an offset, no clock ─────────────────────
-//
-// Howard Hinnant's closed-form civil-calendar algorithms (`civil_from_days` / `days_from_civil`) over
-// the proleptic Gregorian calendar, as plain Katari — exact for any instant, past or future, with no
-// month-length tables. The scope is deliberately honest: an instant is epoch milliseconds (what `now`
-// returns), and a wall clock is `civil` fields at a FIXED offset passed explicitly (`offset_minutes`,
-// default 0 = UTC). Resolving a NAMED zone ("Asia/Tokyo") to an offset is not arithmetic at all — the
-// IANA database is political and revised — so it is the one primitive at the end of this module,
-// `zone_offset`, whose answer is exactly the `offset_minutes` every agent here takes. Composing the two
-// is what makes a named-zone wall clock DST-correct: the offset is resolved AT the instant being
-// rendered, so `to_civil(epoch_milliseconds = t, offset_minutes = zone_offset(...))` reads the offset
-// that was actually in force. The reverse direction stays the program's own composition (resolve an
-// offset near the intended instant, then `from_civil`) because a wall clock in a zone is genuinely
-// ambiguous across a DST transition — one local time can name two instants, or none.
+// The civil calendar below is Howard Hinnant's closed-form `civil_from_days` / `days_from_civil` over
+// the proleptic Gregorian calendar, as plain Katari. A wall clock is `civil` fields at a fixed offset
+// passed explicitly; resolving a named zone to an offset is a lookup rather than arithmetic, and is
+// the `zone_offset` primitive at the foot of the module. Composing the two per instant is what makes a
+// named-zone render DST-correct.
 
 @"A wall-clock date-time split into its calendar fields (proleptic Gregorian). Produced by `to_civil`
 and folded back by `from_civil`; a plain value carrying NO zone of its own — it means whatever offset
@@ -152,8 +118,7 @@ agent to_civil(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> civi
   let days = math.floor(value = total_seconds / 86400)
   let seconds_of_day = total_seconds - days * 86400
   // civil_from_days: shift the epoch to an era based on 1st March 2000 so the leap day falls at the end
-  // of the 400-year cycle, then invert the 400/100/4-year leap rules in closed form. Every division is a
-  // floor, so pre-1970 instants (negative days) fall through the same arithmetic.
+  // of the 400-year cycle. Every division is a floor, so pre-1970 instants use the same arithmetic.
   let shifted = days + 719468
   let era = math.floor(value = shifted / 146097)
   let day_of_era = shifted - era * 146097
@@ -178,11 +143,10 @@ agent to_civil(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> civi
 }
 
 @"Fold wall-clock fields back to an epoch-millisecond instant, reading them at a fixed offset
-(@offset_minutes@ east of UTC; the default 0 means the fields are UTC). The exact inverse of
-`to_civil` at the same offset. Out-of-range fields FOLD ARITHMETICALLY rather than erroring — month 13
-is January of the next year, day 0 is the last day of the previous month, hour 24 is midnight of the
-next day — so date arithmetic is plain field arithmetic: `day = value.day + 7` is one week later with
-every carry handled."
+(@offset_minutes@ east of UTC; the default 0 means the fields are UTC) — the exact inverse of
+`to_civil` at the same offset. Out-of-range fields fold arithmetically rather than erroring (month 13
+is January of the next year, hour 24 is midnight of the next day), so date arithmetic is plain field
+arithmetic: `day = value.day + 7` is one week later with every carry handled."
 agent from_civil(value: civil, offset_minutes: integer ?= 0) -> number {
   // Normalize the month by floor division (floor `%` sends month 0 to December) so the linear folds
   // below only ever see 1..12; every other field is linear in the fold and carries by itself.
@@ -254,9 +218,9 @@ agent to_rfc3339(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> st
 
 @"Parse an RFC3339 timestamp — `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or `±HH:MM` — to an
 epoch-millisecond UTC instant, or `null` when the string is not one (like `string.to_integer`).
-Validated, not clamped: a month or day that does not exist (February 30th) is `null`, not a silently
-carried date. `T` / `Z` also read lowercase; a fraction beyond milliseconds is truncated; a leap
-second (`:60`) folds into the next minute."
+Validated, not clamped: a date that does not exist (February 30th) is `null`, not a silently carried
+date. `T` / `Z` also read lowercase; a fraction beyond milliseconds is truncated; a leap second (`:60`)
+folds into the next minute."
 agent from_rfc3339(value: string) -> number | null {
   agent pad(value: integer, width: integer) -> string {
     string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
@@ -268,11 +232,8 @@ agent from_rfc3339(value: string) -> number | null {
   if (length < 20) {
     null
   } else {
-    // The zone is the tail — one `Z`, or the six characters `±HH:MM`; everything between the seconds
-    // field and the zone is the optional fraction. Each region is validated by RE-RENDERING: parse the
-    // fields, format them back canonically, and require equality with the input — one comparison
-    // rejects every malformed shape (a stray sign inside a field, a missing separator, a dropped
-    // digit) that field-wise reads alone would let through.
+    // Each region is validated by re-rendering: parse the fields, format them back canonically, and
+    // require equality — one comparison rejects the malformed shapes field-wise reads let through.
     let zone_is_utc = string.to_upper(value = string.slice(value = value, start = length - 1, end = length)) == "Z"
     let zone_start = if (zone_is_utc) { length - 1 } else { length - 6 }
     let offset_minutes = if (zone_is_utc) {
@@ -294,14 +255,13 @@ agent from_rfc3339(value: string) -> number | null {
         case _ -> null
       }
     }
-    // The fraction: `.` followed by one or more digits (each point checked — a fraction can be longer
-    // than any integer read would allow); the first three, right-padded with zeros, are the
-    // milliseconds, and the rest truncates.
+    // The fraction is checked point by point because it can be longer than any integer read allows;
+    // the first three digits, right-padded with zeros, are the milliseconds and the rest truncates.
     let millisecond = if (zone_start == 19) {
       0
     } else {
       let digits = string.slice(value = value, start = 20, end = zone_start)
-      // Every point of the fraction checked, one `contains` at a time — Katari has no character classes.
+      // Katari has no character classes, so membership is one `contains` per code point.
       let all_digits = for (let point in string.split(value = digits, separator = ""), var every: boolean = true) {
         next with { every = every && string.contains(value = "0123456789", search = point) }
       } then (_points) { every }
@@ -318,8 +278,8 @@ agent from_rfc3339(value: string) -> number | null {
     match ([offset_minutes, millisecond, read_field(start = 0, end = 4), read_field(start = 5, end = 7), read_field(start = 8, end = 10), read_field(start = 11, end = 13), read_field(start = 14, end = 16), read_field(start = 17, end = 19)]) {
       case [integer(offset), integer(fraction), integer(year), integer(month), integer(day), integer(hour), integer(minute), integer(second)] -> {
         let canonical_head = f"${pad(value = year, width = 4)}-${pad(value = month, width = 2)}-${pad(value = day, width = 2)}T${pad(value = hour, width = 2)}:${pad(value = minute, width = 2)}:${pad(value = second, width = 2)}"
-        // Validated, not clamped: the re-rendered head must match (case-normalized), and every field
-        // must be in range — except second 60, the leap second, which folds forward in `from_civil`.
+        // Validated, not clamped — except second 60, the leap second, which folds forward in
+        // `from_civil`.
         if (
           string.to_upper(value = string.slice(value = value, start = 0, end = 19)) != canonical_head
             || month < 1
@@ -343,34 +303,13 @@ agent from_rfc3339(value: string) -> number | null {
   }
 }
 
-// ── civil LABELS: the five renders a program shows a person or a model ────────────────────────────
-//
-// `to_rfc3339` is the WIRE render — exact, sortable, and unreadable at a glance. What an app actually
-// puts in front of a person (an operator's clock line) or a model (the "today is" a turn is injected
-// with) is a handful of small civil labels, and every app that had a calendar wrote the same four: a
-// weekday's three letters, an offset's `±HH:MM`, a `YYYY-MM-DD` date, and the two joined into a stamp.
-// They are here for the ordinary reason — one implementation, one set of edge cases (a negative
-// offset's sign, a day index out of range).
-//
-// RENDERING ONLY. A date ADVANCED by whole days is not a label, it is calendar arithmetic, and calendar
-// arithmetic belongs to `to_civil` / `from_civil` above: read the instant into its fields, add to `day`
-// (which normalises — the 32nd of a month is the 1st of the next), render the result back. Keeping the
-// two apart is what stops this section from growing a date algebra beside the one that already exists.
-//
-// THERE IS NO PATTERN LANGUAGE, deliberately. A `strftime` would be a second, stringly-typed grammar
-// with its own escaping rules and its own errors, and these four labels are what the demand actually
-// was; a program wanting a fifth composes it from `to_civil`'s fields the way these do.
-//
-// Every label takes `offset_minutes` explicitly, exactly like the arithmetic above — and composing it
-// with `zone_offset` per instant is what makes a named zone's rendering DST-correct.
+// The civil labels below render only; advancing a date by whole days is calendar arithmetic and
+// belongs to `to_civil` / `from_civil`. There is no pattern language — a program wanting a further
+// label composes it from `to_civil`'s fields the way these do. Each takes `offset_minutes` explicitly,
+// so composing it with `zone_offset` per instant makes a named zone's rendering DST-correct.
 
 @"The three-letter English label of an ISO weekday — 1 (Monday) through 7 (Sunday), the numbering
-`day_of_week` answers. Anything outside 1..7 is `\"???\"`, so this is TOTAL: the parameter's type is
-`integer` rather than a closed set, and a label that silently reads \"Mon\" for a bad index would hide
-the arithmetic mistake that produced it.
-
-A LABEL rather than the number, because \"Sat\" is what a model reads as a weekend without being told
-the numbering, and a person reading a clock line does not want to count."
+`day_of_week` answers. Total: anything outside 1..7 answers `\"???\"` rather than a plausible label."
 agent weekday_label(@"The ISO weekday, 1 (Monday) to 7 (Sunday); anything else answers \"???\"." day: integer) -> string {
   match (day) {
     case 1 -> "Mon"
@@ -384,31 +323,24 @@ agent weekday_label(@"The ISO weekday, 1 (Monday) to 7 (Sunday); anything else a
   }
 }
 
-@"An offset east of UTC as its `±HH:MM` label — the suffix that makes a rendered wall clock unambiguous,
-so a model reading one can convert it against a timestamp it wrote itself. UTC renders `+00:00` rather
-than `Z`: this is a label for a PERSON beside a civil time, where a sign lines up with every other row
-and a lone letter does not. (`to_rfc3339`, which renders for the WIRE, spells UTC `Z` as RFC3339
-requires — the two are different audiences, not an inconsistency.) A non-whole-hour offset renders
-faithfully (Asia/Kathmandu's 345 is `+05:45`)."
+@"An offset east of UTC as its `±HH:MM` label, for a person reading it beside a civil time. UTC renders
+`+00:00` rather than `Z` (`to_rfc3339` renders for the wire and spells it `Z`), and a non-whole-hour
+offset renders faithfully (Asia/Kathmandu's 345 is `+05:45`)."
 agent offset_label(@"The offset in minutes EAST of UTC — exactly what `zone_offset` answers." offset_minutes: integer) -> string {
   agent pad(value: integer, width: integer) -> string {
     string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
   }
   // The sign is taken from the signed value and the magnitude rendered separately, so `-330` reads
-  // `-05:30` rather than the `-5:-30` a component-wise render of a negative offset produces.
+  // `-05:30` rather than the `-5:-30` a component-wise render produces.
   let sign = if (offset_minutes < 0) { "-" } else { "+" }
   let magnitude = math.abs(value = offset_minutes)
   f"${sign}${pad(value = math.floor(value = magnitude / 60), width = 2)}:${pad(value = magnitude % 60, width = 2)}"
 }
 
 @"The instant's civil DATE at @offset_minutes@ (default UTC) as `YYYY-MM-DD` — the date half of
-`to_rfc3339` without the clock, the zone or the `T`.
-
-This is the shape to DATE things with, and the reason is ordering: ISO order is string order, so dates
-in this form sort correctly with `array.sort`, compare with `<`, and group by prefix — a store key
-`entries/2026-07-26` sits under `entries/2026-07` for free. A year outside 0..9999 renders every digit
-(and a leading `-` for a negative one) rather than truncating, which loses the sort property but keeps
-the date honest; the ordinary range is unaffected."
+`to_rfc3339` without the clock, the zone or the `T`. ISO order is string order, so dates in this form
+sort with `array.sort`, compare with `<`, and group by store-key prefix. A year outside 0..9999 renders
+every digit rather than truncating, which keeps the date exact and drops the sort property."
 agent date_label(
   @"The instant, in epoch milliseconds." epoch_milliseconds: number,
   @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
@@ -423,13 +355,8 @@ agent date_label(
 
 @"The instant as a wall clock reads it at @offset_minutes@ (default UTC) —
 `2026-07-26 (Sun) 14:32 +09:00`: the civil date, the weekday, the time to the minute, and the offset,
-in one line.
-
-The whole point is that a reader needs NO arithmetic. A model asked \"how many days until the 31st\" or
-\"is that this week\" has the date AND the weekday in front of it, and a person handed the offset can
-tell at a glance whether the clock is theirs. Seconds are deliberately absent: this is the line an app
-injects into a turn or posts to an operator, where a second's precision is noise. Reach for
-`to_rfc3339` when the reader is a machine."
+in one line, so a reader needs no arithmetic. Seconds are absent; `to_rfc3339` is the render for a
+machine reader."
 agent stamp(
   @"The instant, in epoch milliseconds." epoch_milliseconds: number,
   @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
@@ -443,36 +370,18 @@ agent stamp(
   f"${date} (${weekday}) ${pad(value = fields.hour, width = 2)}:${pad(value = fields.minute, width = 2)} ${offset_label(offset_minutes = offset_minutes)}"
 }
 
-// ── the zone database: the one offset arithmetic cannot derive ────────────────────────────────────
-//
-// A named zone's offset is a lookup, not a computation: the IANA rules are political, revised several
-// times a year, and differ per instant within one zone (every DST boundary). No Katari composition can
-// express that table, so the capability lands as the smallest general primitive — one zone in, one
-// offset out — and everything else (a civil wall clock, an RFC3339 render, a day-of-week) composes from
-// it with the agents above. The runtime already carries the database `cron`'s timezone is read against,
-// so this asks the same tables rather than shipping a copy.
-
 @"The offset of the IANA @zone@ in effect at @epoch_milliseconds@, in MINUTES EAST of UTC — exactly the
-`offset_minutes` this module's agents take. Per-instant, so it is DST-correct by construction:
-\"America/New_York\" answers -300 in January and -240 in July, and an instant one minute either side of
-a transition gets the offset that was actually in force. \"UTC\" answers 0, and a zone whose offset is
-not a whole hour answers it faithfully (\"Asia/Kathmandu\" is 345).
+`offset_minutes` this module's agents take. Per-instant, so it is DST-correct by construction, and a
+zone whose offset is not a whole hour answers it faithfully (\"Asia/Kathmandu\" is 345).
 
-`null` when the runtime's zone database does not know @zone@ — a misspelling (\"Asia/Tokio\"), an
-invented name, the empty string. The names it DOES know are exactly the ones a `cron` schedule's
-timezone accepts, being the same database: canonical IANA names, their historical aliases (\"Japan\",
-\"Asia/Calcutta\"), any letter case, and the legacy abbreviation spellings — but prefer a canonical
-name, because an abbreviation names a whole zone WITH its DST rules rather than the standard offset it
-looks like (\"PST\" answers -420 in July, not -480). The failure is a NULL rather than a throw for the
-same reason `string.to_integer`'s is: the argument is the whole explanation, so there is nothing a
-payload could add. Matching it is not optional, which is the point — a mistyped zone cannot silently
-degrade to UTC and render wrong civil times.
+`null` when the runtime's zone database does not know @zone@. The names it does know are exactly the
+ones a `cron` schedule's timezone accepts, being the same database: canonical IANA names, historical
+aliases, any letter case, and the legacy abbreviations. An abbreviation names a whole zone with its DST
+rules rather than the standard offset it resembles (\"PST\" answers -420 in July, not -480).
 
-Deterministic in its arguments: it reads no clock, so the answer for a given (@zone@,
-@epoch_milliseconds@) never changes within a runtime and a replay recomputes the same offset. The only
-drift possible is a zone database update between executions (a country changing its rules) — the same
-drift a `cron` schedule already lives with. Pre-1900 instants, whose zones ran on local mean time
-recorded to the second, round to the nearest minute."
+Deterministic in its arguments: it reads no clock, so a replay recomputes the same offset. The only
+drift possible is a zone database update between executions. Pre-1900 instants round to the nearest
+minute."
 primitive agent zone_offset(
   @"The instant to read the offset AT, in epoch milliseconds; fractions floor, like `to_civil`." epoch_milliseconds: number,
   @"An IANA zone name (e.g. \"Asia/Tokyo\", \"America/New_York\", \"UTC\"); an unknown name answers null." zone: string,

@@ -1,63 +1,18 @@
-// The `prelude.store` sub-module: the project's durable key-value store — named values that
-// outlive any single run. Where a handler's `var` is state WITHIN a run and `env` is operator-set
-// configuration INTO a run, the store is state BETWEEN runs: any run reads what another wrote, the
-// operator browses and edits the same tree in the console, and an AI reads a stored note back into
-// its context. Values are ordinary Katari values: a document, a data value, a `file`, a secret
-// (`string of private` seals at rest exactly like a secret env entry, and stays redacted at every
-// user-facing boundary). Writes are last-write-wins.
+// The `prelude.store` sub-module: the project's durable key-value store — named values that outlive
+// any single run, holding any Katari value (a document, a `data`, a `file`, a secret sealed at rest).
+// Writes are last-write-wins. Each operation is a `request`, so a handler in scope may intervene;
+// unhandled, the runtime machine-answers it against the project's durable rows at the project root,
+// and the answer is durable, so a replay observes the value the first attempt did.
 //
-// KEYS ARE AMBIENT. An operation names a path-like key (`"memos/2026-07"`) and nothing else; WHERE
-// the key lands is decided by the environment, not by a value threaded through the code. Three
-// concepts cover the whole module:
+// Keys are ambient: an operation names a path-like key and nothing else, and where it lands is the
+// environment's decision. A `workspace` is the key prefix and the serial domain in one install (one
+// lane per workspace), an `exclusive` is a critical section of the nearest one, and data several
+// workspaces share travels as a `shared` request served above them. A workspace descends only; there
+// is no `..`.
 //
-//   - WORKSPACE (`workspace`): the store's working directory AND its serial domain, opened as ONE
-//     provider. Under `use store.workspace(path = "core")` every operation's key is prefixed with
-//     `core/`, and `exclusive` — the critical section a read-modify-write takes its atomicity from —
-//     is served by that same install, one section at a time. Nested workspaces accumulate prefixes
-//     and nest domains, ONE LANE PER WORKSPACE: two workspaces are two FIFOs, so their sections
-//     interleave freely and a section is atomic against the traffic that can reach ITS keys, never
-//     against the whole project. The outermost bare perform is project-root access, and an
-//     `exclusive` no program handler catches is served at the PROJECT ROOT in one durable,
-//     project-wide FIFO across every run. An agent dispatched inside a workspace lives in that
-//     directory BY CONSTRUCTION — it holds no value it could widen. A path is `/`-separated
-//     `safe_segment`s and a malformed one panics, because that construction is only as sound as the
-//     strings a program puts in it.
-//
-//     THE TWO HALVES ARE ONE WORD ON PURPOSE, and the fusion is TOTAL: nothing here spells a prefix
-//     without its lane, or a lane without its prefix. Both USES are still served — want a private
-//     lane and a nested workspace is one, at the cost of a directory segment you were free to name;
-//     want a private directory and its lane comes along, which is what you wanted anyway — so what
-//     the split form actually bought was its failure mode: a facility that opened a prefix and forgot
-//     the domain wrote read-modify-writes into the project-wide root FIFO, which is legal, invisible,
-//     and wrong.
-//   - FACILITY: a workspace-relative toolset — a package (a memory, a task list) whose tools open
-//     ONE fixed subdirectory (`use store.workspace(path = "memory")`) around their own operations.
-//     The path is the package's constant; WHERE the facility's data lives is the CALLING workspace's
-//     decision, which is the whole inversion. That one install is the facility's LANE as well as its
-//     directory, so its critical sections serialize against each other and interleave with the app's;
-//     and because a section already runs inside the prefix of the workspace serving it, a facility
-//     NEVER re-opens its own subdirectory inside an `exclusive` task — that would spell
-//     `app/memory/memory/...`.
-//   - SHARED PLACE (`share` / `shared`): data several workspaces must read never travels by path
-//     escape — there is deliberately no `..`. It travels as a REQUEST served ABOVE the workspaces,
-//     whose clause opens the shared subtree in its own body; a workspace can never capture what it
-//     does not serve, so the proxy IS the semantics of sharing. `shared` is that proxy with the CELL
-//     factored out: the task is a closure, so ONE request covers every shared cell.
-//
-// Each operation is a `request` — part of the run's ENVIRONMENT. A program performs it; a handler in
-// scope may catch it (the same mechanism that catches `prelude.throw`) to intervene — a workspace
-// prefix, a test stub, a redirect. Unhandled, it escalates like any request to the run's OUTERMOST
-// environment, the runtime itself, which MACHINE-ANSWERS it against the project's durable rows at
-// the PROJECT ROOT — it is never surfaced as a question to a human operator. The answer is durable,
-// so a re-run during recovery observes the same value the first attempt did: the store is
-// replay-deterministic.
-//
-// Storing a `file` JOINS its bytes to the project's FILE LIBRARY: the stored file becomes a project
-// file (owned by the api root, listed on the console's Files page) that outlives the run that wrote
-// it. Overwriting or deleting an entry NEVER frees a file — the store only forgets the reference; the
-// file is removed by an explicit delete through the file API or the Files page, and a stored reference
-// to a file that was explicitly deleted reads as `gone` (`prelude.files`' contract for any handle to a
-// removed file).
+// Storing a `file` joins its bytes to the project's file library, so it outlives the writing run.
+// Overwriting or deleting an entry forgets the reference and leaves the file; only an explicit delete
+// through the file API removes it, after which a stored reference reads as `gone`.
 
 @"A lookup that found a value."
 data found(@"The stored value." value: unknown)
@@ -73,32 +28,23 @@ type lookup = found | absent
 shape with `json.validate[T]` on the found value."
 request get(@"The path-like key, relative to the current workspace." key: string) -> lookup
 
-@"Read @key@ as a T, resolved against the surrounding workspace, falling back to @fallback@ when the key
-is ABSENT or holds a value that is not one — the TYPED store read, and the only one a program should
-normally write. A stored cell is an `unknown` no schema guards (an older run's shape, a hand edit in the
-console, a key another facility took over), so every read is a boundary read: `get` folded through
-`json.validate[T]`, with the mismatch folded to @fallback@ by `prelude.catch`. T is read off @fallback@
-— a `get_or(key = ..., fallback = 0)` reads an integer, a `get_or(key = ..., fallback = my_state(...))`
-reads that `data` — so the type is normally inferred rather than written, and the fallback is the same
-value the caller would have had to supply in a `match` anyway.
+@"Read @key@ as a T, resolved against the surrounding workspace, falling back to @fallback@ when the
+key is absent or holds a value that is not one — the typed store read. T is read off @fallback@, so it
+is normally inferred rather than written.
 
-DEGRADING IS THE SEMANTICS HERE, not a shortcut around error handling: a durable cell whose shape no
-longer fits is a cell an EARLIER version of the program wrote, and there is nothing a reader can do
-about that except start over from a value it does understand. Reach for a bare `get` when a MISSING
-entry must be told apart from a WRONG-TYPED one (a first-run branch), or when the mismatch itself must
-be reported — `json.validate`'s `validation_error` names the offending path and this agent drops it.
-
-ONE INSTANTIATION TO AVOID: a T that itself admits `null` cannot distinguish a stored `null` (which
-validates) from a mismatch (which does not) — both come back as `null`, and so does an absent key. Where
-that distinction matters, read the bare `get`."
+Degrading is the semantics here: a durable cell whose shape no longer fits was written by an earlier
+version of the program, and starting over from a value the reader understands is the recovery. The
+bare `get` is the reader that separates a missing entry from a wrong-typed one, or that reports the
+mismatch itself. Under a T admitting `null`, a stored `null`, a mismatch and an absent key all answer
+`null`."
 agent get_or[T](
   @"The path-like key, relative to the current workspace." key: string,
   @"The value when the key is absent or does not fit T; its type IS T." fallback: T,
 ) -> T with get {
   match (get(key = key)) {
     case found(value => stored) -> {
-      // The stored value is checked, not assumed: `catch` folds the `validation_error` back into the
-      // answer so the mismatch and the absence take the same arm below.
+      // `catch` folds the `validation_error` into the answer so a mismatch takes the same arm as an
+      // absent key.
       agent checked() -> T with prelude.throw[json.validation_error] {
         json.validate[T](value = stored)
       }
@@ -111,16 +57,15 @@ agent get_or[T](
   }
 }
 
-@"Write @value@ at @key@, resolved against the surrounding workspace, creating or replacing the
-entry (last write wins). Any value fits: a document, a data value, a `file`, a secret (sealed at
-rest). A stored `file` joins the project's file library — it becomes a project file (visible on the
-Files page) that outlives the writing run. Overwriting the entry does NOT free the file it
-replaced; a file is removed only by an explicit delete through the file API or the Files page."
+@"Write @value@ at @key@, resolved against the surrounding workspace, creating or replacing the entry
+(last write wins). Any value fits: a document, a data value, a `file`, a secret (sealed at rest). A
+stored `file` joins the project's file library and outlives the writing run; overwriting the entry
+forgets the reference and leaves the file it replaced."
 request set(@"The path-like key, relative to the current workspace." key: string, @"The value to store." value: unknown) -> null
 
-@"Delete the entry at @key@, resolved against the surrounding workspace; deleting a missing key is
-a no-op. Deleting an entry that held a `file` does NOT free the file — it stays in the project's
-file library; remove it with an explicit delete through the file API or the Files page."
+@"Delete the entry at @key@, resolved against the surrounding workspace; deleting a missing key is a
+no-op. Deleting an entry that held a `file` forgets the reference and leaves the file in the project's
+file library."
 request delete(@"The path-like key, relative to the current workspace." key: string) -> null
 
 @"A `list` entry: a key holding a value, directly under the listed place."
@@ -132,48 +77,26 @@ data branch(@"The segment name, relative to the listed place." name: string)
 // One listing's element. (Type synonyms take no docs.)
 type entry = leaf | branch
 
-@"List what sits DIRECTLY under @path@ in the current workspace: a `leaf` per value-holding key and
-a `branch` per segment with entries below it (sorted; a name that is both leaf and branch yields
-both). The default @path@ of \"\" lists the workspace itself; a subdirectory path lists below it —
-the path parameter is how a prefix travels for listings, since a listing has no key to carry it."
+@"List what sits directly under @path@ in the current workspace: a `leaf` per value-holding key and a
+`branch` per segment with entries below it (sorted; a name that is both leaf and branch yields both).
+The default @path@ of \"\" lists the workspace itself — a listing has no key to carry the prefix, so
+the path parameter is how one travels."
 request list(@"The subdirectory to list, relative to the current workspace; \"\" is the workspace itself." path: string ?= "") -> array[entry]
 
-// ── path segments: the one spelling a name in a key may take ─────────────────────────────────────
-//
-// A key is path-like and a workspace is a prefix of it, so a NAME that lands in either is structural: a
-// worker called "a/b" is two directories, one called ".." climbs out of the workspace its tools were
-// meant to be confined to, and one called "" collapses a prefix into a stray separator. The geometry the
-// store's whole design rests on — an agent dispatched inside a workspace lives there BY CONSTRUCTION —
-// is undone by a single unchecked string, and the strings most likely to reach here are the ones a MODEL
-// chose (a worker it named, a metric series it invented).
-//
-// So the charset lives HERE, once, instead of being re-derived per app. The two halves are deliberately
-// different shapes, because they answer to different owners: `safe_segment` is TOTAL and answers `null`
-// for the app to turn into a corrective sentence (a model's bad name is an ordinary event, not a bug),
-// while `scope` PANICS on a malformed path (a program that opened a workspace on unvalidated input has a
-// defect, and a defect is the runtime's channel, not a value to route).
+// A name that lands in a key or a workspace prefix is structural: "a/b" is two directories, ".." leaves
+// the workspace. The charset therefore lives here once, in two shapes for two owners — `safe_segment`
+// is total and answers `null` for the app to render, while a malformed workspace path panics, since a
+// program routing unvalidated input into its store layout has a defect.
 
-@"Canonicalise @name@ into a store path SEGMENT, or `null` when it cannot be one: trimmed, lower-cased,
-and then required to be non-empty and spelled only in lowercase letters, digits, `-` and `_`. ONE
-offending character rejects the whole name — this is not a sanitiser, and deliberately so: silently
-stripping a `/` out of \"a/b\" would hand back \"ab\", a DIFFERENT name than the one the caller asked
-for, and two distinct requests would quietly land in one place.
-
-The charset is what a KEY can hold without meaning something else. No `/` (that is a new segment), so no
-`.` and therefore no `..` (that would climb out of the workspace a facility exists to confine), no
-whitespace, and no case distinction — a store key compares byte-wise, so \"Weight\" and \"weight\" would
-be two series a reader sees as one.
-
-Reach for it wherever a name a MODEL or a USER supplied becomes part of a key (a worker's directory, a
-metric series, a topic): the answer is the name to store under, and `null` is the app's cue to write its
-own corrective sentence back to whoever proposed it. The trimming and lower-casing are part of the
-answer, not a precondition — pass the raw text and store what comes back, so the same name typed twice
-with different spacing or case is the same cell."
+@"Canonicalise @name@ into a store path segment, or `null` when it cannot be one: trimmed,
+lower-cased, then required to be non-empty and spelled only in lowercase letters, digits, `-` and `_`.
+One offending character rejects the whole name. It is not a sanitiser: stripping the `/` out of \"a/b\"
+would answer a different name and land two distinct requests in one place. It is the reader for a name
+a model or a user supplied that becomes part of a key; the trimming and lower-casing are part of the
+answer, so the value to store under is what comes back."
 agent safe_segment(@"The proposed name, exactly as it was supplied — untrimmed and in any case." name: string) -> string | null {
   let normalized = string.to_lower(value = string.trim(value = name))
-  // Katari has no character classes, so membership is a `contains` over the charset spelled out, once per
-  // code point. The loop short-circuits nothing (a `for` visits every element) — the strings are
-  // name-length, so the whole check is cheaper than the branch that would.
+  // Katari has no character classes, so membership is one `contains` per code point over the charset.
   let legal = for (let character in string.split(value = normalized, separator = ""), var every: boolean = true) {
     next with { every = every && string.contains(value = "abcdefghijklmnopqrstuvwxyz0123456789-_", search = character) }
   } then (_characters) { every }
@@ -184,28 +107,20 @@ agent safe_segment(@"The proposed name, exactly as it was supplied — untrimmed
   }
 }
 
-// Whether a whole workspace PATH is well formed: one or more `/`-separated segments, each of them
-// already canonical (`safe_segment` answers the segment itself). Comparing against `safe_segment`'s
-// answer rather than re-checking the charset is what keeps ONE definition of a legal name: a path is
-// legal exactly when every piece of it is a name `safe_segment` would have handed back unchanged.
+// Whether a whole workspace path is well formed: one or more `/`-separated segments, each already
+// canonical. Comparing against `safe_segment`'s answer rather than re-checking the charset keeps one
+// definition of a legal name.
 agent is_safe_path(@"The candidate workspace path." path: string) -> boolean {
   for (let segment in string.split(value = path, separator = "/"), var every: boolean = true) {
     next with { every = every && safe_segment(name = segment) == segment }
   } then (_segments) { every }
 }
 
-// @path@ back, or a PANIC when it is not a well-formed workspace path. A malformed path reaching `scope`
-// is a DEFECT and not an outcome: the path a workspace opens is the program's own geometry, so a `..` or
-// an empty segment in it means the program routed unvalidated input (a model's word) into its store
-// layout without asking `safe_segment` first. Recovering from that is not a thing a caller can do —
-// there is no correct directory to fall back to — and returning a value would let the run keep writing
-// into whatever place the bad prefix produced, which is the one failure the geometry exists to prevent.
-//
-// A program cannot RAISE a panic (see the `prelude` header: `panic` is the runtime's own channel and has
-// no declaration a program can perform), so the defect is spelled with the one total-to-partial door the
-// language has — a zero divisor, which the runtime reports as a panic ("division by zero"). The message
-// is therefore the runtime's own and says nothing about paths; this agent's NAME is what identifies the
-// defect in the trace, and it exists for that reason as much as for the branch.
+// @path@ back, or a panic when it is not a well-formed workspace path: there is no correct directory to
+// fall back to, and a returned value would let the run keep writing under the bad prefix. A program
+// cannot raise a panic, so the defect is spelled with the one total-to-partial door the language has,
+// a zero divisor. The runtime's message says nothing about paths; this agent's name is what identifies
+// it in the trace, which is half of why it exists.
 agent panic_on_unsafe_path(@"The candidate workspace path." path: string) -> string {
   if (is_safe_path(path = path)) {
     path
@@ -215,92 +130,49 @@ agent panic_on_unsafe_path(@"The candidate workspace path." path: string) -> str
   }
 }
 
-// ── workspace: the working directory AND its serial domain, in one install ───────────────────────
-//
-// Writes are last-write-wins, so a read-modify-write is NOT atomic on its own: two concurrently
-// dispatched tools (a `parallel for` tool batch) that each read a record, edit it and write it back
-// lose one edit. A workspace therefore opens two things at once — the key PREFIX every operation below
-// it resolves against, and the serial DOMAIN whose FIFO makes an `exclusive` a critical section.
+@"Run @task@ as a critical section of the nearest enclosing `workspace`: that workspace's sequential
+handler calls it in its own body, so two exclusives of one domain run one at a time, including against
+a `parallel for` tool batch. Writes are last-write-wins, so this is what makes a read-modify-write
+atomic.
 
-@"Run @task@ as a CRITICAL SECTION of the nearest enclosing `workspace`: the workspace's SEQUENTIAL
-handler calls it in its own body, so two exclusives of one domain can never interleave — the
-handler's FIFO is the atomicity, even against a `parallel for` tool batch. The row is FIXED to the
-store operations: a critical section reads, computes and writes, NOTHING ELSE — any other input is
-computed BEFORE entering and closed over — so a section can never block on a model, a network, or
-another domain. TWO GEOMETRY FACTS, both load-bearing. FIRST, an `exclusive` binds to the NEAREST
-enclosing `workspace`: an inner domain shadows an outer one BY DESIGN — the nearest domain is the
-semantics, exactly as the nearest prefix is. SECOND, because the two halves are ONE install, the task
-runs INSIDE THE PREFIX OF THE VERY WORKSPACE SERVING IT — a section's keys resolve exactly where an
-ordinary read written beside the perform would, so nothing has to be re-stated to make the read and
-the write land together. A task therefore opens a workspace of its own ONLY to descend FURTHER (a
-subdirectory this section alone wants), NEVER to repeat the directory it already stands in: a facility
-that opens `memory` around its perform AND again as the task's first move writes to
-`app/memory/memory/...`. WHAT ATOMICITY MEANS HERE follows from the first fact — one lane per
-workspace, so a section excludes the other sections of THIS workspace and interleaves with every other
-lane's, which is exactly the traffic that can reach these keys. The task's answer crosses
-the handler as `unknown`; narrow it back with a `match` (or `json.validate[T]`). With NO workspace
-installed above the perform, the RUNTIME serves it as the outermost domain — the task runs at the
-PROJECT ROOT (project-root keys) in one durable, project-wide FIFO across every run."
+Two consequences of the geometry. It binds to the nearest enclosing `workspace`, so an inner domain
+shadows an outer one. And because prefix and domain are one install, the task runs inside the prefix of
+the workspace serving it: a section that opens a workspace of its own descends further, and repeating
+the directory it already stands in spells `app/memory/memory/...`. One lane per workspace, so a section
+excludes the other sections of this workspace and interleaves with every other lane's.
+
+The row is fixed to the store operations — everything else is computed before entering and closed over
+— so a section never blocks on a model or a network. The answer crosses back as `unknown`; narrow it
+with a `match` or `json.validate[T]`. With no workspace installed above the perform, the runtime serves
+it at the project root, in one durable, project-wide FIFO across every run."
 request exclusive(
   @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
 ) -> unknown
 
-@"Open the WORKSPACE at @path@ under the current one, for the extent of @continuation@ — the
-`use store.workspace(path = \"core\")` form, and the store's ONE provider. It installs both halves of
-a working directory:
+@"Open the workspace at @path@ under the current one, for the extent of @continuation@ — the
+`use store.workspace(path = \"core\")` form, and the store's one provider. It installs both halves of a
+working directory: the prefix (four parallel handlers re-perform each store operation outward with the
+prefixed key, so nested workspaces accumulate prefixes and the outermost bare perform is project-root
+access) and the domain (one sequential handler serves `exclusive` by calling the section in its own
+body, so its FIFO applies critical sections one at a time). The prefix handlers sit outside the domain,
+which is what makes a section's keys resolve through the workspace it was opened in.
 
-  - THE PREFIX. Four parallel handlers catch the store operations and RE-PERFORM them outward with
-    the prefixed key (`get(key = \"index\")` under a workspace at \"core\" escalates as
-    `get(key = \"core/index\")`; a `list` gets @path@ prepended to its own path parameter), so nested
-    workspaces accumulate prefixes and the outermost bare perform is project-root access — unhandled
-    at the very top, the runtime machine-answers against the project's durable rows. Those four are
-    PARALLEL on purpose: prefixing is stateless arithmetic and must not serialize the traffic passing
-    through it (a turn's tool batch stays concurrent).
-  - THE DOMAIN. One sequential handler serves `exclusive` by calling the section in its own body, so
-    the FIFO applies critical sections one at a time, in arrival order — which is the whole point (a
-    parallel clause would forfeit the atomicity). Sections re-perform their store operations from
-    THIS install site, so they land under THIS workspace's prefix — a section stands where the
-    workspace stands, and descends further only if it opens a workspace of its own. ONE LANE PER
-    WORKSPACE, deliberately: two workspaces are two FIFOs, so a facility's sections and the app's
-    sections INTERLEAVE, each atomic against its own lane. That is the traffic that can touch its
-    keys, which is the only traffic atomicity was ever about.
+@path@ is one or more `/`-separated segments, each spelled as `safe_segment` requires; a path that is
+not — an empty segment, a `..`, an unchecked name — panics here rather than opening a workspace
+elsewhere. `safe_segment` is the check for a name that came from outside the program.
 
-The install order between them is fixed here and is not a preference: the prefix handlers sit OUTSIDE
-the domain, so a critical section's keys resolve through the workspace it was opened in. A nested
-workspace is therefore a nested prefix AND a nested domain, exactly as it reads, and an `exclusive`
-performed below it binds to the nearest one.
-
-A workspace is a ONE-WAY DESCENT: there is deliberately no `..`, so data several workspaces share is
-NOT reached by path escape — it is reached by a REQUEST served ABOVE the workspaces, whose clause
-opens the shared subtree in its own body. That proxy is the semantics: a request is what an inner
-install can never capture by accident. `share` / `shared` below is that proxy, generalised once so it
-need not be respelt per shared cell.
-
-@path@ is one or more `/`-separated SEGMENTS, each spelled as `safe_segment` requires (lowercase
-letters, digits, `-`, `_`). A path that is not — an empty segment, a `..`, a stray space, a name a
-model chose and nobody checked — PANICS here rather than opening a workspace somewhere else: the
-descent is the program's own geometry, so a malformed one is a defect in the program and not an
-outcome a caller could route. Validate a name that came from OUTSIDE the program with `safe_segment`
-first, and render its `null` into whatever sentence the proposer should read.
-
-ONE IMPRECISION TO KNOW ABOUT, because it shows up in the escalation report. All five clauses are
-installed, and each re-performs its own operation, so this agent's row names all four store
-operations whatever the continuation actually does — a caller that only reads still carries `set` and
-`delete` outward. The row is sound (a workspace really can perform all four on its continuation's
-behalf) but it is coarser than the truth, so the report reads as though a read-only agent could
-delete. Narrowing it needs the row to follow which requests the continuation performs, which the
-language cannot express yet; until it can, read a workspaced agent's store row as \"reaches the
-store\" rather than as the set of operations it uses."
+The row is coarser than the truth, which shows in the escalation report: all five clauses are installed
+and each re-performs its own operation, so this agent's row names all four store operations whatever
+the continuation does. It reads as \"reaches the store\" rather than as the set of operations used."
 agent workspace[R, effect E](
   @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"; `/`-separated `safe_segment`s, and a malformed one panics." path: string,
-  @"Runs with every store operation prefixed AND `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list, exclusive},
+  @"Runs with every store operation prefixed and `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list, exclusive},
 ) -> R with E | get | set | delete | list {
-  // Clause parameter names are structural, so the `list` clause below MUST bind `path` — which
-  // would shadow this agent's own `path`. The prefix is rebound once, before the handlers — and the
-  // rebinding is where the descent is checked, so no handler below can ever prefix with a bad one.
+  // Clause parameter names are structural, so the `list` clause below binds `path` and shadows this
+  // agent's own. Rebinding here is also where the descent is checked, before any handler uses it.
   let base = panic_on_unsafe_path(path = path)
-  // PARALLEL on purpose: prefixing is stateless arithmetic, and a sequential handler here would
-  // needlessly serialize a turn's concurrent tool batch through the workspace.
+  // Parallel: prefixing is stateless arithmetic, and a sequential handler here would
+  // serialize a turn's concurrent tool batch through the workspace.
   use parallel handler {
     request get(key: string) {
       next get(key = f"${base}/${key}")
@@ -320,10 +192,8 @@ agent workspace[R, effect E](
       }
     }
   }
-  // Deliberately NOT a `parallel handler`, and deliberately INSIDE the prefix: the FIFO of a
-  // sequential handler is what makes an exclusive a critical section (tasks run one at a time, in
-  // arrival order), and re-performing from here routes the section's keys through the four clauses
-  // above — which is what puts a critical section in the workspace it was opened in.
+  // Sequential, and inside the prefix: a sequential handler's FIFO is what makes an exclusive a
+  // critical section, and re-performing from here routes its keys through the four clauses above.
   use handler {
     request exclusive(task: agent (value: null) -> unknown with get | set | delete | list) {
       next task(value = null)
@@ -332,81 +202,49 @@ agent workspace[R, effect E](
   continuation(value = null)
 }
 
-// ── share: the shared place — ONE request for every cell above the workspaces ─────────────────────
-//
-// A desk opens its OWN workspace per dispatch, so knowledge several desks must share (a soul layer, a
-// digest, a registry) sits ABOVE every one of them and is reachable from none — there is deliberately
-// no `..`. The answer has always been a request served above the workspaces whose clause opens the
-// shared subtree in its own body. That answer is right and it does not SCALE: a request per CELL means
-// a `request` declaration, a handler clause and a re-spelt subdirectory workspace for every cell worth
-// sharing, a fixed cost per cell that grows with the app.
-//
-// `share` is that proxy with the cell factored OUT of it, on `exclusive`'s geometry exactly: the
-// detail rides a CLOSURE rather than a name, so ONE request covers every shared cell. `shared(task)`
-// sends the task UP to run where `share` was installed — that site's workspaces, that site's serial
-// domain — and the task opens whichever subdirectory it wants as its first move. What a per-cell
-// request bought is not lost: `shared` is still a request an inner workspace cannot capture, so the
-// shared place stays exactly as unreachable-by-accident as it was.
+@"Run @task@ at the nearest enclosing `share`'s install site — that site's workspaces, that site's
+serial domain — and hand back what it answered: the request by which a desk reaches knowledge living
+above its own workspace. A task runs at its server's install site, as with `exclusive`; the server here
+is a `share` installed above the desks, so the desk's own workspaces do not travel with the task. It
+lands in the shared place and opens whichever subdirectory it wants as its first move, which is what
+lets one `share` serve every shared cell instead of one named request per cell. It binds to the nearest
+enclosing `share`, so an inner shared place shadows an outer one.
 
-@"Run @task@ AT THE NEAREST ENCLOSING `share`'s install site — that site's workspaces, that site's
-serial domain — and hand back what it answered: the ONE request by which a desk reaches knowledge
-living ABOVE its own workspace. The rule is `exclusive`'s — a task runs at its server's INSTALL
-site — but the server here is a `share` and not a workspace, and that is the whole difference: a
-`share` is installed ABOVE the desks, so the desk's own workspaces sit BELOW it and do NOT travel with
-the task (only the install site's own enclosing workspaces apply). Where an `exclusive`'s section
-lands already prefixed, a `shared` task lands in the SHARED place — which means a subdirectory of the
-shared place is opened INSIDE the task body (`use store.workspace(path = \"shared/soul\")` as its first
-move), and that is exactly what lets one `share` serve every shared cell instead of one named request
-per cell. And it binds to the NEAREST enclosing `share`: an inner shared place shadows an outer one BY
-DESIGN, the same dynamic-scope rule the nearest workspace follows. The
-row is FIXED to the store operations plus `exclusive`: a task reads, computes and writes, and takes
-ATOMICITY by wrapping a read-modify-write in `store.exclusive` INSIDE the task — which lands in the
-shared place's own serial domain, since that is where the task is running. Nothing else is in the row,
-so a shared access can never block on a model, a network or another domain. The answer crosses back as
-`unknown`; narrow it with a `match` (or `json.validate[T]`) at the perform site.
-Unlike the store's four operations and `exclusive`, this one is NOT runtime-served, deliberately:
-there is no project-root shared place, because a shared place is somewhere a program CHOSE and a
-forgotten install must never quietly resolve to project-root keys. With no `share` above it a `shared`
-rides to the run root as an ordinary unanswered request — the fate of any provider-backed request that
-lost its provider — so the real guard is the effect row, which keeps `shared` visible in every
-signature between the perform and the install."
+The row is fixed to the store operations plus `exclusive`: a read-modify-write takes atomicity by
+wrapping itself in `store.exclusive` inside the task, which lands in the shared place's own domain. The
+answer crosses back as `unknown`; narrow it at the perform site. Unlike the four operations and
+`exclusive`, this one is not runtime-served — with no `share` above it a `shared` rides to the run root
+as an unanswered request rather than resolving to project-root keys, so the effect row is the guard."
 request shared(
   @"What to do in the shared place; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list | exclusive,
 ) -> unknown
 
-@"Open the SHARED PLACE for the extent of @continuation@ — the bare `use store.share` form (no
-arguments, no type arguments: the shared place is WHERE it is installed, exactly as a workspace is). Serves `shared` by calling its task in the clause body, so a task runs HERE — under this site's
-workspaces, over this site's serial domain — while the desks below go on opening their own workspaces
-per dispatch and reaching nothing of each other's. THE INSTALL DISCIPLINE, in this order: the app's
-workspace, then `share`, then the desks (`use store.workspace(path = \"assistant\")` then
-`use store.share`). The order is a CONTRACT, not a habit: a task's row carries `exclusive` and this
-provider re-performs it outward, so `share` must sit INSIDE a workspace for a shared critical section
-to land in that workspace's domain — which is what the ordinary install order above already gives. The order is legible in the TYPE, not only in prose: install `share` above the domain
-instead and its `exclusive` finds nothing to catch it, so `store.exclusive` surfaces in the enclosing
-signature and those sections ride to the runtime's project-wide root FIFO — legal, and visibly a
-different program. The handler is PARALLEL on purpose: sending a closure upward is not an ordering
-decision, and a sequential clause would queue three desks' concurrent reads of the shared place behind
-one another for nothing; ordering is `exclusive`'s job here as everywhere, taken INSIDE the task. A
-second `share` below this one captures every `shared` under it — the ordinary dynamic-scope rule, and
-the way a deliberately NARROWER shared place (a sub-team's own commons, shared among its desks and
-invisible to the app's) is expressed. KNOW WHAT THE GENERALISATION COSTS: a request per cell is also a
-CAPABILITY per cell — a desk holding `read_digest` and not `save_digest_entry` cannot write the digest
-whatever it does — and one `shared` is one capability over the WHOLE shared place. Where a boundary
-BETWEEN shared cells is the semantics, keep the named request for that cell; the two compose, since a
-named proxy installed below this one can perform `shared` in its own clause."
+@"Open the SHARED PLACE for the extent of @continuation@ — the bare `use store.share` form (the shared
+place is where it is installed, exactly as a workspace is). It serves `shared` by calling its task in
+the clause body, so a task runs here, under this site's workspaces and over this site's serial domain,
+while the desks below go on opening their own workspaces and reaching nothing of each other's.
+
+The install order is the app's workspace, then `share`, then the desks. A task's row carries
+`exclusive` and this provider re-performs it outward, so `share` sits inside a workspace for a shared
+critical section to land in that workspace's domain; installed above one, `store.exclusive` surfaces in
+the enclosing signature and those sections ride to the runtime's project-wide root FIFO. A second
+`share` below this one captures every `shared` under it — the dynamic-scope rule, and how a narrower
+shared place is expressed.
+
+One `shared` is one capability over the whole shared place, where a request per cell is a capability
+per cell. Where a boundary between shared cells is the semantics, a named request for that cell keeps
+it; the two compose, since a named proxy installed below this one can perform `shared` in its own
+clause."
 agent share[R, effect E](
   @"Runs with `shared` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, shared},
 ) -> R with E | get | set | delete | list | exclusive {
-  // PARALLEL on purpose, and the opposite call from a workspace's `exclusive` clause: routing a closure
-  // to the shared place
-  // decides WHERE, never WHEN. A sequential handler here would make the shared place a bottleneck for
-  // every desk that merely READS it, while buying no atomicity the task's own `exclusive` does not
-  // already buy.
+  // Parallel: routing a closure to the shared place decides where, not when, and a
+  // sequential handler would queue every desk that only reads it. Ordering is `exclusive`'s, taken
+  // inside the task.
   use parallel handler {
     request shared(task: agent (value: null) -> unknown with get | set | delete | list | exclusive) {
-      // `next` re-performs from THIS install site, which is the whole mechanism: the task's store
-      // operations and its `exclusive` escalate outward from here, through this site's workspaces and
-      // into this site's serial domain — never through the caller's.
+      // `next` re-performs from this install site: the task's store operations and its `exclusive`
+      // escalate through this site's workspaces and domain, not through the caller's.
       next task(value = null)
     }
   }
