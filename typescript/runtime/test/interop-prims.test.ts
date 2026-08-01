@@ -219,30 +219,6 @@ describe("prelude.json", () => {
     );
   });
 
-  test("try_validate[T] answers the conforming value, or `null` instead of throwing", async () => {
-    const point: Value = { kind: "record", fields: { x: int(1), y: int(2) } };
-    await expect(
-      run("prelude.json.try_validate", { value: point }, contextWithT(POINT)),
-    ).resolves.toEqual(point);
-    // The TOTAL twin: the same mismatch `validate` raises `validation_error` on reads as `null` here.
-    await expect(
-      run(
-        "prelude.json.try_validate",
-        { value: { kind: "record", fields: { y: int(2) } } },
-        contextWithT(POINT),
-      ),
-    ).resolves.toEqual({ kind: "null" });
-    await expect(
-      run("prelude.json.try_validate", { value: str("not a point") }, contextWithT(POINT)),
-    ).resolves.toEqual({ kind: "null" });
-  });
-
-  test("try_validate without a [T] instantiation fails loud (stale-compiler IR, not a silent null)", async () => {
-    // A missing instantiation is a stale-IR bug, not a value that failed to conform — answering `null`
-    // would disguise it as an ordinary mismatch.
-    await expect(run("prelude.json.try_validate", { value: int(1) })).rejects.toThrow(/recompile/);
-  });
-
   test("validate[unknown] accepts and returns any value unchanged (a pure check, no rewrite)", async () => {
     const value: Value = {
       kind: "record",

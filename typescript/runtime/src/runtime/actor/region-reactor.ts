@@ -134,7 +134,6 @@ import type { ResourcePool } from "./resource-pool.js";
  *  prim reads the same fields on the engine side, which must not import actor code.) */
 const REGION_PROVIDE_KEY = "prelude.region.provide";
 const REGION_FORK_KEY = "prelude.region.fork";
-const REGION_CANCEL_KEY = "prelude.region.cancel";
 const REGION_WATCH_KEY = "prelude.region.watch";
 const REGION_ROSTER_KEY = "prelude.region.roster";
 const REGION_CANCEL_BY_ID_KEY = "prelude.region.cancel_by_id";
@@ -556,14 +555,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         scope: scopeOfNursery(fields.nursery ?? null),
         fiber: id !== undefined && id.kind === "string" ? id.value : null,
       };
-    }
-    if (target.key === REGION_CANCEL_KEY) {
-      // `cancel(nursery, handle)`: route on the HANDLE's own scope + fiber id, not the `nursery` argument
-      // (which the type system only pins `Scope` through) — the handle names the nursery that spawned the
-      // fiber, so the fiber is torn down where it actually lives even under nested same-marker scopes. A
-      // malformed / forged handle yields `null`s, refused as an uncancellable fiber.
-      const handle = fiberHandleOf(fields.handle ?? null);
-      return { kind: "cancel", scope: handle.scope, fiber: handle.fiber };
     }
     if (target.key === REGION_WATCH_KEY) {
       // `watch(nursery)`: route on the nursery's scope (its identity is the one thing the runtime gates and

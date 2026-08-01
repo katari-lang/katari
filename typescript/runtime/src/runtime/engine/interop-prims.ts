@@ -235,17 +235,6 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const schema = instantiatedSchema(context, "json.validate");
     return conformedOrThrow(field(argument, "value"), schema, "json.validate");
   },
-  "prelude.json.try_validate": (argument, context) => {
-    // The TOTAL twin of `validate`: the same conformance check against T's schema, with a mismatch
-    // reported as `null` instead of a thrown `validation_error`. The failure detail is deliberately
-    // dropped here — a caller that needs the offending path calls `validate` and catches the throw.
-    // A missing `[T]` instantiation still fails loud (`instantiatedSchema`): that is a stale-IR bug,
-    // not a value that failed to conform, and silently answering `null` would hide it.
-    const schema = instantiatedSchema(context, "json.try_validate");
-    const value = field(argument, "value");
-    return conformValue(value, schema).ok ? value : NULL_VALUE;
-  },
-
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
   // Every access is by *own* key (`Object.hasOwn`) and every rewrite copies into a prototype-less map,
   // so an inherited key (`toString`) never reads as present and a `__proto__` key is an ordinary field —
