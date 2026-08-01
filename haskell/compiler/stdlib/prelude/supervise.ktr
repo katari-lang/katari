@@ -4,7 +4,7 @@
 // failures become an `interrupted` is user code: an ordinary `use handler` (a "converter") installed
 // between the provider and the body that turns the throws / panics it chooses into `supervise.interrupted`.
 //
-//   use supervise.exponential(initial_delay_milliseconds = 1000, factor = 2, max_attempts = 5)
+//   use supervise.exponential(max_attempts = 5)
 //   use handler {
 //     // POLICY: this converter decides. Only transient errors become the signal; the rest rethrow.
 //     request prelude.throw(error: fetch_error | auth_error) -> never {
@@ -201,8 +201,15 @@ agent immediate[R, F, effect E](
 @max_delay_milliseconds@. For daemons that must stay up across transient failures (e.g. keeping a
 `time.watch` alive): it never re-raises and never returns on its own. The backoff delay lives in the loop's
 own @delay@ var and grows by @factor@ per re-run up to the cap (`math.min`), so the durable state stays flat
-across any number of replays. Written
-`use supervise.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`.
+across any number of replays.
+
+EVERY PARAMETER IS DEFAULTED, so the ordinary form is the bare `use supervise.forever()`. The defaults are
+the standard cadence a daemon wants — one second, doubling, capped at fifteen minutes — and they are
+defaults rather than a second agent because a supervisor that reconnects on a DIFFERENT cadence is
+answering a real question about its upstream (a rate-limited API wants a slower floor, a local sidecar a
+faster one) and should say so by naming the parameter it changes. There is no judgement hidden in them:
+an unbounded replay loop has no \"how many\" to decide, so all three are cadence and nothing else.
+
 SUPERVISING A REGION: a converter cannot see a FIBER's failure. A fiber's panic is delivered to the region
 as the typed `region.crashed` event rather than unwinding past `region.watch`, so a resident whose work runs
 in fibers must perform `interrupted` from its `region.crashed` clause (installed inside this scope) — a
@@ -211,9 +218,9 @@ is what the block installs: state a handler above this `use` owns survives every
 whose contents must outlive a reconnect above the scope, and whatever consumes that state on the same side
 of the boundary."
 agent forever[R, F, effect E](
-  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
-  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number,
-  @"The backoff ceiling, in milliseconds; the delay never grows past it." max_delay_milliseconds: number,
+  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number ?= 1000.0,
+  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number ?= 2.0,
+  @"The backoff ceiling, in milliseconds; the delay never grows past it." max_delay_milliseconds: number ?= 900000.0,
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io {
   forever (var delay = initial_delay_milliseconds) {
@@ -240,11 +247,18 @@ failure as a TYPED `throw[F]` — @F@ is the converter's chosen failure represen
 error typed end to end and never needs to re-panic. The attempt count and delay live in the loop's own vars
 (one owner). The exhausted-vs-continue decision is genuine sum dispatch: the ONE comparison of the count to
 the budget mints a `replay_after | give_up`, and the `signalled` arm `match`es it once — no code re-tests the
-counter. Written `use supervise.exponential(initial_delay_milliseconds = ..., factor = ..., max_attempts = ...)`."
+counter.
+
+THE CADENCE IS DEFAULTED AND THE BUDGET IS NOT, and that asymmetry is the point: @initial_delay@ and
+@factor@ are the same standard backoff `forever` uses, while @max_attempts@ — how many tries before this
+failure becomes the caller's problem — is the one genuine JUDGEMENT here. A default for it would be a
+policy decided by whoever wrote this module for a program it has never seen, which is exactly the residual
+default this stdlib does not place. So the ordinary form is
+`use supervise.exponential(max_attempts = 5)`."
 agent exponential[R, F, effect E](
-  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
-  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number,
-  @"The total run budget, not a retry count: the @max_attempts@-th `interrupted` re-raises instead of re-running." max_attempts: number,
+  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number ?= 1000.0,
+  @"The delay multiplier (e.g. 2 doubles the delay on each re-run)." factor: number ?= 2.0,
+  @"The total run budget, not a retry count: the @max_attempts@-th `interrupted` re-raises instead of re-running. No default — how many tries is the caller's judgement." max_attempts: number,
   @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io | prelude.throw[F] {
   forever (var attempt = 0, var delay = initial_delay_milliseconds) {
