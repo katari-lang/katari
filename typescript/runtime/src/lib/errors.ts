@@ -37,6 +37,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class PayloadTooLargeError extends AppError {
+  constructor(message = "Payload Too Large", details?: unknown) {
+    super(413, "payload_too_large", message, details);
+  }
+}
+
 export class UnsupportedMediaTypeError extends AppError {
   constructor(message = "Unsupported Media Type", details?: unknown) {
     super(415, "unsupported_media_type", message, details);

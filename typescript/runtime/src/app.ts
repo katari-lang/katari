@@ -6,6 +6,7 @@ import { config } from "./config/index.js";
 import { success } from "./lib/response.js";
 import { mountAdminWeb } from "./middleware/admin-web.js";
 import { bearerAuth } from "./middleware/auth.js";
+import { decompressRequest } from "./middleware/decompress.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { RequestLimiter, rateLimit } from "./middleware/rate-limit.js";
@@ -99,6 +100,9 @@ export function createApp() {
   app.use("/api/v1/projects/:projectId/files", uploadBodyLimit);
   app.use("/api/v1/projects/:projectId/ffi/:delegation/blobs", uploadBodyLimit);
   app.use("/api/*", apiBodyLimit);
+  // …and then what those bytes expand to, for a caller that compressed them. The cap is the same
+  // number: no request body exceeds it, whichever form it arrived in.
+  app.use("/api/*", decompressRequest({ maxSize: config.limits.maxRequestBytes }));
 
   // Rate-limit the surfaces that carry no bearer token at all.
   app.use("/inbound/*", rateLimit(limiter));

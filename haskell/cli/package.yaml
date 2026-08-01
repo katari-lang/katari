@@ -33,6 +33,8 @@ dependencies:
   - scientific
   # Building aeson arrays from prompted elements.
   - vector
+  # Compressing a large request body (a deploy's snapshot) on the way to the runtime.
+  - zlib
   # Embedding the `init` scaffolding templates at build time (the compiler embeds its stdlib the
   # same way), so they are maintained as real files while the binary stays self-contained.
   - file-embed

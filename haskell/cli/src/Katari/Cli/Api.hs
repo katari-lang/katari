@@ -93,12 +93,14 @@ module Katari.Cli.Api
   )
 where
 
+import Codec.Compression.GZip qualified as GZip
 import Control.Exception (Exception, throwIO, try)
 import Control.Monad (unless)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -966,20 +968,36 @@ requestDiscardingBody client httpMethod path body = do
 buildRequest :: RuntimeClient -> Text -> Text -> Maybe LazyByteString.ByteString -> IO Request
 buildRequest client httpMethod path body = do
   request <- parseRequest (Text.unpack (client.baseUrl <> apiPrefix <> path))
+  sent <- case body of
+    Just raw | LazyByteString.length raw > compressionThresholdBytes -> do
+      let compressed = GZip.compress raw
+      client.trace
+        ( "   gzip "
+            <> Text.pack (show (LazyByteString.length raw))
+            <> " -> "
+            <> Text.pack (show (LazyByteString.length compressed))
+            <> " bytes"
+        )
+      pure (Just (compressed, True))
+    Just raw -> pure (Just (raw, False))
+    Nothing -> pure Nothing
   let headers =
-        [("Content-Type", "application/json") | hasBody]
+        [("Content-Type", "application/json") | Just _ <- [sent]]
+          <> [("Content-Encoding", "gzip") | Just (_, True) <- [sent]]
           <> [("Authorization", TextEncoding.encodeUtf8 ("Bearer " <> token)) | Just token <- [client.authToken]]
   pure
     request
       { method = TextEncoding.encodeUtf8 httpMethod,
         requestHeaders = headers,
-        requestBody = RequestBodyLBS (fromMaybe "" body),
+        requestBody = RequestBodyLBS (maybe "" fst sent),
         redirectCount = 0
       }
-  where
-    hasBody = case body of
-      Just _ -> True
-      Nothing -> False
+
+-- | The body size past which a request is gzipped. A deploy's snapshot is mostly JSON schema text with
+-- the same phrases repeated thousands of times, so it compresses to roughly a tenth; below this the
+-- saving is noise, which also leaves every ordinary call byte-for-byte what it was.
+compressionThresholdBytes :: Int64
+compressionThresholdBytes = 1024 * 1024
 
 -- | The 'RuntimeError' a non-2xx status becomes.
 --

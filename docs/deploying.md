@@ -104,7 +104,7 @@ blob bucket), and set `HttpPutResponseHopLimit: 1` with IMDSv2 required on EC2-b
 | `KATARI_PUBLIC_URL` | — | **Required** under `NODE_ENV=production`. The outside address `webhook.inbound` mints its URLs under. |
 | `CORS_ORIGIN` | `*` | Pin it to the console's origin. Harmless as a wildcard (auth is a header, not a cookie) but there is no reason to leave it open. |
 | `KATARI_RATE_LIMIT_PER_MINUTE` | `120` | Per client address, on the unauthenticated capability paths and on failed authentication. |
-| `KATARI_MAX_REQUEST_BYTES` | 64 MiB | Ordinary `/api` bodies — a deploy's snapshot (IR plus bundled sidecars) arrives as one. Buffered about three times over. |
+| `KATARI_MAX_REQUEST_BYTES` | 64 MiB | Ordinary `/api` bodies — a deploy's snapshot (IR plus bundled sidecars) arrives as one. Bounds both the bytes on the wire and what a compressed body expands to. |
 | `KATARI_MAX_UPLOAD_BYTES` | 64 MiB | File uploads. |
 | `KATARI_HTTP_TIMEOUT_MS` | 300000 | Ceiling on one `http.fetch`. |
 | `KATARI_HTTP_MAX_RESPONSE_BYTES` | 64 MiB | Ceiling on one response body. |
@@ -121,6 +121,9 @@ blob bucket), and set `HttpPutResponseHopLimit: 1` with IMDSv2 required on EC2-b
   liveness probe. Wiring it as an ALB health check will route traffic to a task whose database is
   unreachable.
 - The runtime serves plain HTTP and expects TLS to be terminated in front of it.
+- `/api` accepts a `Content-Encoding: gzip` request body, and the CLI sends one for a deploy past a
+  megabyte — a snapshot is largely repeated schema text, so it arrives at roughly a tenth of its size. A
+  proxy in front of the runtime has to pass the header and the body through unchanged.
 - Delete the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` lines from the compose file if you port it: on
   AWS they override the task role and break S3 with a confusing 403. The runtime uses the default AWS
   credential chain, so the task role works with no configuration.
