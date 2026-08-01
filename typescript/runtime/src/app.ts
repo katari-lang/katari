@@ -6,6 +6,7 @@ import { config } from "./config/index.js";
 import { success } from "./lib/response.js";
 import { mountAdminWeb } from "./middleware/admin-web.js";
 import { bearerAuth } from "./middleware/auth.js";
+import { requestBodyLimit } from "./middleware/body-caps.js";
 import { decompressRequest } from "./middleware/decompress.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
@@ -76,30 +77,16 @@ export function createApp() {
   // memory-exhaustion vector, and because one process hosts every project, exhausting it is an availability
   // problem for all of them rather than just for the caller.
   //
-  // Three tiers, because the surfaces differ in what a legitimate body looks like:
-  //   - the public capability endpoints (`/inbound`, `/mcp`) — 1 MiB is ample for a webhook delivery or an
-  //     MCP JSON-RPC message, and these accept UNAUTHENTICATED bodies, so they get the tightest cap;
-  //   - file uploads — deliberately generous, since uploading a real file is the point;
-  //   - everything else under `/api` — a deploy buffers its body roughly three times over (raw text, the
-  //     screening parse, the validator's), so the cap here is about that multiple, not about the body alone.
+  // The public capability endpoints (`/inbound`, `/mcp`) get the tightest cap: 1 MiB is ample for a webhook
+  // delivery or an MCP JSON-RPC message, and these accept UNAUTHENTICATED bodies. Everything under `/api`
+  // goes through `requestBodyLimit`, which picks the upload cap or the general one per path.
   const capabilityBodyLimit = bodyLimit({
     maxSize: 1024 * 1024,
     onError: (c) => c.json({ error: "the request body is too large" }, 413),
   });
-  const uploadBodyLimit = bodyLimit({
-    maxSize: config.limits.maxUploadBytes,
-    onError: (c) => c.json({ error: "the uploaded file is too large" }, 413),
-  });
-  const apiBodyLimit = bodyLimit({
-    maxSize: config.limits.maxRequestBytes,
-    onError: (c) => c.json({ error: "the request body is too large" }, 413),
-  });
   app.use("/inbound/*", capabilityBodyLimit);
   app.use("/mcp/*", capabilityBodyLimit);
-  // The upload rules are registered before the general one so the more specific cap wins on those paths.
-  app.use("/api/v1/projects/:projectId/files", uploadBodyLimit);
-  app.use("/api/v1/projects/:projectId/ffi/:delegation/blobs", uploadBodyLimit);
-  app.use("/api/*", apiBodyLimit);
+  app.use("/api/*", requestBodyLimit(config.limits));
   // …and then what those bytes expand to, for a caller that compressed them. The cap is the same
   // number: no request body exceeds it, whichever form it arrived in.
   //
