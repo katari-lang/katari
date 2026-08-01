@@ -152,9 +152,9 @@ async function eventually<T>(probe: () => Promise<T | undefined>): Promise<T> {
 //   agent task(input)                    { <task ops> }                       // the fiber body a fork runs
 //   agent ask_value(input) / fiber_ask(input) { <request> }                   // unhandled holds / fiber escalations
 //
-// It also wires `prelude.region.join` (so a continuation can await a fiber) and a fixed CLOSURE agent (block
-// 16, returning the captured variable 121) that the resource-reown test's task builds with `makeClosure` — a
-// fiber returning a scope-capturing closure, to prove a join carries the fiber's resources across.
+// It wires `provide` / `fork` / `watch`; `roster` and `cancel_by_id` are added on top by
+// `withRegistryAgents`. There is no await entry point to wire — a fiber carries no result, so everything
+// it produces leaves through its escalations and is observed at the watch.
 function forkIr(bodies: {
   continuation: Operation[];
   task: Operation[];
@@ -255,20 +255,6 @@ function forkIr(bodies: {
       15: {
         block: { kind: "request", name: createAgentName("fiber_report"), input: 150 },
         parameters: { parameter: 150 },
-      },
-      // A closure agent the resource-reown task returns via `makeClosure`: its body returns variable 121, the
-      // value the task captured from its own scope, so calling it hands back the captured value.
-      16: {
-        block: { kind: "agent", body: 17, schema: EMPTY_SCHEMA, description: "", defaults: {} },
-        parameters: {},
-      },
-      17: {
-        block: {
-          kind: "sequence",
-          result: null,
-          operations: [{ kind: "exit", target: 16, value: 121 }],
-        },
-        parameters: { parameter: 170 },
       },
       // hold2: a second holding request (distinct from ask_value), so a continuation can hold AFTER a cancel to
       // keep its nursery alive while a test observes the cancelled fiber's instance is gone.
