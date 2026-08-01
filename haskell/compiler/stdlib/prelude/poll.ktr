@@ -255,11 +255,29 @@ agent load(
 ) -> cursor with io | store.get {
   match (continuity) {
     case fresh(_) -> initial(dedup = dedup, backlog = backlog)
-    // `get_or` IS the degrade this agent's doc describes: an absent key and a cell an older shape wrote
-    // take the same arm, which is the whole reason a subscription re-primes rather than refusing to start.
-    // The fallback is evaluated whether or not the cell is readable, so a resumed subscription also reads
-    // the clock `initial` reads and discards it — one durable read per activation, not per delivery.
-    case resume(key => key) -> store.get_or(key = key, fallback = initial(dedup = dedup, backlog = backlog))
+    // Spelled as an explicit `match` rather than `store.get_or`, and the reason is `initial`: it READS THE
+    // CLOCK, so it must run only on the branches that actually need a fresh memory. `get_or` takes its
+    // fallback as an ordinary argument — evaluated whether or not the cell is readable — which would make
+    // a RESUMED subscription read `time.now()` (a durable frame) on every activation and throw the answer
+    // away. The two failing arms still fold together, which is the degrade this agent's doc describes: an
+    // absent key and a cell an older shape wrote both re-prime, because a subscription that refuses to
+    // start is strictly worse than one that primes twice.
+    case resume(key => key) -> {
+      match (store.get(key = key)) {
+        case store.absent(key => _) -> initial(dedup = dedup, backlog = backlog)
+        case store.found(value => stored) -> {
+          // `catch` is what makes the stored-shape check TOTAL: the mismatch becomes a value on the same
+          // arm the absent key takes, instead of throwing out of a subscription's first move.
+          agent checked() -> cursor with prelude.throw[json.validation_error] {
+            json.validate[cursor](value = stored)
+          }
+          match (prelude.catch(task = checked)) {
+            case json.validation_error(message => _) -> initial(dedup = dedup, backlog = backlog)
+            case validated -> validated
+          }
+        }
+      }
+    }
   }
 }
 
