@@ -25,7 +25,7 @@
 @"The supervision signal — the one request a `supervise` provider catches, and the only
 performable request this module exports. A converter performs it to ask that the enclosing block be re-run,
 carrying the failure it chose to represent as @failure@. `-> never`: performing it transfers control to
-the provider and does not return. A provider installed inside the program is what serves it; the
+the provider, which applies its delay policy and re-runs, and does not return. A provider installed inside the program is what serves it; the
 runtime never machine-answers `interrupted`."
 request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 

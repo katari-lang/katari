@@ -8,11 +8,13 @@ model hallucinating a `$katari_ref`). One error covers both: a slim handle canno
 every reader below."
 data gone(message: string)
 
-@"The @content@ passed to `from_base64` is not valid base64 (bad alphabet, length, or padding)."
+@"The @content@ passed to `from_base64` is not valid base64 (bad alphabet, length, or padding). Thrown
+by `from_base64`."
 data malformed_base64(message: string)
 
 @"The file's bytes, base64-encoded — the inline shape multimodal model APIs take. The whole content
-materialises as one string. Throws `gone` if the handle no longer names a live blob."
+materialises as one string, so mind the size: a large file makes a large request body. Throws `gone` if
+the handle no longer names a live blob."
 primitive agent read_base64(value: file) -> string with prelude.throw[gone]
 
 @"The file's recorded MIME type (e.g. \"image/png\"), read from the project's file catalog; \"\" when
@@ -30,7 +32,8 @@ base64."
 primitive agent from_base64(@"The file's bytes, base64-encoded." content: string, @"The MIME type to record (e.g. \"image/png\"); \"\" to record none." content_type: string) -> file with prelude.throw[malformed_base64]
 
 @"Release a file the current run owns, freeing its bytes now rather than at run teardown. Idempotent
-and silent: freeing an already-gone file, or one the run does not own (a user-uploaded file), is a
-no-op, so a retried block that frees the same handle twice behaves identically each attempt. A later
+and silent: freeing an already-gone file, or one the run does not own (a user-uploaded file, whose
+lifetime is the file API's), is a no-op, so a retried block that frees the same handle twice behaves
+identically each attempt. A later
 read of a freed handle throws `gone`."
 primitive agent free(value: file) -> null

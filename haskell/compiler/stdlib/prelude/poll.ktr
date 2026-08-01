@@ -15,7 +15,7 @@ source package writes. @key@ is stable across listings and unique among the item
 memory at once; where identity alone is not enough (a recurring meeting whose occurrences share an id)
 a discriminator joins into it, e.g. `id ++ \" \" ++ start`. @mark@ is the item's own position in the
 source's receive clock, as epoch milliseconds; it is the only quantity that moves a `watermark` cursor,
-and is unused under `seen_set`."
+and is unused under `seen_set`, where recording the tick instant is enough."
 data item[T](
   @"The item's stable, unique dedup identity." key: string,
   @"The item's own arrival instant in the source's clock, epoch milliseconds (unused under `seen_set`)." mark: number,
@@ -72,7 +72,7 @@ data resume(@"The store key the cursor record lives at, relative to the current 
 
 @"Keep the cursor in the run alone (a handler `var`, durable across a crash-recovery restart of that
 same run, and gone when the run ends). Every fresh activation re-primes, so whatever arrived between
-activations is skipped. It fits where re-priming is the semantics — a subscription whose backlog is
+activations is skipped for good and silently. It fits where re-priming is the semantics — a subscription whose backlog is
 worthless, a probe, a test."
 data fresh()
 
@@ -239,8 +239,9 @@ Delivery is at-least-once: the commit lands after a delivery returns, so a crash
 re-delivers exactly that item on the next tick. Exactly-once is built at the destination by making the
 delivery idempotent, keyed by `item.key`.
 
-@fetch@ is the whole adapter, and its contract is: given @since@ and @tick@, return every item at or
-above @since@, oldest first, across every page of the source's pagination. The order is load-bearing —
+@fetch@ is the whole adapter, and its contract is: given @since@ (the instant this tick lists from — the
+cursor's floor minus the regime's overlap) and @tick@ (the occurrence's scheduled instant), return every
+item at or above @since@, oldest first, across every page of the source's pagination. The order is load-bearing —
 the cursor then only passes items that were delivered — and so is draining every page, since a listing
 cut off at a newest-first cap leaves the older items below the cursor. Returning an item again is free;
 that is what the remembered keys are for.
@@ -252,7 +253,8 @@ all resume, delivering what arrived while it was down; with `fresh()` every acti
 that downtime is skipped.
 
 There is no built-in retry: a failing @fetch@ or @deliver_to@ propagates and ends the subscription, and
-resilience is composed at the call site (`supervise.forever` plus a converter). The first poll is one
+resilience is composed at the call site — `supervise.forever` plus a converter turning the transient
+failures (and, for an OAuth source, `auth_error`) into `supervise.interrupted`. The first poll is one
 @schedule@ occurrence in, and under `seen_set` + `skip_backlog` that first poll is the priming one, so
 the earliest notification such a subscription produces is two occurrences after it starts."
 agent subscribe[T, effect E](

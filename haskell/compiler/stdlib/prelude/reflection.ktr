@@ -30,8 +30,10 @@ primitive agent describe[F extends agent never -> unknown with all](
 ) -> F
 
 @"Reify T's JSON Schema as a plain document value — the same schema `json.validate[T]` checks against
-and `get_metadata` embeds for a callable's input / output. Instantiate T explicitly: it appears nowhere
-in the signature, so it can never be inferred."
+and `get_metadata` embeds for a callable's input / output. An object type lists its fields under
+`required`, a `data` value nests under `$katari_constructor` / `$katari_value`, and a `file` is its
+`$katari_ref` handle object. Instantiate T explicitly: it appears nowhere in the signature, so it can
+never be inferred."
 primitive agent schema_of[T]() -> unknown
 
 @"The fully qualified name of the `data` constructor that built @value@ (`prelude.http.auth_error`), or

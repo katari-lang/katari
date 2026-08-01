@@ -18,8 +18,10 @@ primitive agent hmac_sha256(
 @"A short, stable, irreversible stand-in for @value@ under the secret @key@ — the first @length@ hex
 characters of its HMAC-SHA-256 tag. Keyed rather than a plain `sha256` because the thing being
 pseudonymised is an identifier, which is enumerable. @length@ is a collision / brevity trade, not a
-security one (8 hex characters distinguish tens of thousands of subjects); rotating @key@ rotates every
-pseudonym. The result is public, like `hmac_sha256`'s."
+security one (8 hex characters distinguish tens of thousands of subjects, so widen it for a bigger
+population); rotating @key@ rotates every pseudonym, which is the erasure story and the reason the key
+belongs in the project's secret env rather than in the source. The result is public, like
+`hmac_sha256`'s."
 agent pseudonym(
   @"The secret key the pseudonym is stable under; rotating it rotates every pseudonym." key: string of private,
   @"The identifier to stand in for — a user id, an address; public, and enumerable." value: string,

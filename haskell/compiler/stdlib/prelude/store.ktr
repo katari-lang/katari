@@ -60,12 +60,13 @@ agent get_or[T](
 @"Write @value@ at @key@, resolved against the surrounding workspace, creating or replacing the entry
 (last write wins). Any value fits: a document, a data value, a `file`, a secret (sealed at rest). A
 stored `file` joins the project's file library and outlives the writing run; overwriting the entry
-forgets the reference and leaves the file it replaced."
+forgets the reference and leaves the file it replaced, which only an explicit delete through the file
+API or the Files page removes."
 request set(@"The path-like key, relative to the current workspace." key: string, @"The value to store." value: unknown) -> null
 
 @"Delete the entry at @key@, resolved against the surrounding workspace; deleting a missing key is a
 no-op. Deleting an entry that held a `file` forgets the reference and leaves the file in the project's
-file library."
+file library; remove it with an explicit delete through the file API or the Files page."
 request delete(@"The path-like key, relative to the current workspace." key: string) -> null
 
 @"A `list` entry: a key holding a value, directly under the listed place."
@@ -152,7 +153,8 @@ request exclusive(
 @"Open the workspace at @path@ under the current one, for the extent of @continuation@ — the
 `use store.workspace(path = \"core\")` form, and the store's one provider. It installs both halves of a
 working directory: the prefix (four parallel handlers re-perform each store operation outward with the
-prefixed key, so nested workspaces accumulate prefixes and the outermost bare perform is project-root
+prefixed key, and a `list` gets @path@ prepended to its own path parameter, so nested workspaces
+accumulate prefixes and the outermost bare perform is project-root
 access) and the domain (one sequential handler serves `exclusive` by calling the section in its own
 body, so its FIFO applies critical sections one at a time). The prefix handlers sit outside the domain,
 which is what makes a section's keys resolve through the workspace it was opened in.
@@ -222,7 +224,9 @@ request shared(
 @"Open the SHARED PLACE for the extent of @continuation@ — the bare `use store.share` form (the shared
 place is where it is installed, exactly as a workspace is). It serves `shared` by calling its task in
 the clause body, so a task runs here, under this site's workspaces and over this site's serial domain,
-while the desks below go on opening their own workspaces and reaching nothing of each other's.
+while the desks below go on opening their own workspaces and reaching nothing of each other's. The
+clause is parallel, so `shared` itself serializes nothing — several desks' reads run at once, and
+ordering is `exclusive`'s, taken inside the task.
 
 The install order is the app's workspace, then `share`, then the desks. A task's row carries
 `exclusive` and this provider re-performs it outward, so `share` sits inside a workspace for a shared

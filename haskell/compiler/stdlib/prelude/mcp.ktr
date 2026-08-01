@@ -41,7 +41,8 @@ type auth = headers | oauth
 @"The built-in scope capability for the dynamic `provide` path: a nullary phantom marker, carried in a
 tool's effect row, never performable, never handleable. `provide` mints it for its continuation's row
 and discharges it from its own, so a tool tagged `scope` cannot outlive the `provide` that introduced
-it. A generated `katari mcp pull` binding declares its own module-local marker instead."
+it. Distinct nullary markers never merge and never widen, so there is no covariance to reason about. A
+generated `katari mcp pull` binding declares its own module-local marker instead."
 effect scope
 
 // One server tool, as an ordinary agent value, gated by the `Scope` marker `provide` mints. (Type
@@ -52,7 +53,7 @@ type tool[effect Scope] = agent never -> unknown with io | Scope | prelude.throw
 // flat array of tools) to an AI loop wholesale. `Scope` is the marker the tools are gated by.
 type toolbox[effect Scope] = record[tool[Scope]]
 
-@"Plug an MCP server's tools into a program for the extent of @continuation@ — the `use mcp.provide(url = ..., auth = ...)` form. The runtime lists the server, hands @continuation@ a `toolbox[Scope]` of one runtime-minted agent per tool, and settles with the continuation's result. `Scope` rides the continuation's row and is discharged from `provide`'s own, so a tool is callable exactly inside the block; pass the marker explicitly as the first `[...]` argument (`mcp.provide[mcp.scope](...)`), and the toolbox binder's annotation agrees with it.
+@"Plug an MCP server's tools into a program for the extent of @continuation@ — the `use mcp.provide(url = ..., auth = ...)` form. The runtime lists the server, hands @continuation@ a `toolbox[Scope]` of one runtime-minted agent per tool (each carrying the server signature — for `reflection.get_metadata` and call-site validation — and the descriptor it was listed with), and settles with the continuation's result. `Scope` rides the continuation's row and is discharged from `provide`'s own, so a tool is callable exactly inside the block; discharging it is `provide`'s alone (only it opens the connection), so a live tool context cannot be forged. Pass the marker explicitly as the first `[...]` argument (`mcp.provide[mcp.scope](...)`), and the toolbox binder's annotation agrees with it.
 
 A missing or dead `oauth` credential pauses on an authorization escalation and retries once answered; rejected `headers` material throws `auth_error`, and a rejected listing throws `server_error`. A tool called after the scope closes is rejected as a typed `server_error`.
 

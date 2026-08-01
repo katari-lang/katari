@@ -33,8 +33,9 @@ data multipart(parts: array[multipart_part])
 
 @"A JSON body from the @value@ tree (records / arrays / scalars / files, mixed), serialised so that
 every `file` leaf — and only a `file` leaf — becomes the base64 of its bytes, in place. This is the
-REST convention rather than an HTTP standard. The tree may carry secrets, revealed only to the
-destination."
+REST convention rather than an HTTP standard. The substitution is unconditional; to transmit a file's
+handle instead of its bytes, stringify it yourself first (e.g. embed `json.stringify(value = a_file)`
+as a string). The tree may carry secrets, revealed only to the destination."
 data json(value: unknown of private)
 
 // A request body: exactly one of the four shapes. (A `type` synonym carries no `@"..."` annotation.)
@@ -69,9 +70,10 @@ text: the bytes stream straight to the blob store and the reply carries only the
 touch the value plane, the durable call record, or the trace. It captures the whole response body, so
 an embedded base64 field inside a JSON reply is an ordinary `fetch` plus `files.from_base64` instead.
 The downloaded file's recorded content type is the response's `Content-Type`
-(`application/octet-stream` when the server sent none). A non-2xx reply's body is captured too, so
-@status@ says whether the download is the resource; a request that never completes throws
-`fetch_error`."
+(`application/octet-stream` when the server sent none), and the returned @headers@ are normalised as
+`fetch`'s are (names lowercased; repeated headers joined with \", \"). A non-2xx reply's body is
+captured too, so @status@ says whether the download is the resource; a request that never completes
+throws `fetch_error`."
 external agent fetch_file(
   @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
   @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive); the default reads. For GET / HEAD the @body@ is not sent." method: string ?= "GET",
