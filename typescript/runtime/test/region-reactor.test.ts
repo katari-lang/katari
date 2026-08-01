@@ -280,7 +280,7 @@ function forkIr(bodies: {
         parameters: { parameter: 200 },
       },
       // canceller: a fiber body a continuation forks alongside a worker — the parked-join-cancel test overrides
-      // it to gate then cancel the worker's handle (its `{ input }` argument carries `{ nursery, handle }`).
+      // it to gate then cancel the worker's handle (its parameter record carries `{ nursery, handle }`).
       22: {
         block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
@@ -313,7 +313,8 @@ function forkThenHold(argument: string): Operation[] {
   return [
     { kind: "getField", source: 60, field: "value", output: 61 },
     { kind: "loadAgent", output: 62, name: createAgentName("task") },
-    { kind: "loadLiteral", output: 63, value: { kind: "string", value: argument } },
+    { kind: "loadLiteral", output: 1063, value: { kind: "string", value: argument } },
+    { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
     {
       kind: "makeRecord",
       entries: [
@@ -340,10 +341,10 @@ function forkThenHold(argument: string): Operation[] {
   ];
 }
 
-/** A task body that surfaces its argument: escalate its whole `{ input }` argument record as `fiber_ask`
- *  (which relays up through the provide to the run root), returning the answer. A fiber blocked here stays
- *  running. The argument is forwarded as the record it arrives in (a `fork` hands `task` `{ input: <arg> }`),
- *  so it crosses the agent boundary unchanged. */
+/** A task body that surfaces its argument: escalate its whole parameter record as `fiber_ask` (which relays
+ *  up through the provide to the run root), returning the answer. A fiber blocked here stays running. A
+ *  `fork` applies its `argument` record to `task` VERBATIM, so these fixtures fork with `{ input: <datum> }`
+ *  and the record crosses the agent boundary unchanged — what the fiber escalates is what was forked. */
 const askingTask: Operation[] = [
   {
     kind: "delegate",
@@ -440,7 +441,8 @@ function watchIr(bodies?: {
   // continuation's variable 61, visible here through the lexical scope chain (handle body → handle → continuation).
   const handleBody: Operation[] = bodies?.handleBody ?? [
     { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-    { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+    { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "arg" } },
+    { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
     {
       kind: "makeRecord",
       entries: [
@@ -741,7 +743,8 @@ function forkHoldThenWatch(options: { task: string; argument: string; name?: str
   ];
   const ops: Operation[] = [
     { kind: "loadAgent", output: 150, name: createAgentName(options.task) },
-    { kind: "loadLiteral", output: 151, value: { kind: "string", value: options.argument } },
+    { kind: "loadLiteral", output: 1151, value: { kind: "string", value: options.argument } },
+    { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
   ];
   if (options.name !== undefined) {
     ops.push({ kind: "loadLiteral", output: 149, value: { kind: "string", value: options.name } });
@@ -975,7 +978,8 @@ function concurrentDesksIr(): IRModule {
           result: null,
           operations: [
             { kind: "loadAgent", output: 250, name: createAgentName("worker_a") },
-            { kind: "loadLiteral", output: 251, value: { kind: "string", value: "x" } },
+            { kind: "loadLiteral", output: 1251, value: { kind: "string", value: "x" } },
+            { kind: "makeRecord", entries: [["input", 1251]], output: 251 },
             {
               kind: "makeRecord",
               entries: [
@@ -1197,7 +1201,8 @@ describe("region reactor", () => {
     const twoForks: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "alpha" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "alpha" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       {
         kind: "makeRecord",
         entries: [
@@ -1213,7 +1218,8 @@ describe("region reactor", () => {
         argument: 64,
         output: 65,
       },
-      { kind: "loadLiteral", output: 66, value: { kind: "string", value: "beta" } },
+      { kind: "loadLiteral", output: 1066, value: { kind: "string", value: "beta" } },
+      { kind: "makeRecord", entries: [["input", 1066]], output: 66 },
       {
         kind: "makeRecord",
         entries: [
@@ -1304,7 +1310,8 @@ describe("region reactor", () => {
         output: 103,
       },
       { kind: "loadAgent", output: 104, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 105, value: { kind: "string", value: "late" } },
+      { kind: "loadLiteral", output: 1105, value: { kind: "string", value: "late" } },
+      { kind: "makeRecord", entries: [["input", 1105]], output: 105 },
       {
         kind: "makeRecord",
         entries: [
@@ -1344,7 +1351,8 @@ describe("region reactor", () => {
     const forkThenReturn: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "orphan" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "orphan" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       {
         kind: "makeRecord",
         entries: [
@@ -1382,7 +1390,8 @@ describe("region reactor", () => {
     const forkGate1CancelGate2: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "worker" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "worker" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       {
         kind: "makeRecord",
         entries: [
@@ -1485,7 +1494,8 @@ describe("region reactor", () => {
     const forkHoldCancelReturn: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "x" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       {
         kind: "makeRecord",
         entries: [
@@ -1723,7 +1733,8 @@ describe("region reactor", () => {
     const persistence = new StoringPersistence();
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "victim" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "victim" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -1841,7 +1852,8 @@ describe("region reactor", () => {
     const continuation: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 70, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "first" } },
+      { kind: "loadLiteral", output: 1071, value: { kind: "string", value: "first" } },
+      { kind: "makeRecord", entries: [["input", 1071]], output: 71 },
       {
         kind: "makeRecord",
         entries: [
@@ -1858,7 +1870,8 @@ describe("region reactor", () => {
         output: 73,
       },
       { kind: "call", target: 14, output: 74 },
-      { kind: "loadLiteral", output: 75, value: { kind: "string", value: "second" } },
+      { kind: "loadLiteral", output: 1075, value: { kind: "string", value: "second" } },
+      { kind: "makeRecord", entries: [["input", 1075]], output: 75 },
       {
         kind: "makeRecord",
         entries: [
@@ -1992,7 +2005,8 @@ describe("region reactor", () => {
     // the buffered pair ahead of the live one: [first, second, third].
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "first" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "first" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -2008,7 +2022,8 @@ describe("region reactor", () => {
         argument: 152,
         output: 153,
       },
-      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "second" } },
+      { kind: "loadLiteral", output: 1156, value: { kind: "string", value: "second" } },
+      { kind: "makeRecord", entries: [["input", 1156]], output: 156 },
       {
         kind: "makeRecord",
         entries: [
@@ -2025,7 +2040,8 @@ describe("region reactor", () => {
         output: 158,
       },
       { kind: "loadAgent", output: 162, name: createAgentName("worker3") },
-      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "" } },
+      { kind: "loadLiteral", output: 1163, value: { kind: "string", value: "" } },
+      { kind: "makeRecord", entries: [["input", 1163]], output: 163 },
       {
         kind: "makeRecord",
         entries: [
@@ -2159,7 +2175,8 @@ describe("region reactor", () => {
     const persistence = new StoringPersistence();
     const twoForks: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "alpha" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "alpha" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -2175,7 +2192,8 @@ describe("region reactor", () => {
         argument: 152,
         output: 153,
       },
-      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "beta" } },
+      { kind: "loadLiteral", output: 1156, value: { kind: "string", value: "beta" } },
+      { kind: "makeRecord", entries: [["input", 1156]], output: 156 },
       {
         kind: "makeRecord",
         entries: [
@@ -2258,7 +2276,8 @@ describe("region reactor", () => {
     // processing by a var handler, the property that lets a chat loop keep ONE var handler and stay in order.
     const twoForks: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "first" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "first" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -2274,7 +2293,8 @@ describe("region reactor", () => {
         argument: 152,
         output: 153,
       },
-      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "second" } },
+      { kind: "loadLiteral", output: 1156, value: { kind: "string", value: "second" } },
+      { kind: "makeRecord", entries: [["input", 1156]], output: 156 },
       {
         kind: "makeRecord",
         entries: [
@@ -2410,7 +2430,8 @@ describe("region reactor", () => {
     // The handler: fork `child` into `r`, then answer the original `on_message` with "answered".
     const forkingHandler: Operation[] = [
       { kind: "loadAgent", output: 162, name: createAgentName("child") },
-      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "childarg" } },
+      { kind: "loadLiteral", output: 1163, value: { kind: "string", value: "childarg" } },
+      { kind: "makeRecord", entries: [["input", 1163]], output: 163 },
       {
         kind: "makeRecord",
         entries: [
@@ -2633,7 +2654,8 @@ describe("region reactor", () => {
     // first is held at the handler on `gate`, the second queues in the sequential handler's FIFO.
     const twoForks: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "aGVsbG8=" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "aGVsbG8=" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -2649,7 +2671,8 @@ describe("region reactor", () => {
         argument: 152,
         output: 153,
       },
-      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "d29ybGQ=" } },
+      { kind: "loadLiteral", output: 1156, value: { kind: "string", value: "d29ybGQ=" } },
+      { kind: "makeRecord", entries: [["input", 1156]], output: 156 },
       {
         kind: "makeRecord",
         entries: [
@@ -2791,7 +2814,8 @@ describe("region reactor", () => {
     const continuation: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "a-arg" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "a-arg" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       { kind: "loadLiteral", output: 71, value: { kind: "string", value: "alpha" } },
       {
         kind: "makeRecord",
@@ -2891,7 +2915,8 @@ describe("region reactor", () => {
     const continuation: Operation[] = [
       { kind: "getField", source: 60, field: "value", output: 61 },
       { kind: "loadAgent", output: 62, name: createAgentName("task") },
-      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "w-arg" } },
+      { kind: "loadLiteral", output: 1063, value: { kind: "string", value: "w-arg" } },
+      { kind: "makeRecord", entries: [["input", 1063]], output: 63 },
       { kind: "loadLiteral", output: 71, value: { kind: "string", value: "worker" } },
       {
         kind: "makeRecord",
@@ -3001,7 +3026,8 @@ describe("region reactor", () => {
     const persistence = new StoringPersistence();
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "arg" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -3018,7 +3044,8 @@ describe("region reactor", () => {
         output: 153,
       },
       { kind: "loadAgent", output: 156, name: createAgentName("panicker") },
-      { kind: "loadLiteral", output: 157, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 1157, value: { kind: "string", value: "x" } },
+      { kind: "makeRecord", entries: [["input", 1157]], output: 157 },
       { kind: "loadLiteral", output: 148, value: { kind: "string", value: "boom" } },
       {
         kind: "makeRecord",
@@ -3180,7 +3207,8 @@ describe("region reactor", () => {
     const persistence = new StoringPersistence();
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "arg" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       { kind: "loadLiteral", output: 149, value: { kind: "string", value: "keeper" } },
       {
         kind: "makeRecord",
@@ -3211,7 +3239,8 @@ describe("region reactor", () => {
     // on_message it is servicing), then holds on `gate` until the test releases it.
     const handler: Operation[] = [
       { kind: "loadAgent", output: 162, name: createAgentName("panicker") },
-      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 1163, value: { kind: "string", value: "x" } },
+      { kind: "makeRecord", entries: [["input", 1163]], output: 163 },
       { kind: "loadLiteral", output: 168, value: { kind: "string", value: "boom" } },
       {
         kind: "makeRecord",
@@ -3324,7 +3353,8 @@ describe("region reactor", () => {
     const persistence = new StoringPersistence();
     const handleBody: Operation[] = [
       { kind: "loadAgent", output: 150, name: createAgentName("worker") },
-      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      { kind: "loadLiteral", output: 1151, value: { kind: "string", value: "arg" } },
+      { kind: "makeRecord", entries: [["input", 1151]], output: 151 },
       {
         kind: "makeRecord",
         entries: [
@@ -3341,7 +3371,8 @@ describe("region reactor", () => {
         output: 153,
       },
       { kind: "loadAgent", output: 156, name: createAgentName("thrower") },
-      { kind: "loadLiteral", output: 157, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 1157, value: { kind: "string", value: "x" } },
+      { kind: "makeRecord", entries: [["input", 1157]], output: 157 },
       { kind: "loadLiteral", output: 148, value: { kind: "string", value: "monitor" } },
       {
         kind: "makeRecord",

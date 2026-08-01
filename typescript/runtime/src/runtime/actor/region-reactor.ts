@@ -747,14 +747,33 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         if (argument !== null) this.reownIncoming(argument, provideInstance);
       }
     }
-    // `task` is `agent (input: A) -> T`, so it receives `{ input: <argument> }` (the same parameter-record
-    // convention the continuation's `{ value: nursery }` uses). This internal dispatch does not cross a
-    // dynamic-input boundary's pre-check, so the record conforms by construction; a `dispatchCallable` error
-    // is a non-callable task, handled below.
-    const input: Value = {
-      kind: "record",
-      fields: { input: payload.argument ?? { kind: "null" } },
-    };
+    // `task` is `agent A -> null` and `argument` IS an `A` — the task's whole parameter record — so the
+    // argument is applied VERBATIM as the call's argument record. A fork is a deferred call, and every call
+    // in Katari applies a named-argument record, so wrapping it in a synthetic `{ input: ... }` would both
+    // fix a parameter name into the API and nest the payload one level deeper than an ordinary call. The
+    // record conforms by construction (the signature unifies `A` with the task's parameter record at the
+    // fork site) and this internal dispatch does not cross a dynamic-input boundary's pre-check; a
+    // `dispatchCallable` error is a non-callable task, handled below. The task's OMITTED optional
+    // parameters are filled callee-side, where every call has them filled (the instance root's
+    // `applyDefaults` over the agent block's `defaults`) — nothing to do here.
+    //
+    // An absent / `null` argument reads as "no fields" (`{}`), the nullary spelling. Any other non-record
+    // cannot come from a well-typed fork, so it fails the call rather than being silently reshaped.
+    const forkArgument = payload.argument;
+    if (forkArgument !== null && forkArgument.kind !== "null" && forkArgument.kind !== "record") {
+      this.complete({
+        delegation,
+        outcome: {
+          kind: "error",
+          message: `region.fork: the argument must be the task's parameter record, got ${forkArgument.kind}`,
+        },
+      });
+      return;
+    }
+    const input: Value =
+      forkArgument !== null && forkArgument.kind === "record"
+        ? forkArgument
+        : { kind: "record", fields: {} };
     const dispatched = dispatchCallable(payload.task, input);
     if ("error" in dispatched) {
       this.complete({
