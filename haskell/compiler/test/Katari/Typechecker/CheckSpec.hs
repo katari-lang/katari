@@ -1892,11 +1892,14 @@ spec = do
         )
         `shouldBe` []
 
-  -- The `prelude.store` workspace geometry: keys are ambient, `scope` is the prefixing workspace
-  -- provider (its four parallel handlers re-perform outward with the prefixed key), and
-  -- `serialize` opens a serial domain whose `exclusive` critical sections carry a FIXED row — the
-  -- four store operations, nothing else — so a section can never block on a model, a network, or
-  -- another domain. No type arguments anywhere: the fixed row replaced the old ceiling generics.
+  -- The `prelude.store` workspace geometry: keys are ambient, and `workspace` is the ONE provider —
+  -- the old `scope` / `serialize` split is gone, so a single install opens both the key PREFIX (four
+  -- parallel handlers re-performing outward with the prefixed key) and the serial DOMAIN whose FIFO
+  -- makes an `exclusive` a critical section. A section's row is FIXED to the four store operations,
+  -- nothing else, so it can never block on a model, a network, or another domain; no type arguments
+  -- anywhere, since that fixed row replaced the old ceiling generics. `get_or` is the typed read
+  -- built over the same requests (T off the fallback, the mismatch folded by `prelude.catch`), which
+  -- is why it belongs in this group rather than beside `json.validate`.
   describe "store workspaces (workspace / exclusive / get_or)" $ do
     it "prefix composition type-checks: nested workspaces over ambient keys, a listing under a subdirectory" $
       compiledCodes

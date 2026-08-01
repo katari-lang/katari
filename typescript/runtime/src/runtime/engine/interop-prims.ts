@@ -610,10 +610,14 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   // ─── prelude.region ─────────────────────────────────────────────────────────────────────────
   "prelude.region.fiber_id": (argument) => {
     // A pure read off the handle `region.fork` minted: the runtime-minted id rides the namespaced
-    // marker field, so no reactor round-trip is needed. A value without the marker is not a fiber
-    // handle — the checker's scope gating prevents one from reaching here, so this is an
-    // engine-invariant break: panic (a plain error), the same backstop as the reactor's
-    // forged-handle refusals.
+    // marker field, so no reactor round-trip is needed. NOTHING GATES THE ARGUMENT and nothing needs
+    // to: the declared parameter is `agent never -> null with all`, which any callable fits, so the
+    // checker does not keep a non-fiber value out — the marker field below is the whole test. The id
+    // this answers is CORRELATION data, naming a fiber and authorising nothing, since `cancel_by_id`
+    // re-checks it against the addressed nursery's own running set (a foreign or stale id is an
+    // `unknown_fiber` miss there, not a teardown). A value carrying no marker is therefore just not a
+    // fiber handle, with no id to answer and none to invent: a plain thrown error, which the program
+    // meets as a panic — the same backstop as the reactor's forged-handle refusals.
     const handle = field(argument, "handle");
     const fiber = handle.kind === "record" ? handle.fields[NURSERY_FIBER_FIELD] : undefined;
     if (fiber === undefined || fiber.kind !== "string") {

@@ -5,7 +5,8 @@
 // (`stringify(parse(s)) == s`), and a non-document value renders its canonical wire form (a data value nests
 // under `$katari_value`, an agent / closure reference carries its snapshot, a file is a `$katari_ref`
 // handle). `validate[T]` checks a value against T's schema and returns it unchanged, or throws
-// `validation_error`; `try_validate[T]` is its TOTAL twin, answering `null` where it would throw.
+// `validation_error` — the one shape of the check, since folding that throw back to a value is
+// `prelude.catch`'s job and not a second prim's.
 
 import {
   createAgentName,

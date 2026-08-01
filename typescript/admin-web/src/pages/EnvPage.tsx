@@ -33,7 +33,7 @@ export function EnvPage() {
     <>
       <PageHeader
         title="Env"
-        description="Configuration your programs read via `env.get` / `env.get_secret`."
+        description="Configuration your programs read via `env.get_or` / `env.get_secret`."
         actions={
           <Button variant="primary" onClick={() => setEditing("new")}>
             <Plus className="size-4" /> Add entry
