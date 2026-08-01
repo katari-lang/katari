@@ -264,9 +264,6 @@ agent from_rfc3339(value: string) -> number | null {
   agent read_field(start: integer, end: integer) -> integer | null {
     string.to_integer(value = string.slice(value = value, start = start, end = end))
   }
-  agent digit_step(accumulator: boolean, value: string) -> boolean {
-    accumulator && string.contains(value = "0123456789", search = value)
-  }
   let length = string.length(value = value)
   if (length < 20) {
     null
@@ -304,10 +301,14 @@ agent from_rfc3339(value: string) -> number | null {
       0
     } else {
       let digits = string.slice(value = value, start = 20, end = zone_start)
+      // Every point of the fraction checked, one `contains` at a time — Katari has no character classes.
+      let all_digits = for (let point in string.split(value = digits, separator = ""), var every: boolean = true) {
+        next with { every = every && string.contains(value = "0123456789", search = point) }
+      } then (_points) { every }
       let well_formed = (
         zone_start > 20
           && string.slice(value = value, start = 19, end = 20) == "."
-          && array.fold(target = string.split(value = digits, separator = ""), initial = true, step = digit_step)
+          && all_digits
       )
       match ([well_formed, string.to_integer(value = string.slice(value = digits ++ "00", start = 0, end = 3))]) {
         case [true, integer(parsed)] -> parsed
@@ -346,15 +347,19 @@ agent from_rfc3339(value: string) -> number | null {
 //
 // `to_rfc3339` is the WIRE render — exact, sortable, and unreadable at a glance. What an app actually
 // puts in front of a person (an operator's clock line) or a model (the "today is" a turn is injected
-// with) is a handful of small civil labels, and every app that had a calendar wrote the same five: a
-// weekday's three letters, an offset's `±HH:MM`, a `YYYY-MM-DD` date, the two joined into a stamp, and
-// a date advanced by whole days. They are here for the ordinary reason — one implementation, one set of
-// edge cases (a negative offset's sign, a day index out of range, a daylight-saving step) — and because
-// getting `add_days` subtly wrong is invisible until a weekly task drifts off its weekday.
+// with) is a handful of small civil labels, and every app that had a calendar wrote the same four: a
+// weekday's three letters, an offset's `±HH:MM`, a `YYYY-MM-DD` date, and the two joined into a stamp.
+// They are here for the ordinary reason — one implementation, one set of edge cases (a negative
+// offset's sign, a day index out of range).
+//
+// RENDERING ONLY. A date ADVANCED by whole days is not a label, it is calendar arithmetic, and calendar
+// arithmetic belongs to `to_civil` / `from_civil` above: read the instant into its fields, add to `day`
+// (which normalises — the 32nd of a month is the 1st of the next), render the result back. Keeping the
+// two apart is what stops this section from growing a date algebra beside the one that already exists.
 //
 // THERE IS NO PATTERN LANGUAGE, deliberately. A `strftime` would be a second, stringly-typed grammar
-// with its own escaping rules and its own errors, and these five labels are what the demand actually
-// was; a program wanting a sixth composes it from `to_civil`'s fields the way these do.
+// with its own escaping rules and its own errors, and these four labels are what the demand actually
+// was; a program wanting a fifth composes it from `to_civil`'s fields the way these do.
 //
 // Every label takes `offset_minutes` explicitly, exactly like the arithmetic above — and composing it
 // with `zone_offset` per instant is what makes a named zone's rendering DST-correct.
@@ -436,33 +441,6 @@ agent stamp(
   let weekday = weekday_label(day = day_of_week(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes))
   let date = date_label(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes)
   f"${date} (${weekday}) ${pad(value = fields.hour, width = 2)}:${pad(value = fields.minute, width = 2)} ${offset_label(offset_minutes = offset_minutes)}"
-}
-
-@"A civil DATE (`YYYY-MM-DD`) advanced by @days@ whole days at @offset_minutes@, answering a date in the
-same shape — the arithmetic a recurring schedule needs (\"the same weekday next week\", \"three days
-before the due date\"), without the caller touching a calendar. @days@ may be negative.
-
-The date is read at NOON local, not midnight, and that is the load-bearing detail. A day is 86400000
-milliseconds here, but a civil day at a zone's daylight-saving boundary is an hour longer or shorter;
-anchored at midnight, adding whole days lands an hour either side of it and the render falls onto the
-previous or next date — a weekly task quietly walking off its weekday, one hour at a time. Noon is
-twelve hours from either edge, so the same arithmetic cannot cross a date boundary.
-
-TOTAL: a @date@ that is not a `YYYY-MM-DD` civil date answers `null` rather than throwing — the string
-is the whole explanation, so there is nothing a payload could add (the same reason `from_rfc3339`'s
-failure is a `null`). Validated, not clamped: February 30th is `null`, not silently March 2nd."
-agent add_days(
-  @"The starting civil date, `YYYY-MM-DD` — exactly what `date_label` renders." date: string,
-  @"How many whole days to add; may be negative." days: integer,
-  @"The offset in minutes east of UTC; the default 0 reads UTC." offset_minutes: integer ?= 0,
-) -> string | null {
-  // The parse and the render are the SAME pair `date_label` / `from_rfc3339` already own: the date is
-  // completed into an RFC3339 instant at noon with the offset's own label as the zone, and the answer is
-  // re-rendered by `date_label` — so a date this agent accepts is exactly a date it produces.
-  match (from_rfc3339(value = f"${date}T12:00:00${offset_label(offset_minutes = offset_minutes)}")) {
-    case null -> null
-    case instant -> date_label(epoch_milliseconds = instant + days * 86400000, offset_minutes = offset_minutes)
-  }
 }
 
 // ── the zone database: the one offset arithmetic cannot derive ────────────────────────────────────
