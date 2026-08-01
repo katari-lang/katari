@@ -1,0 +1,313 @@
+// CROSS-NURSERY MAIL — delivering work INTO another fiber's own conversation, and the one rule that keeps
+// it sound. `region.ktr` tours a SINGLE nursery (fork, watch, the white hole); this is the composition
+// several long-lived residents are built out of — several AIs, several desks, anything that has to keep
+// its own state and still be addressable by name.
+//
+// WHAT A REQUEST CANNOT DO. A `request` performed by the router reaches whatever handler is above THE
+// ROUTER, never the resident it was meant for — a fiber cannot be handed a request the way a handler can.
+// So each resident opens a nursery OF ITS OWN (its MAILBOX, never the nursery it was forked into) and
+// announces the handle; a router holding that handle delivers by FORKING INTO IT.
+//
+// THE RUNTIME MOVE THIS PINS: `region.fork` ROUTES BY THE HANDLE ALONE. The fiber lands in the nursery the
+// handle belongs to and its escalations surface at THAT nursery's `region.watch` — whatever context
+// performed the fork. The sender's own dynamic extent takes no part, which is what lets a desk deliver
+// into a conversation it is not inside of. Below, the desk's `mail_scope` comes from a nursery of its own
+// (`franking`) and every letter still lands in the addressee's box: the marker is the type-level permit,
+// the handle is the address.
+//
+// THE ONE RULE: MAIL IS A NAMED AGENT APPLIED TO PLAIN DATA. A fork carries its task's captured
+// ENVIRONMENT into the target's instance, so an INLINE closure forked across nurseries hands the sender's
+// own environment to a scope that may die first — and takes the still-living sender's environment down
+// with it. A named agent applied to a record of plain data captures nothing, so there is nothing to take.
+// `mail` below is that agent, and it is the only delivery form this module offers.
+//
+// DELIVERY IS AT-MOST-ONCE: a fork into a nursery that has already closed PANICS rather than answering a
+// typed error, so a desk that must notice a lost letter folds the panic into a value with `supervise.once`
+// + `supervise.signal_panics` (`post` below). Everything here is plain region + prelude and runs
+// deterministically end to end: `katari run playground.mailbox.main`.
+
+// ─── the mail vocabulary: one shared marker, one delivery request, one named task ─────────────────
+
+@"The shared scope marker every mailbox here is opened under. ONE marker for all of them, not one per
+resident: a desk must have the marker in its OWN row to fork into a resident's box, and it could not name a
+marker each resident declared for itself. Their scopes therefore MERGE at the type level — which is the
+point, and it stays a TYPE-level phenomenon only: `region.provide` mints a fresh RUNTIME scope identity per
+install and a fork routes by the identity the HANDLE carries, so no letter can reach the wrong nursery."
+effect mail_scope
+
+// One resident's inbox: a nursery whose fibers may raise exactly `delivery`, so the only thing that can be
+// forked into one is a letter for its own conversation. (Type synonyms take no docs.)
+type mailbox = region.nursery[mail_scope, delivery]
+
+@"One letter, as it surfaces inside the ADDRESSEE's `region.watch` — the mail fiber's single escalation.
+@hop@ is the relay count (1 for a first-hop send, one more per relay); it is stated by the sender rather
+than defaulted, because how far a message has travelled is a judgement a damping desk reads."
+request delivery(@"Who sent it." source: string, @"The message body." content: string, @"How many desk-to-desk hops it has made." hop: integer) -> null
+
+@"THE letter, as a task to fork: `region.fork(nursery = box, task = mail, argument = { source = \"desk\",
+content = text, hop = 1 })`. It runs inside the ADDRESSEE's nursery, performs one `delivery`, and settles —
+so the message arrives as an escalation at the addressee's own watch, in its own conversation.
+
+IT IS A NAMED AGENT TAKING PLAIN DATA, AND THAT IS THE WHOLE DESIGN. A cross-nursery fork carries its
+task's captured environment into the target's instance, so an inline closure would hand the sender's
+handlers to a scope that may die first. This captures nothing, so there is nothing to take — and because it
+is the only delivery form here, the unsound one has nowhere to be written."
+agent mail(@"Who is sending." source: string, @"The message body." content: string, @"The relay count." hop: integer) -> null with delivery {
+  delivery(source = source, content = content, hop = hop)
+}
+
+// ─── the two channels a resident talks to its desk over ───────────────────────────────────────────
+
+@"A resident announcing its inbox — performed ONCE, from inside its own `provide`, and answered by the
+desk, which keeps a `record[mailbox]` and forks `mail` into the right one. It is a REQUEST rather than a
+return value because a resident never returns: its task ends at a `region.watch`, so the handle has to
+leave through the effect channel or not at all."
+request register(@"The name the desk will address it as." name: string, @"Its mailbox handle." box: mailbox) -> null
+
+@"What a resident tells the desk it heard. The residents' one output channel — a fiber carries no result,
+so everything it produces leaves as an escalation."
+request report(@"The resident that heard it." sender: string, @"What it heard, rendered." line: string) -> null
+
+// The whole traffic a desk fiber may raise, and so the desk nursery's ceiling: its two channels, `io` (a
+// resident opens and watches a nursery of its own), and the two ENDING events that resident's OWN mailbox
+// watch re-emits — a mail fiber that panicked or threw, which escalates on out to the desk's watch. A
+// ceiling is what makes covering the desk's watch a total obligation. (Type synonyms take no docs.)
+type desk_traffic = register | report | region.crashed | region.failed | io
+
+// ─── one resident: a mailbox of its own, announced, then watched ──────────────────────────────────
+
+@"ONE RESIDENT'S WHOLE BODY, as a task to fork: `region.fork(nursery = desk, task = resident, argument =
+{ name = \"core\" }, name = \"core\")`. Adding a resident to a program is that one line, at boot or later;
+dismissing one is `region.cancel_by_id` on its fiber id.
+
+THE MAILBOX IS A SECOND NURSERY, never the one this fiber was forked into — a fiber that watched the
+nursery it lives in would be watching its own siblings, and would hear the OTHER residents' letters. It is
+opened here, announced with `register`, and watched at the end, and those three lines are the whole of what
+makes a mailed letter arrive in THIS resident's conversation and nobody else's.
+
+ONE NURSERY, ONE WATCH: `watch` already interleaves every fiber concurrently, so a second watch on the same
+nursery buys nothing and splits the stream. The handler installed around it is sequential (no `parallel`),
+so letters are served one at a time, in arrival order — which is what a conversation wants."
+agent resident(@"The name the desk addresses this resident as." name: string) -> null {
+  let box : mailbox = use region.provide[mail_scope, delivery]
+  // Announced BEFORE the watch is up, and that is safe: the desk may answer this and post a letter at
+  // once, and an escalation that beats its watch's registration is held durably by the nursery and
+  // re-emitted the moment the watch lands, in arrival order.
+  register(name = name, box = box)
+  // The mailbox's white hole: every mail fiber's `delivery` surfaces here, and this resident answers it in
+  // its own extent — the report goes out on its own channel, up to the desk's watch.
+  use handler {
+    request delivery(source: string, content: string, hop: integer) -> null {
+      report(sender = name, line = f"${name} heard \"${content}\" from ${source} (hop ${string.to_string(value = hop)})")
+      next null
+    }
+  }
+  region.watch(nursery = box)
+}
+
+// ─── the desk: the routing table, the deliveries, and the dead inbox ──────────────────────────────
+
+@"The desk's own nursery marker — DISTINCT from `mail_scope`, so the residents' scope and their mailboxes'
+scope never merge: a resident is a fiber of the desk, and a letter is a fiber of a mailbox, and the two
+sets are addressed by different handles."
+effect desk_scope
+
+@"A delivery that reached the addressee's nursery. (The letter itself is a detached fiber, so this says
+the fork landed, not that the resident has read it — a fiber carries no result.)"
+data posted()
+
+@"A delivery that did NOT land, carrying the line the desk files about it: either no resident of that name
+ever registered, or its nursery has closed (a dismissed resident) and the fork panicked."
+data bounced(@"What the desk files about the loss." note: string)
+
+@"Post one letter to the resident registered under @to@, and answer with WHAT HAPPENED rather than dying of
+it. Two ways a letter is lost, both folded here into one sum the desk can file:
+
+  * the name is not in the table — nobody has registered under it;
+  * the name is in the table but its nursery has CLOSED (the resident was dismissed, or ended). A fork into
+    a dead nursery PANICS — delivery is at-most-once and the runtime says so through the failure channel,
+    not a typed error — so it is run under `supervise.signal_panics` + `supervise.once`, which converts
+    that panic into the supervision signal and hands it back as a value. `once`, not a replaying provider:
+    a letter to a resident that is gone will be lost the same way next time.
+
+The `once` task closes over the handle and the fields, which is fine — a closure is only unsound as the
+TASK OF A CROSS-NURSERY FORK, and the thing forked here is the named `mail` with a record of plain data."
+agent post(
+  @"The desk's routing table." boxes: record[mailbox],
+  @"The addressee's registered name." to: string,
+  @"Who the letter is from." source: string,
+  @"The message body." content: string,
+  @"The relay count." hop: integer,
+) -> posted | bounced with mail_scope | io {
+  match (record.get(target = boxes, key = to)) {
+    case null -> bounced(note = f"the letter to ${to} was never posted: no resident of that name has registered")
+    case box -> {
+      match (supervise.once(task = agent () -> null {
+        use supervise.signal_panics[never]()
+        region.fork(nursery = box, task = mail, argument = { source = source, content = content, hop = hop }, name = f"${source}->${to}")
+        null
+      })) {
+        case supervise.ran(_) -> posted()
+        case supervise.signalled(failure => failure) -> bounced(note = f"the letter to ${to} bounced: ${failure.message}")
+      }
+    }
+  }
+}
+
+@"Post a run of letters to one addressee, in order, and answer with the note for each that was lost (an
+empty array is a clean round). Posting a PAIR back to back is what pins the order a mailbox delivers in:
+each letter is its own fiber, they are forked one after the other, and the addressee's watch re-emits both
+to ONE sequential handler — which serializes at its own FIFO, in arrival order. So a conversation stays in
+order without the sender doing anything about it."
+agent post_all(
+  @"The desk's routing table." boxes: record[mailbox],
+  @"The addressee's registered name." to: string,
+  @"Who the letters are from." source: string,
+  @"The message bodies, in the order they should be read." contents: array[string],
+  @"The relay count they all carry." hop: integer,
+) -> array[string] with mail_scope | io {
+  for (let content in contents, var notes: array[string] = []) {
+    match (post(boxes = boxes, to = to, source = source, content = content, hop = hop)) {
+      case posted(_) -> { next with { notes = notes } }
+      case bounced(note => note) -> { next with { notes = array.append(target = notes, value = note) } }
+    }
+  } then (_letters) { notes }
+}
+
+@"Waiting on the roll: not every resident the desk forked has registered yet."
+data waiting()
+
+@"The whole roll has registered — every mailbox is addressable, so the exchange can start."
+data all_present()
+
+@"THE one comparison boundary for the roll: classify the number of registered mailboxes against the two
+residents `main` forked. Which of the two registers first is a race, and the desk must not depend on it —
+so the exchange starts on the COUNT, once, and every arm downstream dispatches on this sum."
+agent roll_call(@"How many mailboxes are in the table." present: integer) -> waiting | all_present {
+  if (present < 2) { waiting() } else { all_present() }
+}
+
+@"More is already on its way to the same resident: file the report and wait."
+data awaiting_more()
+
+@"The first resident has answered everything the desk sent it: hand the thread on."
+data hand_on()
+
+@"The second resident has spoken: dismiss the first and close the desk."
+data wrap_up()
+
+@"THE one comparison boundary for the exchange: classify how many reports have landed into the desk's next
+move, once. The scripted round is two letters to `core`, then one relay to `scribe` — so the third report
+ends it. A production router dispatches on the ADDRESSEE instead (who may write to whom is the app's
+judgement either way); a beat count is what a deterministic demo can assert on."
+agent next_move(@"How many reports have landed." reports: integer) -> awaiting_more | hand_on | wrap_up {
+  if (reports < 2) {
+    awaiting_more()
+  } else if (reports == 2) {
+    hand_on()
+  } else {
+    wrap_up()
+  }
+}
+
+@"Render a dismissal outcome for the transcript. `unknown_fiber` is not an error — a fiber id is data, so
+addressing one that has already settled is an anticipated miss, and the desk says which it got."
+agent dismissal_note(@"What `cancel_by_id` answered." outcome: region.cancel_outcome) -> string {
+  match (outcome) {
+    case region.cancelled(id => _) -> "core dismissed"
+    case region.unknown_fiber(id => _) -> "core was already gone"
+  }
+}
+
+@"The finished transcript, carried out of the region as a typed throw — `region.watch` returns `never`, so
+an ending is composed AROUND it with an escalation, exactly as the region tour does."
+data transcript(@"The lines the desk filed, in order." lines: array[string])
+
+@"Entry: two residents, one desk, and a letter that crosses from the desk into a resident's own
+conversation — `katari run playground.mailbox.main`.
+
+THE EXCHANGE, and why each step is deterministic: both residents register (the desk starts on the COUNT, so
+which registers first does not matter); the desk posts TWO letters into `core`'s box back to back, and
+core's watch hears them IN THE ORDER THEY WERE POSTED (one mailbox, one sequential handler, one FIFO); the
+desk relays what core heard on to `scribe` at hop 2; scribe reports. Then the dead-inbox half: the desk
+DISMISSES core with `region.cancel_by_id` and posts to it again — the fork into the closed nursery panics,
+`post` folds the panic into `bounced`, and the desk files the loss instead of dying of it. The transcript
+leaves the region as a throw and becomes the run's result."
+agent main() -> string {
+  // The outer catch: the finished transcript carries out of the region and becomes the result line.
+  use handler {
+    request prelude.throw(error: transcript) -> never {
+      break string.join(parts = error.lines, separator = " | ")
+    }
+  }
+  // THE DESK'S OWN DISCHARGE OF `mail_scope`. `region.fork` is gated `with Scope`, so a desk needs the
+  // mailboxes' marker in its row — and `provide` is the only thing that mints one. Nothing is ever forked
+  // into THIS nursery and it is never watched: opening it is how the desk obtains the permit. That the
+  // permit comes from a nursery of the desk's own, and letters still land in the residents' boxes, is the
+  // whole point — the marker is the type-level permit, and the HANDLE is the address.
+  let franking : mailbox = use region.provide[mail_scope, delivery]
+  // The desk's nursery: one fiber per resident, under a marker of its own.
+  let desk : region.nursery[desk_scope, desk_traffic] = use region.provide[desk_scope, desk_traffic]
+  // The residents are forked BEFORE the handler that serves them is installed, so their `register`
+  // escalations are raised into a nursery with no watch yet. They are held durably and re-emitted the
+  // moment the `watch` at the end registers, in arrival order — a fiber never has to delay its first raise
+  // until its watch is up. Forking first is also what lets the handler below close over `core_fiber`,
+  // which is the handle the dismissal addresses.
+  let core_fiber = region.fork(nursery = desk, task = resident, argument = { name = "core" }, name = "core")
+  region.fork(nursery = desk, task = resident, argument = { name = "scribe" }, name = "scribe")
+  // THE ROUTER, and it is the only thing a program with several residents has to write itself: a table of
+  // mailboxes, and the judgement of who hears from whom. Sequential (`var`), so the table and the
+  // transcript have one owner and the exchange is serialized in arrival order.
+  use handler (var boxes: record[mailbox] = {}, var filed: array[string] = [], var reports: integer = 0) {
+    request register(name: string, box: mailbox) -> null {
+      let known = record.set(target = boxes, key = name, value = box)
+      match (roll_call(present = record.size(target = known))) {
+        case waiting(_) -> { next null with { boxes = known } }
+        case all_present(_) -> {
+          // The opening round: two letters from the desk itself, hop 1, posted back to back into `core`'s
+          // box. Each is a fork performed HERE, in the desk's extent — nowhere near core's `provide` — and
+          // the pair arrives at core's watch in the order it was posted.
+          let lost = post_all(boxes = known, to = "core", source = "desk", hop = 1, contents = ["who is on call?", "and who takes the night?"])
+          next null with { boxes = known, filed = array.concat(left = filed, right = lost) }
+        }
+      }
+    }
+    request report(sender: string, line: string) -> null {
+      let heard = array.append(target = filed, value = line)
+      let beat = reports + 1
+      match (next_move(reports = beat)) {
+        case awaiting_more(_) -> { next null with { filed = heard, reports = beat } }
+        case hand_on(_) -> {
+          // The relay: what core heard goes on to scribe, one hop further out. The desk is the only thing
+          // that knows both residents exist — neither resident knows about the other.
+          let lost = post_all(boxes = boxes, to = "scribe", source = sender, hop = 2, contents = ["file what core heard"])
+          next null with { filed = array.concat(left = heard, right = lost), reports = beat }
+        }
+        case wrap_up(_) -> {
+          // DISMISSAL is `cancel_by_id` on the fiber id — and it is what makes the next post's inbox dead:
+          // the resident's own `provide` closes with it, so its mailbox goes with it.
+          let dismissal = region.cancel_by_id(nursery = desk, id = region.fiber_id(handle = core_fiber))
+          let dismissed = array.append(target = heard, value = dismissal_note(outcome = dismissal))
+          // The dead inbox: the addressee is still in the table, but its nursery has closed. The fork
+          // panics, `post` folds the panic into a value, and the desk files the loss instead of dying of
+          // it. A `posted` here would mean the teardown had not landed yet — it is filed as itself, so the
+          // demo reports what happened rather than asserting it away.
+          match (post(boxes = boxes, to = "core", source = "desk", content = "anyone home?", hop = 1)) {
+            case posted(_) -> { prelude.throw(error = transcript(lines = array.append(target = dismissed, value = "the letter to core was accepted after the dismissal"))) }
+            case bounced(note => note) -> { prelude.throw(error = transcript(lines = array.append(target = dismissed, value = note))) }
+          }
+        }
+      }
+    }
+    // The desk's watch re-emits the ENDINGS of its own fibers AND (relayed on out of a resident) those of
+    // any mail fiber, so both are covered here. Nothing in the happy path dies; a line is filed if one
+    // does, which is how a silent loss would show up in the result instead of hanging the run.
+    request region.crashed(id: string, name: string, message: string) -> null {
+      next null with { filed = array.append(target = filed, value = f"(fiber ${name} crashed: ${message})") }
+    }
+    request region.failed(id: string, name: string, error: unknown) -> null {
+      next null with { filed = array.append(target = filed, value = f"(fiber ${name} failed: ${json.stringify(value = error)})") }
+    }
+  }
+  region.watch(nursery = desk)
+}

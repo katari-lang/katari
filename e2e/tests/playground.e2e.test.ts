@@ -370,6 +370,42 @@ test("playground.region.main: fan-out fork/join, parallel contrast, and the whit
   expect(stdout).toContain("subscription saw four messages across two emitters");
 });
 
+test("playground.mailbox.main: a fork routes by the HANDLE — cross-nursery mail lands in the addressee's own watch", async () => {
+  // The multi-resident composition, over the real wire — the one runtime claim the type system cannot make
+  // for itself. Two resident fibers each open a nursery of their OWN (a mailbox), announce the handle with
+  // `register`, and block on `region.watch`; a desk holding those handles delivers by FORKING a NAMED task
+  // (`mail`) with a record of PLAIN DATA into a handle. Four things have to hold and none of them is
+  // structural:
+  //   1. ROUTING IS BY THE HANDLE ALONE. The desk's own `mail_scope` comes from a nursery of its own, and
+  //      the fork is performed nowhere near the addressee's `provide` — yet the letter surfaces at the
+  //      ADDRESSEE's watch, in the addressee's conversation. A request could not have done this.
+  //   2. THE ESCALATION THAT BEATS ITS WATCH SURVIVES. The residents are forked before the desk's handler
+  //      is installed, so both `register`s are raised into a nursery with no watch; they are held durably
+  //      and re-emitted when the watch lands.
+  //   3. ORDER WITHIN ONE MAILBOX. Two letters are posted back to back into `core`'s box; the addressee's
+  //      one sequential handler serializes them at its FIFO, so they are read in posting order.
+  //   4. A DEAD INBOX BOUNCES RATHER THAN DISAPPEARING. Delivery is at-most-once: after the desk dismisses
+  //      `core` with `cancel_by_id`, the fork into its closed nursery PANICS, and `supervise.once` +
+  //      `signal_panics` folds that panic into a value the desk files.
+  const { stdout } = await katari(["run", "playground.mailbox.main", "--project", "playground"]);
+  // Both residents heard their own mail, each under its own name — the letters did not cross.
+  expect(stdout).toContain("core heard");
+  expect(stdout).toContain("scribe heard");
+  // The pair into one mailbox arrived in posting order, and scribe's line came after both (the relay is
+  // sent only once core has answered everything, so the whole transcript is causally ordered).
+  const first = stdout.indexOf("who is on call?");
+  const second = stdout.indexOf("and who takes the night?");
+  const relayed = stdout.indexOf("scribe heard");
+  expect(first).toBeGreaterThan(-1);
+  expect(second).toBeGreaterThan(first);
+  expect(relayed).toBeGreaterThan(second);
+  // The dismissal took the resident's mailbox with it, and the next letter bounced with the runtime's own
+  // dead-scope refusal rather than vanishing into a nursery nobody watches.
+  expect(stdout).toContain("core dismissed");
+  expect(stdout).toContain("the letter to core bounced");
+  expect(stdout).toContain("the nursery's provide scope has closed");
+});
+
 test("playground.deferred_callback.main: a callback payload survives being answered, and runs later from a fiber", async () => {
   // Scenario 20 — the approval shape, over the real wire. A closure riding an escalation moves its captured
   // environment to whoever answers, so two things have to hold that no other scenario exercises: the raiser
