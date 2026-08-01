@@ -34,12 +34,40 @@ primitive agent replace(value: string, search: string, replacement: string) -> s
 @"The string with leading and trailing whitespace removed."
 primitive agent trim(value: string) -> string
 
-@"Whether the string is BLANK — empty, or whitespace only. This is `trim(value = ...) == \"\"`
-spelled once: a bare `== \"\"` check misses the whitespace-only case, and a model- or user-supplied
-optional argument is as often a lone space as a true empty string, so 'did the caller give me
-anything' should read through this."
-agent is_blank(value: string) -> boolean {
-  trim(value = value) == ""
+@"CUT the string to at most @cap@ code points, and SAY SO when it cut: a value that fits comes back
+untouched, and one that does not comes back as its head plus @marker@ — the whole result still at most
+@cap@ points, because the marker's own length is taken out of the head first.
+
+This is the one bound every rendered text takes on its way to somewhere with a limit: a chat platform's
+per-message ceiling, a tool result a model reads, a summary a store cell holds. The composition
+(`slice(value, 0, cap - length(marker)) ++ marker`) is short but it is not SAFE — the arithmetic is
+where it goes wrong, and always in the same two ways. Subtracting the marker AFTER slicing overshoots
+the cap by exactly the marker (the platform rejects the message, in production, on the one long input
+nobody tested), and a @cap@ smaller than the marker makes the slice bound negative, so the truncation
+marker alone is the whole answer and it is still too long. Both are silent until the day they are not,
+which is what makes this a canonical spelling rather than a shorthand: the judgement being encoded is
+`cap` MEANS the whole answer.
+
+A @marker@ that alone exceeds @cap@ is itself cut to @cap@ — the answer is then all marker, which is
+the honest reading of a budget too small to say anything in. An empty @marker@ is a plain hard cut, for
+a sink whose truncation the reader can already see."
+agent fit(
+  @"The text to bound." value: string,
+  @"The ceiling, in code points; the ANSWER never exceeds it (the marker is inside the budget, not added to it)." cap: integer,
+  @"What a cut answer ends with, e.g. \"…\" or \" [truncated]\"; empty for a bare hard cut." marker: string,
+) -> string {
+  if (length(value = value) <= cap) {
+    value
+  } else {
+    // The marker is paid for out of the budget, BEFORE the head is taken — the whole point of the agent.
+    // A marker that does not fit the budget at all leaves no head to keep, so the answer is the marker cut
+    // to the cap (which also covers a zero or negative @cap@: `slice` clamps).
+    if (length(value = marker) >= cap) {
+      slice(value = marker, start = 0, end = cap)
+    } else {
+      f"${slice(value = value, start = 0, end = cap - length(value = marker))}${marker}"
+    }
+  }
 }
 
 @"The string uppercased (Unicode default casing, no locale)."
@@ -54,11 +82,13 @@ primitive agent to_string(value: null | boolean | number | string) -> string
 
 @"Read the string as a base-10 integer (an optional sign and digits, nothing else), or `null` when
 it is not one — including a magnitude the number model cannot hold exactly. Compose with `trim` for
-padded input; for a diagnosed parse use `json.parse_as[integer]` instead."
+padded input; for a diagnosed parse use `json.validate[integer](value = json.parse(text = ...))`
+instead."
 primitive agent to_integer(value: string) -> integer | null
 
 @"Read the string as a number (any JSON-style numeric form), or `null` when it is not one. Compose
-with `trim` for padded input; for a diagnosed parse use `json.parse_as[number]` instead."
+with `trim` for padded input; for a diagnosed parse use
+`json.validate[number](value = json.parse(text = ...))` instead."
 primitive agent to_number(value: string) -> number | null
 
 @"The string left-padded with repetitions of @padding@ until it is @width@ code points long — the
