@@ -27,7 +27,7 @@ services:
       # The address external services reach this runtime at: webhook / MCP endpoint URLs and the
       # OAuth callback are minted under it. localhost serves a single-machine stack; set your real
       # host when you expose one of those. Required by the image. Keep in step with KATARI_PORT.
-      KATARI_PUBLIC_URL: ${KATARI_PUBLIC_URL:-http://localhost:3000}
+      KATARI_PUBLIC_URL: ${KATARI_PUBLIC_URL:-http://localhost:${KATARI_PORT:-3000}}
       # The API key callers (the CLI, the web console) authenticate with — sent as a Bearer token.
       # Required: the runtime refuses to boot without it. Distinct from the at-rest key below.
       KATARI_API_KEY: ${KATARI_API_KEY:?set KATARI_API_KEY in .env (see .env.example)}
