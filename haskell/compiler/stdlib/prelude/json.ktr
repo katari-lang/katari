@@ -22,9 +22,9 @@ in the result, so it cannot be inferred)."
 primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
 
 @"Render ANY value as its compact JSON text — total and canonical (one value, one text). A document
-value round-trips verbatim, while a `file`, a `data` value and a callable each become their handle
-object, which makes this the read channel for showing an AI such a value. A secret operand taints the
-whole result."
+value round-trips verbatim; a `file` and a callable each become their handle object, and a `data` value
+becomes `{ $katari_constructor: name, $katari_value: { ...fields } }`. That makes this the read channel
+for showing an AI such a value. A secret operand taints the whole result."
 primitive agent stringify[T](value: T) -> string
 
 // The total readers: plain Katari over `unknown`, for picking values out of a document of unknown or
