@@ -306,7 +306,6 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       recordOf(field(argument, "right")),
     ),
   }),
-  "prelude.record.empty": () => ({ kind: "record", fields: {} }),
 
   // ─── prelude.array ────────────────────────────────────────────────────────────────────────
   "prelude.array.get": (argument) =>
@@ -362,7 +361,6 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     for (let value = start; value < end; value += 1) elements.push({ kind: "integer", value });
     return { kind: "array", elements };
   },
-  "prelude.array.empty": () => ({ kind: "array", elements: [] }),
   "prelude.array.sort": async (argument, context) => {
     const read = stringReaderOf(context);
     const keyed = await Promise.all(
