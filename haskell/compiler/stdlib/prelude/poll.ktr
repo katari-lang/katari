@@ -255,17 +255,11 @@ agent load(
 ) -> cursor with io | store.get {
   match (continuity) {
     case fresh(_) -> initial(dedup = dedup, backlog = backlog)
-    case resume(key => key) -> {
-      match (store.get(key = key)) {
-        case store.absent(key => _) -> initial(dedup = dedup, backlog = backlog)
-        case store.found(value => value) -> {
-          match (json.try_validate[cursor](value = value)) {
-            case null -> initial(dedup = dedup, backlog = backlog)
-            case restored -> restored
-          }
-        }
-      }
-    }
+    // `get_or` IS the degrade this agent's doc describes: an absent key and a cell an older shape wrote
+    // take the same arm, which is the whole reason a subscription re-primes rather than refusing to start.
+    // The fallback is evaluated whether or not the cell is readable, so a resumed subscription also reads
+    // the clock `initial` reads and discards it — one durable read per activation, not per delivery.
+    case resume(key => key) -> store.get_or(key = key, fallback = initial(dedup = dedup, backlog = backlog))
   }
 }
 

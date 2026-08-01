@@ -10,11 +10,15 @@
 // object), which a program never authors — so a bare record needs no escaping, and the reserved keys are
 // disjoint from any document a program writes.
 //
-//   - `parse : string -> unknown`              text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
-//   - `validate[T] : unknown -> T`             check a value against T's schema (returns it unchanged, or throws)
-//   - `try_validate[T] : unknown -> T | null`  the TOTAL twin of `validate` — `null` where it would throw
-//   - `parse_as[T] : string -> T`              `parse` then `validate[T]` (the typed text boundary)
-//   - `stringify[T] : T -> string`             ANY value -> its (compact, canonical) JSON text
+//   - `parse : string -> unknown`   text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
+//   - `validate[T] : unknown -> T`  check a value against T's schema (returns it unchanged, or throws)
+//   - `stringify[T] : T -> string`  ANY value -> its (compact, canonical) JSON text
+//
+// The typed TEXT boundary is the first two composed — `validate[T](value = parse(text = ...))` — and the
+// TOTAL read of a value whose shape may not fit is `prelude.catch` over `validate`, which hands the
+// `validation_error` back as a value to `match` (`store.get_or[T]` is that composition, packaged for the
+// store's own boundary). Both used to carry their own name here (`parse_as`, `try_validate`); neither
+// encoded a judgement its composition does not.
 //
 // `parse` and `stringify` are inverses through that codec: a document (record / array / scalar) round-trips
 // verbatim, so `stringify(parse(s)) == s` (modulo whitespace / number normalisation). `parse` interprets the
@@ -24,43 +28,27 @@
 // error render, a handle embed, a tool result shown back to a model). A secret operand taints the whole
 // result (the monotonic information-flow rule).
 //
-// Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a value that does not conform to the
-// requested type's schema throws `validation_error` (`validate` / `parse_as`), naming the offending path.
-// `stringify` and `try_validate` are TOTAL — they never throw.
+// Errors: malformed text throws `parse_error` (`parse`); a value that does not conform to the requested
+// type's schema throws `validation_error` (`validate`), naming the offending path. `stringify` and the
+// total readers at the foot of this module never throw.
 
-@"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
+@"A JSON document failed to parse: the text is not JSON. Thrown by `parse`."
 data parse_error(message: string)
 
-@"A value does not conform to the requested type's schema. Thrown by `validate` / `parse_as`; `message`
-names the offending path."
+@"A value does not conform to the requested type's schema. Thrown by `validate`; `message` names the
+offending path."
 data validation_error(message: string)
 
 @"Parse JSON text into the value it denotes — a record / array / string / integer / number / boolean / null,
 or a `file` where the text carries a `$katari_ref` handle. Traverse a document with shape filters
-(`case record(r)`) and the readers below, or pin its shape with `parse_as[T]`. A number without a fractional
-part parses as `integer`. Malformed text throws `parse_error`."
+(`case record(r)`) and the readers below, or pin its shape with `validate[T]` on the result. A number
+without a fractional part parses as `integer`. Malformed text throws `parse_error`."
 primitive agent parse(@"The text of one complete JSON document." text: string) -> unknown with prelude.throw[parse_error]
 
 @"Check @value@ against T's schema and return it unchanged, or throw `validation_error` naming the offending
 path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only in the result,
 so it cannot be inferred)."
 primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
-
-@"The TOTAL twin of `validate`: check @value@ against T's schema and return it unchanged, or `null` when the
-shape does not fit — no throw, so the row stays PURE. This is the defensive read at a boundary where a
-wrong shape is an ordinary outcome and not an error to route: a store entry an older run wrote, an
-`unknown` an AI reply carried, a handler's answer. Instantiate T explicitly (it appears only in the result,
-so it cannot be inferred). Reach for `validate` when the FAILURE REASON matters — the offending path travels
-only on the thrown `validation_error`, and `null` here says nothing about WHY the value did not fit. A
-T that already admits `null` cannot tell a conforming `null` from a mismatch; validate such a T instead."
-primitive agent try_validate[T](@"The value to check against T." value: unknown) -> T | null
-
-@"Parse JSON text directly as a T — `parse` then `validate[T]`, the typed text boundary. Instantiate T
-explicitly (it appears only in the result, so it cannot be inferred). Malformed text throws `parse_error`;
-a value that does not conform to T's schema throws `validation_error` naming the offending path."
-agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | validation_error] {
-  validate[T](value = parse(text = text))
-}
 
 @"Render ANY value as its (compact) JSON text — TOTAL and CANONICAL (one value, one text). A document value
 (record / array / string / integer / number / boolean / null) round-trips verbatim, so `stringify(parse(s))`
@@ -77,15 +65,18 @@ primitive agent stringify[T](value: T) -> string
 // `array.get`). Each reader is TOTAL: a missing key, an out-of-range index or a wrong shape yields `null` /
 // `""` / an empty container rather than an error, so probes chain freely — `text(target = field(target =
 // element(target = parsed, index = 0), key = "content"))` — and absence is checked once, at the end, where
-// it matters. For a document whose shape IS known, prefer the typed boundary (`parse_as[T]`), which
-// validates instead of defaulting. Where a genuine shape branch is wanted, use a shape filter
+// it matters. For a document whose shape IS known, prefer the typed boundary
+// (`validate[T](value = parse(text = ...))`), which validates instead of defaulting. Where a genuine shape
+// branch is wanted, use a shape filter
 // directly (`match (node) { case record(r) -> ... case array(a) -> ... case _ -> node }`).
 
 @"The record @target@ holds (its entries), or the empty record if @target@ is not a record."
 agent entries(target: unknown) -> record[unknown] {
   match (target) {
     case record(record_value) -> record_value
-    case _ -> record.empty()
+    // Parenthesised because a bare `{}` after `->` is an empty BLOCK (which answers `null`), not the
+    // empty record literal — the one place in the language where the two brace forms collide.
+    case _ -> ({})
   }
 }
 
@@ -93,7 +84,7 @@ agent entries(target: unknown) -> record[unknown] {
 agent items(target: unknown) -> array[unknown] {
   match (target) {
     case array(array_value) -> array_value
-    case _ -> array.empty()
+    case _ -> []
   }
 }
 
@@ -113,33 +104,23 @@ agent element(target: unknown, index: integer) -> unknown {
   }
 }
 
-@"The string @target@ holds (the empty string if it is not a string)."
-agent text(target: unknown) -> string {
-  match (target) {
-    case string(string_value) -> string_value
-    case _ -> ""
-  }
-}
+@"The string @target@ holds, or @fallback@ when it holds anything else — the reader a document walker
+reaches for at nearly every step, since a renderer over an AI reply or a store row wants a NAMED TEXT
+FIELD far more often than any other shape.
 
-@"The STRING at object key @key@ — `field` and `text` in one step, with a @fallback@ (default `\"\"`) for
-every way the read can come up empty: @target@ is not a record, the key is absent, or the value under it is
-not a string. This is the one composite reader, because the two-step spelling
-(`text(target = field(target = ..., key = ...))`) is what a document walker actually writes at nearly every
-step — a renderer over an AI reply or a store row reaches for a NAMED TEXT FIELD far more often than for
-any other shape, and nesting the two readers per field turned every such line into a bracket-counting
-exercise. The @fallback@ is why this is not merely the two calls stacked: `text` alone can only degrade to
-`\"\"`, so a caller wanting a placeholder (\"(untitled)\", \"unknown\") had to branch on the empty string
-afterwards and could not tell an ABSENT field from one holding `\"\"`. It is deliberately ONE step deep: a
-path expression (\"a.b.c\") would need a mini-language with its own escaping rules, and nesting `field` for
-the rare deep read stays perfectly readable."
-agent text_at(
-  @"The document to read from; any value, and any non-record answers @fallback@." target: unknown,
-  @"The object key to read." key: string,
-  @"The value when the key is absent, or holds anything but a string." fallback: string ?= "",
+@fallback@ is what makes it more than a shape filter, and it defaults to `\"\"` so the ordinary
+degrade-to-empty read needs no argument. Without it a caller wanting a placeholder (\"(untitled)\",
+\"unknown\") had to compare the answer to the empty string afterwards, which cannot tell an ABSENT field
+from one holding `\"\"` — and that comparison is precisely where the two get conflated.
+
+Composed with `field` it is the whole named-text read: `text(target = field(target = reply, key =
+\"content\"), fallback = \"(none)\")`. That composition used to have its own name (`text_at`); it does not
+need one now that the fallback lives here, and nesting `field` for a deeper read stays as readable."
+agent text(
+  @"The document to read; any non-string answers @fallback@." target: unknown,
+  @"The value when @target@ is not a string — including the `null` an absent `field` answers." fallback: string ?= "",
 ) -> string {
-  // Matched here rather than composed as `text(field(...))`: `text` folds a non-string to `""`, which
-  // would swallow @fallback@ at exactly the case @fallback@ exists for.
-  match (field(target = target, key = key)) {
+  match (target) {
     case string(string_value) -> string_value
     case _ -> fallback
   }
