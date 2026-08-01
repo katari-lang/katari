@@ -72,7 +72,7 @@ more — see [`examples/playground`](examples/playground) and its
   on external input, and recover from failure. Uploading a program creates an immutable *snapshot*
   you can roll back to.
 - **Agents as AI tools.** Schema derivation (`reflection.get_metadata`) and dynamic dispatch
-  (`reflection.call_agent`), plus a typed JSON boundary (`json.parse_as[T]`), let an AI loop pick
+  (`reflection.call_agent`), plus a typed JSON boundary (`json.validate[T]`), let an AI loop pick
   and call agents as tools with arguments validated against their schemas.
 - **MCP integration.** Consume any MCP server's tools as agents with `use mcp.provide` — a scoped
   provider whose tools live exactly as long as the block that opened them, enforced by the type
