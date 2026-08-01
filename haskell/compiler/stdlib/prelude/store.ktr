@@ -7,24 +7,29 @@
 // user-facing boundary). Writes are last-write-wins.
 //
 // KEYS ARE AMBIENT. An operation names a path-like key (`"memos/2026-07"`) and nothing else; WHERE
-// the key lands is decided by the environment, not by a value threaded through the code. Four
+// the key lands is decided by the environment, not by a value threaded through the code. Three
 // concepts cover the whole module:
 //
-//   - WORKSPACE (`scope`): the store's working directory, opened as a provider. Under
-//     `use store.scope(path = "core")` every operation's key is prefixed with `core/`; nested
-//     scopes accumulate prefixes; the outermost bare perform is project-root access. An agent
-//     dispatched inside a workspace lives in that directory BY CONSTRUCTION — it holds no value
-//     it could widen. A path is `/`-separated `safe_segment`s and a malformed one panics, because
-//     that construction is only as sound as the strings a program puts in it.
+//   - WORKSPACE (`workspace`): the store's working directory AND its serial domain, opened as ONE
+//     provider. Under `use store.workspace(path = "core")` every operation's key is prefixed with
+//     `core/`, and `exclusive` — the critical section a read-modify-write takes its atomicity from —
+//     is served by that same install, one section at a time. Nested workspaces accumulate prefixes
+//     and nest domains; the outermost bare perform is project-root access, and an `exclusive` no
+//     program handler catches is served at the PROJECT ROOT in one durable, project-wide FIFO across
+//     every run. An agent dispatched inside a workspace lives in that directory BY CONSTRUCTION — it
+//     holds no value it could widen. A path is `/`-separated `safe_segment`s and a malformed one
+//     panics, because that construction is only as sound as the strings a program puts in it.
+//
+//     THE TWO HALVES ARE ONE WORD ON PURPOSE. A prefix without a lane and a lane without a prefix
+//     both have spellings here (a nested workspace at a sub-path is the first; a nested workspace
+//     whose path is the lane's own name is the second), and neither has a use that the fused form
+//     does not serve — while the split form had a failure mode the fused one cannot have: a facility
+//     that opened a prefix and forgot the domain wrote read-modify-writes into the project-wide root
+//     FIFO, which is legal, invisible, and wrong.
 //   - FACILITY: a workspace-relative toolset — a package (a memory, a task list) whose tools open
-//     ONE fixed subdirectory scope (`use store.scope(path = "memory")`) around their own
-//     operations. The path is the package's constant; WHERE the facility's data lives is the
-//     CALLING workspace's decision, which is the whole inversion.
-//   - SERIAL DOMAIN (`serialize` / `exclusive` / `modify`): a FIFO for read-modify-writes, installed
-//     for the extent of one dispatch (a turn), so the concurrently dispatched tools of one turn
-//     cannot interleave their critical sections. The OUTERMOST domain is the runtime itself: an
-//     `exclusive` no program handler catches is served at the PROJECT ROOT — one durable,
-//     project-wide FIFO across every run, exactly as the outermost bare `get` is project-root access.
+//     ONE fixed subdirectory (`use store.workspace(path = "memory")`) around their own operations.
+//     The path is the package's constant; WHERE the facility's data lives is the CALLING workspace's
+//     decision, which is the whole inversion.
 //   - SHARED PLACE (`share` / `shared`): data several workspaces must read never travels by path
 //     escape — there is deliberately no `..`. It travels as a REQUEST served ABOVE the workspaces,
 //     whose clause opens the shared subtree in its own body; a workspace can never capture what it
@@ -60,33 +65,38 @@ type lookup = found | absent
 shape with `json.validate[T]` on the found value."
 request get(@"The path-like key, relative to the current workspace." key: string) -> lookup
 
-@"Read @key@ as a string, resolved against the surrounding workspace, falling back to @fallback@ when the
-key is ABSENT or holds a NON-string value — `get` folded to a plain string, the found/absent + string-shape
-match a text cell (a note pad, a digest, a soul) otherwise respells. A stored `null`, a number or a record
-all read as @fallback@, so a reader never branches on shape; reach for a bare `get` when a missing entry
-must be told apart from a wrong-typed one."
-agent get_text(@"The path-like key, relative to the current workspace." key: string, @"The value when the key is absent or not a string." fallback: string) -> string with get {
-  match (get(key = key)) {
-    case found(value => value) -> {
-      match (value) {
-        case string(string_value) -> string_value
-        case _ -> fallback
-      }
-    }
-    case absent(key => _) -> fallback
-  }
-}
+@"Read @key@ as a T, resolved against the surrounding workspace, falling back to @fallback@ when the key
+is ABSENT or holds a value that is not one — the TYPED store read, and the only one a program should
+normally write. A stored cell is an `unknown` no schema guards (an older run's shape, a hand edit in the
+console, a key another facility took over), so every read is a boundary read: `get` folded through
+`json.validate[T]`, with the mismatch folded to @fallback@ by `prelude.catch`. T is read off @fallback@
+— a `get_or(key = ..., fallback = 0)` reads an integer, a `get_or(key = ..., fallback = my_state(...))`
+reads that `data` — so the type is normally inferred rather than written, and the fallback is the same
+value the caller would have had to supply in a `match` anyway.
 
-@"Read @key@ as an integer, resolved against the surrounding workspace, falling back to @fallback@ when the
-key is ABSENT or holds a NON-integer value — the integer twin of `get_text` (a monotonic counter, a stored
-threshold). A number with a fractional part is NOT an integer and reads as @fallback@, as does a `null`, a
-string or a record; reach for a bare `get` when a missing entry must be told apart from a wrong-typed one."
-agent get_integer(@"The path-like key, relative to the current workspace." key: string, @"The value when the key is absent or not an integer." fallback: integer) -> integer with get {
+DEGRADING IS THE SEMANTICS HERE, not a shortcut around error handling: a durable cell whose shape no
+longer fits is a cell an EARLIER version of the program wrote, and there is nothing a reader can do
+about that except start over from a value it does understand. Reach for a bare `get` when a MISSING
+entry must be told apart from a WRONG-TYPED one (a first-run branch), or when the mismatch itself must
+be reported — `json.validate`'s `validation_error` names the offending path and this agent drops it.
+
+ONE INSTANTIATION TO AVOID: a T that itself admits `null` cannot distinguish a stored `null` (which
+validates) from a mismatch (which does not) — both come back as `null`, and so does an absent key. Where
+that distinction matters, read the bare `get`."
+agent get_or[T](
+  @"The path-like key, relative to the current workspace." key: string,
+  @"The value when the key is absent or does not fit T; its type IS T." fallback: T,
+) -> T with get {
   match (get(key = key)) {
-    case found(value => value) -> {
-      match (value) {
-        case integer(integer_value) -> integer_value
-        case _ -> fallback
+    case found(value => stored) -> {
+      // The stored value is checked, not assumed: `catch` folds the `validation_error` back into the
+      // answer so the mismatch and the absence take the same arm below.
+      agent checked() -> T with prelude.throw[json.validation_error] {
+        json.validate[T](value = stored)
+      }
+      match (prelude.catch(task = checked)) {
+        case json.validation_error(message => _) -> fallback
+        case validated -> validated
       }
     }
     case absent(key => _) -> fallback
@@ -153,18 +163,17 @@ answer, not a precondition — pass the raw text and store what comes back, so t
 with different spacing or case is the same cell."
 agent safe_segment(@"The proposed name, exactly as it was supplied — untrimmed and in any case." name: string) -> string | null {
   let normalized = string.to_lower(value = string.trim(value = name))
-  if (normalized == "" || !array.fold(target = string.split(value = normalized, separator = ""), initial = true, step = segment_character_step)) {
+  // Katari has no character classes, so membership is a `contains` over the charset spelled out, once per
+  // code point. The loop short-circuits nothing (a `for` visits every element) — the strings are
+  // name-length, so the whole check is cheaper than the branch that would.
+  let legal = for (let character in string.split(value = normalized, separator = ""), var every: boolean = true) {
+    next with { every = every && string.contains(value = "abcdefghijklmnopqrstuvwxyz0123456789-_", search = character) }
+  } then (_characters) { every }
+  if (normalized == "" || !legal) {
     null
   } else {
     normalized
   }
-}
-
-// One character of a candidate segment, folded: Katari has no character classes, so membership is a
-// `contains` over the charset spelled out. The accumulator short-circuits nothing (a fold visits every
-// element) — the strings are name-length, so the whole check is cheaper than the branch that would.
-agent segment_character_step(@"Whether every earlier character was in the charset." accumulator: boolean, @"The one character being judged." value: string) -> boolean {
-  accumulator && string.contains(value = "abcdefghijklmnopqrstuvwxyz0123456789-_", search = value)
 }
 
 // Whether a whole workspace PATH is well formed: one or more `/`-separated segments, each of them
@@ -172,11 +181,9 @@ agent segment_character_step(@"Whether every earlier character was in the charse
 // answer rather than re-checking the charset is what keeps ONE definition of a legal name: a path is
 // legal exactly when every piece of it is a name `safe_segment` would have handed back unchanged.
 agent is_safe_path(@"The candidate workspace path." path: string) -> boolean {
-  array.fold(target = string.split(value = path, separator = "/"), initial = true, step = path_segment_step)
-}
-
-agent path_segment_step(@"Whether every earlier segment was canonical." accumulator: boolean, @"The one segment being judged." value: string) -> boolean {
-  accumulator && safe_segment(name = value) == value
+  for (let segment in string.split(value = path, separator = "/"), var every: boolean = true) {
+    next with { every = every && safe_segment(name = segment) == segment }
+  } then (_segments) { every }
 }
 
 // @path@ back, or a PANIC when it is not a well-formed workspace path. A malformed path reaching `scope`
@@ -200,42 +207,79 @@ agent panic_on_unsafe_path(@"The candidate workspace path." path: string) -> str
   }
 }
 
-// ── scope: the workspace — the store's ambient working directory ─────────────────────────────────
+// ── workspace: the working directory AND its serial domain, in one install ───────────────────────
+//
+// Writes are last-write-wins, so a read-modify-write is NOT atomic on its own: two concurrently
+// dispatched tools (a `parallel for` tool batch) that each read a record, edit it and write it back
+// lose one edit. A workspace therefore opens two things at once — the key PREFIX every operation below
+// it resolves against, and the serial DOMAIN whose FIFO makes an `exclusive` a critical section.
 
-@"Open the workspace at @path@ under the current one, for the extent of @continuation@ — the
-`use store.scope(path = ...)` form, the store's `cd`. Four handlers catch the store operations and
-RE-PERFORM them outward with the prefixed key (`get(key = \"index\")` under a scope at \"core\"
-escalates as `get(key = \"core/index\")`; a `list` gets @path@ prepended to its own path
-parameter), so nested scopes accumulate prefixes and the outermost bare perform is project-root
-access — unhandled at the very top, the runtime machine-answers against the project's durable rows.
-The handlers are PARALLEL on purpose: a scope is pure prefix arithmetic and must not serialize the
-traffic passing through it (a turn's tool batch stays concurrent); ordering is `serialize`'s job,
-never a workspace's. And a scope is a one-way descent: there is deliberately no `..`, so data
-several workspaces share is NOT reached by path escape — it is reached by a REQUEST served ABOVE the
-workspaces, whose clause opens the shared subtree's own scope in its body. That proxy is the
-semantics: a request is what an inner install can never capture by accident. `share` / `shared`
-below is that proxy, generalised once so it need not be respelt per shared cell.
+@"Run @task@ as a CRITICAL SECTION of the nearest enclosing `workspace`: the workspace's SEQUENTIAL
+handler calls it in its own body, so two exclusives of one domain can never interleave — the
+handler's FIFO is the atomicity, even against a `parallel for` tool batch. The row is FIXED to the
+store operations: a critical section reads, computes and writes, NOTHING ELSE — any other input is
+computed BEFORE entering and closed over — so a section can never block on a model, a network, or
+another domain. TWO GEOMETRY FACTS, both load-bearing: the task runs AT THE WORKSPACE INSTALL SITE,
+not at this perform site — so a facility's subdirectory prefix must be applied INSIDE the task body
+(`use store.workspace(path = \"memory\")` as the task's first move; a workspace around the perform
+site does not travel with the task, but the install site's own enclosing workspaces do apply). And an
+`exclusive` binds to the NEAREST enclosing workspace: an inner domain shadows an outer one BY DESIGN
+— the nearest domain is the semantics, exactly as the nearest prefix is. The task's answer crosses
+the handler as `unknown`; narrow it back with a `match` (or `json.validate[T]`). With NO workspace
+installed above the perform, the RUNTIME serves it as the outermost domain — the task runs at the
+PROJECT ROOT (project-root keys) in one durable, project-wide FIFO across every run."
+request exclusive(
+  @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
+) -> unknown
+
+@"Open the WORKSPACE at @path@ under the current one, for the extent of @continuation@ — the
+`use store.workspace(path = \"core\")` form, and the store's ONE provider. It installs both halves of
+a working directory:
+
+  - THE PREFIX. Four parallel handlers catch the store operations and RE-PERFORM them outward with
+    the prefixed key (`get(key = \"index\")` under a workspace at \"core\" escalates as
+    `get(key = \"core/index\")`; a `list` gets @path@ prepended to its own path parameter), so nested
+    workspaces accumulate prefixes and the outermost bare perform is project-root access — unhandled
+    at the very top, the runtime machine-answers against the project's durable rows. Those four are
+    PARALLEL on purpose: prefixing is stateless arithmetic and must not serialize the traffic passing
+    through it (a turn's tool batch stays concurrent).
+  - THE DOMAIN. One sequential handler serves `exclusive` by calling the section in its own body, so
+    the FIFO applies critical sections one at a time, in arrival order — which is the whole point (a
+    parallel clause would forfeit the atomicity). Sections re-perform their store operations from
+    THIS install site, so they land under THIS workspace's prefix.
+
+The install order between them is fixed here and is not a preference: the prefix handlers sit OUTSIDE
+the domain, so a critical section's keys resolve through the workspace it was opened in. A nested
+workspace is therefore a nested prefix AND a nested domain, exactly as it reads, and an `exclusive`
+performed below it binds to the nearest one.
+
+A workspace is a ONE-WAY DESCENT: there is deliberately no `..`, so data several workspaces share is
+NOT reached by path escape — it is reached by a REQUEST served ABOVE the workspaces, whose clause
+opens the shared subtree in its own body. That proxy is the semantics: a request is what an inner
+install can never capture by accident. `share` / `shared` below is that proxy, generalised once so it
+need not be respelt per shared cell.
 
 @path@ is one or more `/`-separated SEGMENTS, each spelled as `safe_segment` requires (lowercase
-letters, digits, `-`, `_`). A path that is not — an empty segment, a `..`, a stray space, a name a model
-chose and nobody checked — PANICS here rather than opening a workspace somewhere else: the descent is
-the program's own geometry, so a malformed one is a defect in the program and not an outcome a caller
-could route. Validate a name that came from OUTSIDE the program with `safe_segment` first, and render
-its `null` into whatever sentence the proposer should read.
+letters, digits, `-`, `_`). A path that is not — an empty segment, a `..`, a stray space, a name a
+model chose and nobody checked — PANICS here rather than opening a workspace somewhere else: the
+descent is the program's own geometry, so a malformed one is a defect in the program and not an
+outcome a caller could route. Validate a name that came from OUTSIDE the program with `safe_segment`
+first, and render its `null` into whatever sentence the proposer should read.
 
-ONE IMPRECISION TO KNOW ABOUT, because it shows up in the escalation report. All four clauses are
-installed, and each re-performs its own operation, so this agent's row names all four whatever the
-continuation actually does — a caller that only reads still carries `set` and `delete` outward. The row
-is sound (a scope really can perform all four on its continuation's behalf) but it is coarser than the
-truth, so the report reads as though a read-only agent could delete. Narrowing it needs the row to
-follow which requests the continuation performs, which the language cannot express yet; until it can,
-read a scoped agent's store row as \"reaches the store\" rather than as the set of operations it uses."
-agent scope[R, effect E](
+ONE IMPRECISION TO KNOW ABOUT, because it shows up in the escalation report. All five clauses are
+installed, and each re-performs its own operation, so this agent's row names all four store
+operations whatever the continuation actually does — a caller that only reads still carries `set` and
+`delete` outward. The row is sound (a workspace really can perform all four on its continuation's
+behalf) but it is coarser than the truth, so the report reads as though a read-only agent could
+delete. Narrowing it needs the row to follow which requests the continuation performs, which the
+language cannot express yet; until it can, read a workspaced agent's store row as \"reaches the
+store\" rather than as the set of operations it uses."
+agent workspace[R, effect E](
   @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"; `/`-separated `safe_segment`s, and a malformed one panics." path: string,
-  @"Runs with every store operation prefixed; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list},
+  @"Runs with every store operation prefixed AND `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list, exclusive},
 ) -> R with E | get | set | delete | list {
   // Clause parameter names are structural, so the `list` clause below MUST bind `path` — which
-  // would shadow this agent's own `path`. The prefix is rebound once, before the handler — and the
+  // would shadow this agent's own `path`. The prefix is rebound once, before the handlers — and the
   // rebinding is where the descent is checked, so no handler below can ever prefix with a bad one.
   let base = panic_on_unsafe_path(path = path)
   // PARALLEL on purpose: prefixing is stateless arithmetic, and a sequential handler here would
@@ -259,75 +303,10 @@ agent scope[R, effect E](
       }
     }
   }
-  continuation(value = null)
-}
-
-// ── serialize: the serial domain — a FIFO whose extent is one dispatch ───────────────────────────
-//
-// Writes are last-write-wins, so a read-modify-write is NOT atomic on its own: two concurrently
-// dispatched tools (a `parallel for` tool batch) that each read a record, edit it and write it
-// back lose one edit. `serialize` opens a serial domain: `exclusive` runs a whole task as a
-// CRITICAL SECTION inside the provider's own SEQUENTIAL handler, whose FIFO is the atomicity.
-
-@"Run @task@ as a CRITICAL SECTION of the nearest enclosing `serialize`: the provider's SEQUENTIAL
-handler calls it in its own body, so two exclusives of one domain can never interleave — the
-handler's FIFO is the atomicity, even against a `parallel for` tool batch. The row is FIXED to the
-store operations: a critical section reads, computes and writes, NOTHING ELSE — any other input is
-computed BEFORE entering and closed over (as `modify` closes over its transform), so a section can
-never block on a model, a network, or another domain. TWO GEOMETRY FACTS, both load-bearing: the
-task runs AT THE SERIALIZE INSTALL SITE, not at this perform site — so a facility's subdirectory
-prefix must be applied INSIDE the task body (`use store.scope(path = \"memory\")` as the task's
-first move; a scope around the perform site does not travel with the task, but the install site's
-own enclosing workspaces do apply). And an `exclusive` binds to the NEAREST enclosing `serialize`:
-an inner domain shadows an outer one BY DESIGN — the nearest domain is the semantics, exactly as
-the nearest workspace is. The task's answer crosses the handler as `unknown`; narrow it back with a
-`match` (or `json.validate[T]`). A `serialize` (or `workspace`) in the program is the nearest domain;
-with NONE installed above the perform, the RUNTIME serves it as the outermost domain — the task runs
-at the PROJECT ROOT (project-root keys) in one durable, project-wide FIFO across every run. For a section
-whose answer has a KNOWN shape, `exclusive_as[T]` below packages that narrowing."
-request exclusive(
-  @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list,
-) -> unknown
-
-@"The TYPED `exclusive`: run @task@ as a critical section exactly as `exclusive` does, then check the
-answer against T's schema and hand it back as a T. Everything `exclusive` says still holds — the row is
-FIXED to the store operations, the task runs AT THE SERIALIZE INSTALL SITE rather than at this perform
-site, and it binds to the NEAREST enclosing `serialize`; the only difference is that the answer does not
-cross back as `unknown`, so a caller stops respelling the same defensive `match` at every critical section.
-T is read off @task@'s own declared result type, so it is normally inferred rather than written; it must be
-a PUBLIC type, since a critical section's answer crosses `exclusive` as a public `unknown` and a secret
-therefore never rides back out of one (read a secret from the store INSIDE the section instead). A
-non-conforming answer throws `json.validation_error`, and that is NOT a condition to recover from: @task@
-produced the value and its signature named the type, so a mismatch can only be the WRITER'S schema
-mistake. Reach for the bare `exclusive` when the section's answer is genuinely shape-irregular."
-agent exclusive_as[T extends unknown](
-  @"The critical section; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> T with get | set | delete | list,
-) -> T with exclusive | prelude.throw[json.validation_error] {
-  // A task answering T is a subtype of the `-> unknown` task `exclusive` asks for (a result is
-  // covariant), so it passes through untouched and only the ANSWER needs narrowing on the way back.
-  // The `extends unknown` bound is what makes that widening legal: it pins T's privacy attribute to
-  // public, which `exclusive`'s own public `unknown` answer already demands of anything crossing it.
-  json.validate[T](value = exclusive(task = task))
-}
-
-@"Open a serial domain for the extent of @continuation@ — the bare `use store.serialize` form (no
-arguments, no type arguments: the domain is WHERE it is installed). Serves `exclusive` with a
-deliberately SEQUENTIAL handler: its FIFO applies critical sections one at a time, in arrival
-order, which is the whole point (a `parallel handler` would forfeit the atomicity). THE INSTALL
-DISCIPLINE: a desk's dispatch clause installs its workspace and its domain together —
-`use store.scope(path = <its workspace>)` then `use store.serialize` — once per dispatch. The race
-this closes is exactly one turn's parallel tool batch, so a turn-lifetime FIFO covers it, and the
-turns themselves already serialize at the desk's own sequential handler; tasks re-perform their
-store operations from THIS install site, so installing under the workspace is what routes a
-critical section's keys into it. An `exclusive` performed below a nested install binds to the
-NEAREST domain (inner shadows outer, by design); one performed with no install above it rides to
-the run root, where the RUNTIME serves it as the project-wide root domain — project-root keys, every
-run's sections in ONE durable FIFO — so install a domain when a narrower extent is the semantics."
-agent serialize[R, effect E](
-  @"Runs with `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, exclusive},
-) -> R with E | get | set | delete | list {
-  // Deliberately NOT a `parallel handler`: the FIFO of a sequential handler is what makes an
-  // exclusive a critical section — tasks run one at a time, in arrival order.
+  // Deliberately NOT a `parallel handler`, and deliberately INSIDE the prefix: the FIFO of a
+  // sequential handler is what makes an exclusive a critical section (tasks run one at a time, in
+  // arrival order), and re-performing from here routes the section's keys through the four clauses
+  // above — which is what puts a critical section in the workspace it was opened in.
   use handler {
     request exclusive(task: agent (value: null) -> unknown with get | set | delete | list) {
       next task(value = null)
@@ -336,50 +315,13 @@ agent serialize[R, effect E](
   continuation(value = null)
 }
 
-@"Open a WORKSPACE at @path@ — the working directory AND its serial domain in ONE install: `scope`
-composed with `serialize`, which is the DESK form (`use store.workspace(path = \"core\")` once per
-dispatch clause). The two only ever separate inside a FACILITY, which opens bare `scope`s for its
-subdirectory — its critical sections already serialize at the enclosing workspace's FIFO, so a
-facility never opens a domain of its own. `exclusive` binds to the nearest enclosing domain as
-always, so a nested workspace is a nested domain, exactly as it reads."
-agent workspace[R, effect E](
-  @"The workspace's path under the current one, e.g. \"core\" or \"workers/scribe\"." path: string,
-  @"Runs with every store operation prefixed AND `exclusive` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, get, set, delete, list, exclusive},
-) -> R with E | get | set | delete | list {
-  use scope(path = path)
-  use serialize
-  continuation(value = null)
-}
-
-@"Read @key@ (a missing entry reads as `null`), apply @transform@, write the result back, and
-return it — the one-key read-modify-write, atomic because it rides `exclusive`. @transform@ is
-PURE: everything the new value depends on is computed before entering and closed over — the
-critical-section discipline made a type. The stored value crosses as `unknown`; pin an expected
-shape inside @transform@ with a `match` (or `json.validate[T]`), and remember a stored `null` and a
-missing entry read the same here (use a bare `get` when that distinction matters)."
-agent modify(
-  @"The key, relative to the workspace of the enclosing serialize's install site." key: string,
-  @"Old value in (`null` when the entry is missing), new value out; pure." transform: agent (value: unknown) -> unknown with pure,
-) -> unknown with exclusive {
-  agent update(value: null) -> unknown with get | set {
-    let existing = match (get(key = key)) {
-      case found(value => value) -> value
-      case absent(key => _) -> null
-    }
-    let updated = transform(value = existing)
-    set(key = key, value = updated)
-    updated
-  }
-  exclusive(task = update)
-}
-
 // ── share: the shared place — ONE request for every cell above the workspaces ─────────────────────
 //
 // A desk opens its OWN workspace per dispatch, so knowledge several desks must share (a soul layer, a
 // digest, a registry) sits ABOVE every one of them and is reachable from none — there is deliberately
 // no `..`. The answer has always been a request served above the workspaces whose clause opens the
 // shared subtree in its own body. That answer is right and it does not SCALE: a request per CELL means
-// a `request` declaration, a handler clause and a re-spelt subdirectory scope for every cell worth
+// a `request` declaration, a handler clause and a re-spelt subdirectory workspace for every cell worth
 // sharing, a fixed cost per cell that grows with the app.
 //
 // `share` is that proxy with the cell factored OUT of it, on `exclusive`'s geometry exactly: the
@@ -394,15 +336,15 @@ serial domain — and hand back what it answered: the ONE request by which a des
 living ABOVE its own workspace. The geometry is `exclusive`'s, and both halves are load-bearing. The
 task is a CLOSURE that travels UP and runs THERE, so a workspace around this PERFORM does not travel
 with it (the INSTALL site's own enclosing workspaces do apply) — which means a subdirectory of the
-shared place is opened INSIDE the task body (`use store.scope(path = \"shared/soul\")` as its first
+shared place is opened INSIDE the task body (`use store.workspace(path = \"shared/soul\")` as its first
 move), and that is exactly what lets one `share` serve every shared cell instead of one named request
 per cell. And it binds to the NEAREST enclosing `share`: an inner shared place shadows an outer one BY
-DESIGN, the same dynamic-scope rule the nearest workspace and the nearest serial domain follow. The
+DESIGN, the same dynamic-scope rule the nearest workspace follows. The
 row is FIXED to the store operations plus `exclusive`: a task reads, computes and writes, and takes
 ATOMICITY by wrapping a read-modify-write in `store.exclusive` INSIDE the task — which lands in the
 shared place's own serial domain, since that is where the task is running. Nothing else is in the row,
 so a shared access can never block on a model, a network or another domain. The answer crosses back as
-`unknown`; narrow it with a `match` (or `json.validate[T]`), or reach for `shared_as[T]` below.
+`unknown`; narrow it with a `match` (or `json.validate[T]`) at the perform site.
 Unlike the store's four operations and `exclusive`, this one is NOT runtime-served, deliberately:
 there is no project-root shared place, because a shared place is somewhere a program CHOSE and a
 forgotten install must never quietly resolve to project-root keys. With no `share` above it a `shared`
@@ -413,74 +355,14 @@ request shared(
   @"What to do in the shared place; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> unknown with get | set | delete | list | exclusive,
 ) -> unknown
 
-@"The TYPED `shared`: run @task@ in the shared place exactly as `shared` does, then check the answer
-against T's schema and hand it back as a T — what `exclusive_as` is to `exclusive`. Everything
-`shared` says still holds: the row is FIXED to the store operations plus `exclusive`, the task runs AT
-THE `share` INSTALL SITE rather than at this perform site, and it binds to the NEAREST enclosing
-`share`; the only difference is that the answer does not cross back as `unknown`, so a reader of a
-shared cell stops respelling the same defensive `match` at every access — which matters more here than
-anywhere, since a shared cell is read from several desks and each would otherwise narrow it again. T is
-read off @task@'s own declared result type, so it is normally inferred rather than written; it must be
-a PUBLIC type, since the answer crosses `shared` as a public `unknown` and a secret therefore never
-rides back out of the shared place (read a secret from the store INSIDE the task instead). A
-non-conforming answer throws `json.validation_error`, and that is NOT a condition to recover from:
-@task@ produced the value and its signature named the type, so a mismatch can only be the WRITER'S
-schema mistake. Reach for the bare `shared` when the answer is genuinely shape-irregular."
-agent shared_as[T extends unknown](
-  @"What to do in the shared place; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> T with get | set | delete | list | exclusive,
-) -> T with shared | prelude.throw[json.validation_error] {
-  // Exactly `exclusive_as`'s move: a task answering T is a subtype of the `-> unknown` task `shared`
-  // asks for (a result is covariant), so it passes through untouched and only the ANSWER needs
-  // narrowing. The `extends unknown` bound pins T's privacy attribute to public, which `shared`'s own
-  // public `unknown` answer already demands of anything crossing it.
-  json.validate[T](value = shared(task = task))
-}
-
-@"The TYPED shared CRITICAL SECTION: run @task@ in the shared place, as one `store.exclusive` of that
-place's serial domain, and hand its answer back as a T — `shared_as` and `exclusive_as` in one call.
-
-This exists because the two typed wrappers DO NOT COMPOSE, and the reason is structural rather than an
-oversight. `shared_as[T]` reads T off a task that answers T; a task that wraps its body in
-`store.exclusive` answers whatever `exclusive` answers, and `exclusive` is a REQUEST — its reply crosses
-the handler boundary as `unknown`, which no inner `exclusive_as` can restore (the narrowing would have to
-happen inside a task the outer wrapper cannot see the type of). So the read-modify-write of a shared cell
-— the single most ordinary thing to do with one — fell out of both wrappers, and every site wrote a bare
-`shared` around a bare `exclusive` plus a hand-written `json.validate`, each with its own paragraph
-re-deriving why the helpers did not apply. This is that composition, spelled once.
-
-Everything both wrappers say still holds. The task runs AT THE `share` INSTALL SITE (so a subdirectory of
-the shared place is opened INSIDE the task body, `use store.scope(path = \"shared/soul\")` as its first
-move), it binds to the NEAREST enclosing `share`, and inside it the section is atomic against every other
-`exclusive` of that place's domain — which is the domain that matters here, since the shared place is
-where the contention is. The row is FIXED to the four store operations: @task@ does not perform
-`exclusive` itself (this agent wraps it), so it reads, computes and writes and nothing else.
-
-T is read off @task@'s own declared result type and must be PUBLIC, for the same reason `shared_as`'s
-must: the answer crosses two `unknown` request boundaries on the way out. A non-conforming answer throws
-`json.validation_error` and is a WRITER's schema mistake, not a condition to recover from."
-agent shared_exclusive_as[T extends unknown](
-  @"The critical section, run in the shared place; store operations only — compute everything else before entering and close over it." task: agent (value: null) -> T with get | set | delete | list,
-) -> T with shared | prelude.throw[json.validation_error] {
-  // The one indirection the composition needs: `shared`'s task may perform `exclusive`, so the section
-  // is wrapped in a task that does exactly that and nothing else. Both boundaries erase the answer to
-  // `unknown`, so the single `validate` at the end is what restores it — narrowing once, at the outside,
-  // where T is actually known.
-  agent section(value: null) -> unknown with get | set | delete | list | exclusive {
-    exclusive(task = task)
-  }
-  json.validate[T](value = shared(task = section))
-}
-
 @"Open the SHARED PLACE for the extent of @continuation@ — the bare `use store.share` form (no
-arguments, no type arguments: the shared place is WHERE it is installed, exactly as a serial domain
-is). Serves `shared` by calling its task in the clause body, so a task runs HERE — under this site's
+arguments, no type arguments: the shared place is WHERE it is installed, exactly as a workspace is). Serves `shared` by calling its task in the clause body, so a task runs HERE — under this site's
 workspaces, over this site's serial domain — while the desks below go on opening their own workspaces
 per dispatch and reaching nothing of each other's. THE INSTALL DISCIPLINE, in this order: the app's
 workspace, then `share`, then the desks (`use store.workspace(path = \"assistant\")` then
 `use store.share`). The order is a CONTRACT, not a habit: a task's row carries `exclusive` and this
-provider re-performs it outward, so `share` must sit INSIDE a serial domain for a shared critical
-section to land in one — `workspace` (scope AND serialize in one install) above it is the ordinary way
-to satisfy that. The order is legible in the TYPE, not only in prose: install `share` above the domain
+provider re-performs it outward, so `share` must sit INSIDE a workspace for a shared critical section
+to land in that workspace's domain — which is what the ordinary install order above already gives. The order is legible in the TYPE, not only in prose: install `share` above the domain
 instead and its `exclusive` finds nothing to catch it, so `store.exclusive` surfaces in the enclosing
 signature and those sections ride to the runtime's project-wide root FIFO — legal, and visibly a
 different program. The handler is PARALLEL on purpose: sending a closure upward is not an ordering
@@ -496,7 +378,8 @@ named proxy installed below this one can perform `shared` in its own clause."
 agent share[R, effect E](
   @"Runs with `shared` served; its result is the provider's result." continuation: agent (value: null) -> R with {...E, shared},
 ) -> R with E | get | set | delete | list | exclusive {
-  // PARALLEL on purpose, and the opposite call from `serialize`: routing a closure to the shared place
+  // PARALLEL on purpose, and the opposite call from a workspace's `exclusive` clause: routing a closure
+  // to the shared place
   // decides WHERE, never WHEN. A sequential handler here would make the shared place a bottleneck for
   // every desk that merely READS it, while buying no atomicity the task's own `exclusive` does not
   // already buy.
@@ -509,152 +392,4 @@ agent share[R, effect E](
     }
   }
   continuation(value = null)
-}
-
-// ── log: the bounded append-log — a named series that self-bounds and accounts for its overflow ────
-//
-// A store cell that grows forever is the shape every durable RECORD OF EVENTS starts as — a log of
-// finished work, a metric's datapoints — and the shape none of them should stay. The bound is always the
-// SAME three moves, written by hand at each site: append the new value, drop whatever overflows a cap, and
-// keep a COUNT of what was dropped so a reader is TOLD the series was truncated rather than shown a quiet
-// gap — a truncation a reader cannot see is worse than one it can. This factors that skeleton to a cell
-// whose value is `{ items, dropped }`: the ordered series and the cumulative overflow in ONE record, so an
-// append is one read-modify-write of one key and `log_read` / `log_dropped` are two projections of it.
-//
-// It ABSTRACTS the mechanism, it does not merge the callers: the SCHEMA is theirs (T is whatever the values
-// are), the CAP is theirs (a `retention` value they pass), and the RENDER is theirs (the overflow is a
-// number here; the sentence a reader sees is the app's). What the log owns is only append-bound-count. TWO
-// policies for a full log, as a sum echoing `dedup`'s: `evict` keeps the newest and drops the oldest — an
-// ever-growing series, and only an ORDERED log has a front to drop from, which is why the log is an array;
-// `reject` refuses the newest and drops NOTHING — a capped set where a silent eviction would lose the one
-// value that mattered (the entry evicted to make room could be the prohibition nobody chose to lift).
-//
-// NOT ATOMIC ON ITS OWN, by design: an append is a read-modify-write, so it takes its atomicity from an
-// enclosing `store.exclusive` exactly as a hand-written one did — its row is `get | set` and nothing else,
-// so it composes INSIDE a critical section that also does the caller's OWN writes (a completed task's move
-// from the open record into the done log is ONE section: the append and the removal must not tear). The log
-// deliberately does not open an `exclusive` of its own — that would split such a section in two, and a
-// self-serializing append would be atomic against nothing the caller cares about.
-
-@"A full log keeps the NEWEST @max@ values: a further append drops the OLDEST off the front and counts it
-into the log's cumulative overflow — never silently forgotten. The EVICTING bound of an ever-growing series
-(a done record, a metric's points); only an ordered log has a front to drop from, which is why the log is an
-array and not a keyed record."
-data evict(@"How many of the newest values to keep." max: integer)
-
-@"A full log REFUSES a further append: the log is UNCHANGED, nothing is ever evicted, and `log_append`
-answers `refused` so the caller learns the value was not stored. The bound for a set where the OLDEST value
-is as load-bearing as the newest and a silent eviction would be the real loss (a capped registry whose
-dropped entry could be the one that must not vanish)."
-data reject(@"The count at and above which a further append is refused." max: integer)
-
-// How a full log treats a further append: keep-newest-and-evict, or refuse-and-keep. (Type synonyms take no docs.)
-type retention = evict | reject
-
-@"An append that LANDED: @kept@ values are now in the log, and @evicted@ of them fell off the front to make
-room for this one — 0 under `reject`, and 0 under `evict` until the log first fills. The cumulative overflow
-across the log's life is `log_dropped`, not this per-append number."
-data accepted(@"How many values the log holds now." kept: integer, @"How many oldest values THIS append evicted." evicted: integer)
-
-@"An append a `reject` log REFUSED because it was full: @kept@ values remain and the appended value was NOT
-stored. A `reject` log answers this exactly when full; an `evict` log never answers it at all."
-data refused(@"How many values the log holds; unchanged, because the append was refused." kept: integer)
-
-// The outcome of one `log_append`. (Type synonyms take no docs.)
-type log_result = accepted | refused
-
-@"Append @value@ to the bounded log at @key@ under @retention@, and answer what the bound did — the ONE
-read-modify-write behind every \"keep the newest N and say what fell off\" series. The cell holds
-`{ items, dropped }`; this reads it, applies the policy, writes it back, and returns `accepted(kept,
-evicted)` or (only under `reject`, only when full) `refused(kept)`. @retention@ is the caller's cap: `evict`
-keeps the newest @max@ and counts the oldest overflow into `dropped`, `reject` refuses past @max@ and evicts
-nothing. NOT ATOMIC on its own — an append is a read-modify-write, so call it INSIDE a `store.exclusive` (or
-a `serialize` domain), where it composes with the caller's own writes in one critical section; it opens no
-domain of its own. T is the value's type and rides the STORE JSON boundary, so it carries `extends unknown`
-for the same reason `exclusive_as` does: the value is stored as a public `unknown`, and a secret narrowed to
-public would leak — the WRITE side is where that bound is load-bearing (the read side, `log_read`, needs
-none)."
-agent log_append[T extends unknown](
-  @"The log's key, relative to the current workspace." key: string,
-  @"The value to append; the newest element of the series." value: T,
-  @"The cap and its policy: `evict(max = ...)` or `reject(max = ...)`." retention: retention,
-) -> log_result with get | set {
-  // ONE read of the cell serves both the items and the overflow; a missing or malformed cell reads as an
-  // empty log that has dropped nothing (the store's total-read rule, as `stored_done` follows it).
-  let stored = match (get(key = key)) {
-    case found(value => value) -> value
-    case absent(key => _) -> null
-  }
-  let items = json.items(target = json.field(target = stored, key = "items"))
-  let dropped = log_evicted_count(cell = stored)
-  match (retention) {
-    case evict(max => max) -> {
-      // The bound is ARITHMETIC on the window, not an is-it-full branch, exactly as the hand-written sites
-      // wrote it: an unfilled log slices from 0 and drops nothing, and `dropped` grows by an unconditional
-      // `+ overflow` because adding zero is a no-op.
-      let grown = array.append(target = items, value = value)
-      let overflow = math.max(left = 0, right = array.length(target = grown) - max)
-      let kept = array.slice(target = grown, start = overflow, end = array.length(target = grown))
-      set(key = key, value = log_record(items = kept, dropped = dropped + overflow))
-      accepted(kept = array.length(target = kept), evicted = overflow)
-    }
-    case reject(max => max) -> {
-      // REFUSE at the cap: the log is left exactly as it was, so nothing an earlier append kept is ever at
-      // risk from a later one — the whole point of the policy.
-      if (array.length(target = items) >= max) {
-        refused(kept = array.length(target = items))
-      } else {
-        let grown = array.append(target = items, value = value)
-        set(key = key, value = log_record(items = grown, dropped = dropped))
-        accepted(kept = array.length(target = grown), evicted = 0)
-      }
-    }
-  }
-}
-
-@"Read the bounded log at @key@ as `array[T]`, oldest first — the values it currently HOLDS, the overflow
-already dropped. A missing or malformed cell, and any element that does not fit T, read as an empty log
-rather than a throw (the store's discard-the-unreadable rule, as `stored_series` follows it), so a reader
-never branches on a hand-edited cell. T does NOT carry `extends unknown`, unlike `log_append`'s: a read only
-NARROWS a public `unknown` to T, which never leaks — the bound is a write-side concern. Pass the same T the
-matching `log_append` stored."
-agent log_read[T](@"The log's key, relative to the current workspace." key: string) -> array[T] with get {
-  let items = match (get(key = key)) {
-    case found(value => value) -> json.field(target = value, key = "items")
-    case absent(key => _) -> null
-  }
-  // `try_validate` is the TOTAL boundary read: a whole-array shape mismatch degrades to the empty log, so
-  // one element an older schema wrote cannot blank a tool reply. A caller that needs per-element salvage
-  // reads `log_read[unknown]` and validates each itself, as the digest render already does.
-  match (json.try_validate[array[T]](value = items)) {
-    case null -> []
-    case validated -> validated
-  }
-}
-
-@"How many values the log at @key@ has EVICTED over its whole life — the cumulative overflow an `evict` bound
-counted, and 0 for a `reject` bound (which evicts nothing) or before any drop. The number a caller renders
-into its own \"N older ones fell off\" notice: the count is the log's, the sentence is the app's, so exactly
-one such line is derived per read and it can never accumulate in the stored series."
-agent log_dropped(@"The log's key, relative to the current workspace." key: string) -> integer with get {
-  log_evicted_count(cell = match (get(key = key)) {
-    case found(value => value) -> value
-    case absent(key => _) -> null
-  })
-}
-
-// The cumulative-overflow field of a log cell, read TOTALLY: an absent cell, a cell with no `dropped` field,
-// or a non-integer one all read as 0. The one place the `{ items, dropped }` shape's second half is decoded.
-agent log_evicted_count(@"The whole log cell value, or `null` for an absent cell." cell: unknown) -> integer {
-  match (json.field(target = cell, key = "dropped")) {
-    case integer(count) -> count
-    case _ -> 0
-  }
-}
-
-// A log cell built from its two parts — the ordered series and the cumulative overflow — as the
-// `{ items, dropped }` record every log operation reads back. Spelled once, so the shape lives in exactly
-// one place.
-agent log_record(@"The kept series, oldest first." items: array[unknown], @"The cumulative evicted count." dropped: integer) -> record[unknown] {
-  record.set(target = record.set(target = record.empty(), key = "items", value = items), key = "dropped", value = dropped)
 }

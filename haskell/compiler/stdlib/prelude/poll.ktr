@@ -148,8 +148,8 @@ type backlog = skip_backlog | deliver_backlog
 it; a fresh activation (a restart, a re-fork, a `supervise` re-run) reads it back and RESUMES. Under
 `watermark` that means the items which arrived while the process was down are DELIVERED rather than
 skipped; under `seen_set`, which has no floor to list from, it means the window is not re-notified
-from scratch. @key@ is an ordinary store key: it resolves against the surrounding `store.scope` /
-`store.workspace` exactly like any other, so WHERE the cursor lands is the calling workspace's
+from scratch. @key@ is an ordinary store key: it resolves against the surrounding `store.workspace`
+exactly like any other, so WHERE the cursor lands is the calling workspace's
 decision. Give every subscription its own key — two subscriptions sharing one key overwrite each
 other's memory. This is the choice to make unless the subscription genuinely wants to forget."
 data resume(@"The store key the cursor record lives at, relative to the current workspace." key: string)
