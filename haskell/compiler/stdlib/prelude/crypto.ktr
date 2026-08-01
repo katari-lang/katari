@@ -23,3 +23,31 @@ primitive agent hmac_sha256(
   @"The secret key material; the tag is stable per key and unforgeable without it." key: string of private,
   @"The text to tag, as its UTF-8 bytes; public, like `sha256`'s." text: string,
 ) -> string
+
+@"A short, STABLE, IRREVERSIBLE stand-in for @value@ under the secret @key@ — the first @length@ hex
+characters of its HMAC-SHA-256 tag. The same value under the same key always yields the same
+pseudonym, two different values effectively never collide at the default width, and nobody without
+the key can go backwards or forwards: they can neither read the original out of the tag nor check a
+guess against it.
+
+This is two lines over `hmac_sha256` and it is here for WHICH two lines. The thing being pseudonymised
+is always an identifier — a chat user id, an email address, an account number — and an identifier is
+ENUMERABLE, which is exactly the input a plain `sha256` fails on: anyone can hash every candidate id
+and match the digest, so the \"anonymous\" tag names its subject to the first person who tries. The
+composition that reaches for `sha256` is short, natural, and wrong, and it is wrong SILENTLY — the
+output looks identical. Encoding the keyed choice in the name is the point; the slicing is incidental.
+
+@length@ is a collision / brevity trade, not a security one (truncating an HMAC does not make it
+reversible): 8 hex characters distinguish on the order of tens of thousands of subjects before a
+birthday collision is likely, which is the scale of a chat community. Widen it for a bigger population.
+ROTATING THE KEY ROTATES EVERY PSEUDONYM — that is the erasure story, and the reason the key belongs in
+the project's secret env rather than in the source. The result is PUBLIC despite the private key, for
+`hmac_sha256`'s reason: irreversibility IS the sound declassification, so a pseudonym may be shown to a
+model, written to a store, or rendered into a message."
+agent pseudonym(
+  @"The secret key the pseudonym is stable under; rotating it rotates every pseudonym." key: string of private,
+  @"The identifier to stand in for — a user id, an address; public, and enumerable, which is why the tag is keyed." value: string,
+  @"How many hex characters to keep; a collision / brevity trade, not a security one." length: integer ?= 8,
+) -> string {
+  string.slice(value = hmac_sha256(key = key, text = value), start = 0, end = length)
+}
