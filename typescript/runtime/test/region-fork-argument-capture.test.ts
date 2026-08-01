@@ -12,7 +12,7 @@
 //                       fork(nursery, task = runner, argument = { cb });
 //                       return handle                       // route tears down here
 //   make_cb()        -> secret = "SECRET"; return <closure reading secret>
-//   runner(input)    -> escalate fiber_ask (suspend until route is gone); input.cb(); report what it returned
+//   runner(cb)       -> escalate fiber_ask (suspend until route is gone); cb(); report what it returned
 
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -212,8 +212,8 @@ function argumentCaptureIr(): IRModule {
         },
         parameters: { parameter: 250 },
       },
-      // runner (the named task): `fork` applies it to `{ input: <argument> }`, so its parameter is that wrapper
-      // record. Suspend on fiber_ask until `route` is gone, then call the `cb` its ARGUMENT carried.
+      // runner (the named task): `fork` applies it to the argument record VERBATIM, so its parameter IS
+      // `{ cb }`. Suspend on fiber_ask until `route` is gone, then call the `cb` its argument carried.
       16: {
         block: { kind: "agent", body: 17, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
@@ -223,8 +223,7 @@ function argumentCaptureIr(): IRModule {
           kind: "sequence",
           result: null,
           operations: [
-            { kind: "getField", source: 170, field: "input", output: 177 },
-            { kind: "getField", source: 177, field: "cb", output: 178 },
+            { kind: "getField", source: 170, field: "cb", output: 178 },
             { kind: "makeRecord", entries: [], output: 171 },
             {
               kind: "delegate",

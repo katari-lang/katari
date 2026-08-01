@@ -1,7 +1,8 @@
-// The env host primitives (`prelude.env.get_secret` / `prelude.env.get_all`) registered on the prim
+// The env host primitives (`prelude.env.get_secret` / `prelude.env.get_or`) registered on the prim
 // registry by `registerHostPrims`, exercised over a stubbed `EnvReader`. These assert the privacy contract
 // at the source: a secret read is tainted `private`, a non-secret read is public, and a missing secret
-// raises the typed `env.missing_secret` throw (an anticipated configuration failure, not a panic).
+// raises the typed `env.missing_secret` throw (an anticipated configuration failure, not a panic). The two
+// readers also split on TOTALITY: `get_secret` throws on a missing key, `get_or` never does.
 
 import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
@@ -85,35 +86,58 @@ describe("env host primitives", () => {
     }
   });
 
-  test("get_all returns a public record of the non-secret entries", async () => {
+  test("get_or returns the non-secret entry as a public string", async () => {
     const prims = primsWith(reader({ SECRET: "sk-123" }, { HOST: "example.com", PORT: "443" }));
-    const result = await prims.run("prelude.env.get_all", recordArgument({}), CONTEXT);
-    expect(result).toEqual({
-      kind: "record",
-      fields: {
-        HOST: { kind: "string", value: "example.com" },
-        PORT: { kind: "string", value: "443" },
-      },
-    });
-    // The result is public: no `private` marker anywhere (a non-secret entry must not be tainted).
+    const result = await prims.run("prelude.env.get_or", getOrArgument("HOST", "localhost"), CONTEXT);
+    expect(result).toEqual({ kind: "string", value: "example.com" });
+    // The result is public: no `private` marker (a non-secret entry must not be tainted).
     expect(result.private).toBeUndefined();
   });
 
-  test("get_all keeps an env key literally named __proto__ as a real field (no silent drop)", async () => {
+  test("get_or falls back on an unset key, and a SECRET entry is not visible to it", async () => {
+    // The secret bucket is off-limits here: `API_KEY` is set as a secret, so `get_or` still falls back —
+    // the split that keeps a tainted value from leaking out as a public string.
+    const prims = primsWith(reader({ API_KEY: "sk-123" }, { HOST: "example.com" }));
+    const missing = await prims.run("prelude.env.get_or", getOrArgument("PORT", "443"), CONTEXT);
+    expect(missing).toEqual({ kind: "string", value: "443" });
+    const secret = await prims.run("prelude.env.get_or", getOrArgument("API_KEY", ""), CONTEXT);
+    expect(secret).toEqual({ kind: "string", value: "" });
+  });
+
+  test("get_or returns an entry SET to the empty string as-is (set-but-empty is not unset)", async () => {
+    const prims = primsWith(reader({}, { HOST: "" }));
+    const result = await prims.run("prelude.env.get_or", getOrArgument("HOST", "fallback"), CONTEXT);
+    expect(result).toEqual({ kind: "string", value: "" });
+  });
+
+  test("get_or reads an env key literally named __proto__ as its entry, not the prototype", async () => {
     // `Object.fromEntries` defines own properties, so `__proto__` is a real key here (an object literal
-    // would set the prototype instead) — modelling a DB row whose key is `__proto__`.
+    // would set the prototype instead) — modelling a DB row whose key is `__proto__`. A plain `entries[key]`
+    // read would answer with `Object.prototype`, so the own-property check is what keeps this a string.
     const publics = Object.fromEntries([
       ["__proto__", "danger"],
       ["HOST", "example.com"],
     ]);
     const prims = primsWith(reader({}, publics));
-    const result = await prims.run("prelude.env.get_all", recordArgument({}), CONTEXT);
-    expect(result.kind).toBe("record");
-    if (result.kind === "record") {
-      // The `__proto__` entry survives as an own field rather than corrupting the prototype / vanishing.
-      expect(Object.hasOwn(result.fields, "__proto__")).toBe(true);
-      expect(result.fields.__proto__).toEqual({ kind: "string", value: "danger" });
-      expect(result.fields.HOST).toEqual({ kind: "string", value: "example.com" });
-    }
+    const result = await prims.run(
+      "prelude.env.get_or",
+      getOrArgument("__proto__", "fallback"),
+      CONTEXT,
+    );
+    expect(result).toEqual({ kind: "string", value: "danger" });
+    // A key that is only an Object.prototype member (never a row) still falls back.
+    const inherited = await prims.run(
+      "prelude.env.get_or",
+      getOrArgument("constructor", "fallback"),
+      CONTEXT,
+    );
+    expect(inherited).toEqual({ kind: "string", value: "fallback" });
   });
 });
+
+function getOrArgument(key: string, fallback: string): Value {
+  return recordArgument({
+    key: { kind: "string", value: key },
+    fallback: { kind: "string", value: fallback },
+  });
+}

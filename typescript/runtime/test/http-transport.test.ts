@@ -99,6 +99,28 @@ describe("FetchHttpTransport", () => {
     expect(fetchMock.mock.calls[1]?.[1]?.body).toBe("");
   });
 
+  test("a null / absent body sends NO body, even on a method that carries one", async () => {
+    // `http.fetch`'s `body` is `body | null ?= null`, so a plain call reaches the transport with an explicit
+    // null — the ABSENCE of a body, which must stay distinct from the empty body above (Content-Length: 0).
+    // A nominal data type cannot carry a default, so null is how the stdlib spells "no body".
+    const fetchMock = fetchStub(() => Promise.resolve(new Response("", { status: 200 })));
+
+    const nullBody = new FetchHttpTransport(fetchMock, LIMITS);
+    await dispatchOnce(
+      nullBody,
+      requestCall({ url: "https://example.test/items", method: "POST", headers: {}, body: null }),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeUndefined();
+
+    // An omitted `body` key is the same absence (a hand-built request, or a wire form that dropped a null).
+    const absentBody = new FetchHttpTransport(fetchMock, LIMITS);
+    await dispatchOnce(
+      absentBody,
+      requestCall({ url: "https://example.test/items", method: "POST", headers: {} }),
+    );
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBeUndefined();
+  });
+
   test("a non-2xx response is a result, not an error", async () => {
     const fetchMock = fetchStub(() => Promise.resolve(new Response("nope", { status: 404 })));
     const transport = new FetchHttpTransport(fetchMock, LIMITS);

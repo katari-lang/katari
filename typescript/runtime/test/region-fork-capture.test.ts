@@ -115,7 +115,8 @@ function captureIr(): IRModule {
             { kind: "getField", source: 90, field: "nursery", output: 91 },
             { kind: "loadLiteral", output: 92, value: { kind: "string", value: "SECRET" } },
             { kind: "makeClosure", output: 93, agent: 16 },
-            { kind: "loadLiteral", output: 96, value: { kind: "string", value: "arg" } },
+            // The task reads nothing off its argument, so the nullary spelling: an empty parameter record.
+            { kind: "makeRecord", entries: [], output: 96 },
             {
               kind: "makeRecord",
               entries: [

@@ -120,7 +120,8 @@ function nestedCaptureIr(): IRModule {
               output: 92,
             },
             { kind: "makeClosure", output: 93, agent: 16 },
-            { kind: "loadLiteral", output: 96, value: { kind: "string", value: "arg" } },
+            // The task reads nothing off its argument, so the nullary spelling: an empty parameter record.
+            { kind: "makeRecord", entries: [], output: 96 },
             {
               kind: "makeRecord",
               entries: [
