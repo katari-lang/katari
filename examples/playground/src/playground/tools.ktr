@@ -4,9 +4,9 @@
 //      tool-calling API would receive — ordinary record / array literals, embedding each schema (already
 //      a document value) by plain assignment.
 //   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is read with the TYPED text
-//      boundary `json.parse_as[T]`: parsed and validated against T's schema in one step, so the
-//      reply's shape is pinned by a type instead of a shape-filter dance. (The untyped `json.parse` +
-//      shape-filter traversal remains available for exploring documents of unknown shape.)
+//      boundary `json.validate[T](value = json.parse(text = ...))` — parsed, then checked against T's
+//      schema — so the reply's shape is pinned by a type instead of a shape-filter dance. (The untyped
+//      `json.parse` + shape-filter traversal remains available for documents of unknown shape.)
 //   3. `dispatch` finds the picked tool by its metadata name and invokes it with `reflection.call_agent`;
 //      the runtime validates the AI-built arguments against the tool's input schema at the
 //      delegation boundary (a mismatch throws `reflection.call_error` — catch it to let the model retry).
@@ -65,11 +65,12 @@ agent main() -> string {
   // 1. What the AI receives: the tool list as JSON text (the tool-call request body).
   let body = json.stringify(value = tool_list(tools = tools))
 
-  // 2. What the AI replies, read through the typed text boundary: `parse_as[T]` validates the
-  //    document against T's schema and throws `json.validation_error` (naming the offending path) if
-  //    it does not fit (malformed text is `json.parse_error`).
+  // 2. What the AI replies, read through the typed text boundary — which is the two steps it always
+  //    was: `json.parse` turns text into a value (malformed text throws `json.parse_error`), and
+  //    `json.validate[T]` checks that value against T's schema (a mismatch throws
+  //    `json.validation_error`, naming the offending path).
   let reply = "{\"tool\":\"playground.tools.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
-  let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
+  let picked = json.validate[{ tool: string, arguments: record[unknown] }](value = json.parse(text = reply))
 
   // 3. Dispatch the pick; the result goes back to the AI as JSON text.
   let result = dispatch(tools = tools, picked = picked.tool, args = picked.arguments)

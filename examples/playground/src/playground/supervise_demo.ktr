@@ -62,7 +62,9 @@ agent main() -> string {
   use handler (var attempts = 0) {
     request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
   }
-  use supervise.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  // Only what differs from the standard cadence is written: the demo wants a 5ms floor so the test is
+  // quick, and `max_attempts` has no default at all — how many tries is the caller's judgement.
+  use supervise.exponential(initial_delay_milliseconds = 5.0, max_attempts = 5.0)
   // THE POLICY. This converter catches both members of the throw union at ONE boundary and dispatches on
   // the sum: a transient `warming_up` becomes a replay; a fatal `unauthorized` is rethrown (the self-catch
   // rule proxies the rethrow past this handler to the exhaustion / fatal fallback above).
@@ -93,7 +95,7 @@ agent exhausting() -> string {
   use handler (var attempts = 0) {
     request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
   }
-  use supervise.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 2.0)
+  use supervise.exponential(initial_delay_milliseconds = 5.0, max_attempts = 2.0)
   use handler {
     request prelude.throw(error: warming_up | unauthorized) -> never {
       match (error) {
@@ -120,7 +122,9 @@ agent rejected() -> string {
   use handler (var attempts = 0) {
     request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
   }
-  use supervise.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  // Only what differs from the standard cadence is written: the demo wants a 5ms floor so the test is
+  // quick, and `max_attempts` has no default at all — how many tries is the caller's judgement.
+  use supervise.exponential(initial_delay_milliseconds = 5.0, max_attempts = 5.0)
   use handler {
     request prelude.throw(error: warming_up | unauthorized) -> never {
       match (error) {
@@ -147,9 +151,14 @@ agent flaky_deliver(time: number) -> null with prelude.throw[delivery_failed] {
 delivery fails; the converter turns that typed failure into `supervise.interrupted`, and `supervise.forever`
 catches it, backs off, and re-runs `watch`, which re-arms from its persisted next occurrence. Durable state
 stays FLAT no matter how many failures it has survived (the `forever` loop reclaims each attempt's frames).
-Typecheck-only: an unbounded daemon has no result to assert."
+Typecheck-only: an unbounded daemon has no result to assert.
+
+Written bare, because every parameter is defaulted: a second, doubling, capped at fifteen minutes is the
+cadence a daemon wants, and an unbounded loop has no how-many to decide. A supervisor that needs a
+DIFFERENT cadence names the one parameter that differs — which is also what makes the difference legible
+to whoever reads it next."
 agent daemon() -> never with io {
-  use supervise.forever(initial_delay_milliseconds = 100.0, factor = 2.0, max_delay_milliseconds = 5000.0)
+  use supervise.forever()
   use handler {
     request prelude.throw(error: delivery_failed) -> never {
       supervise.interrupted(failure = error)

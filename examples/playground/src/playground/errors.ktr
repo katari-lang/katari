@@ -1,5 +1,7 @@
 // The typed error model. A program raises `throw(error = <data>)` — a typed, catchable error the
-// signature tracks as `with prelude.throw[T]` — and a `use handler` clause catches it by its payload type.
+// signature tracks as `with prelude.throw[T]` — and there are exactly TWO ways to meet one: a
+// `use handler` clause, which catches it by payload type and decides where it goes, or `prelude.catch`,
+// which folds it into the result as an ordinary value. Both appear below, on the same failure.
 // A `panic`, by contrast, is the runtime's own failure channel: it cannot be raised from Katari,
 // but the ambient `panic` clause below can still catch one (e.g. a division by zero, a failed FFI
 // process) on its way out and turn it into a value instead of a failed run.
@@ -33,10 +35,38 @@ agent describe_half(value: integer) -> string {
   f"half=${string.to_string(value = half(value = value))}"
 }
 
-@"Entry: one caught throw, one clean path, a caught panic, and a config fallback on a missing secret."
+@"The OTHER direction: fold the throw into the RESULT with `prelude.catch`, instead of routing it with a
+handler. `catch` runs its task and answers either the value or the thrown payload — a plain `integer |
+not_even` union — so the failure stops being a control-flow event and becomes data the caller `match`es
+like any other.
+
+WHICH OF THE TWO to reach for is the whole lesson, and it is not a style question. A HANDLER is for a
+failure that must be REROUTED — recovered somewhere other than here, rethrown selectively, turned into a
+retry signal (`supervise_demo.ktr` does exactly that) — and it can catch part of a throw union and let
+the rest keep flying. `catch` is for a failure that BECOMES a value right here, and it takes the WHOLE
+throw row: nothing that throws survives into its own signature, which is why `describe_half_by_value`
+below needs no `with prelude.throw[...]` at all.
+
+Two things to know. The task is a nullary agent (`agent () -> T`), which fits the declared `(value:
+null)` slot because a parameter record is contravariant — no unit argument is written. And a task that
+throws NOTHING leaves the error type with nothing to infer from, so `catch` over an infallible task
+needs an explicit `catch[T, never]` — which is a sign it should not have been caught."
+agent describe_half_by_value(value: integer) -> string {
+  agent halving() -> integer with prelude.throw[not_even] {
+    half(value = value)
+  }
+  match (prelude.catch(task = halving)) {
+    case not_even(value => odd) -> f"${string.to_string(value = odd)} is odd — no half"
+    case halved -> f"half=${string.to_string(value = halved)}"
+  }
+}
+
+@"Entry: one caught throw, one clean path, the same failure folded to a VALUE, a caught panic, and a
+config fallback on a missing secret."
 agent main() -> string {
   let caught = describe_half(value = 7)
   let clean = describe_half(value = 12)
+  let by_value = describe_half_by_value(value = 9)
   // The ambient `panic` clause: catchable in any handler, raisable by nobody. Dividing by zero is a
   // runtime failure (a panic, not a typed throw) — without this clause it would fail the whole run.
   let survived = {
@@ -57,5 +87,5 @@ agent main() -> string {
     let secret = env.get_secret(key = "playground.no_such_key")
     "secret is set"
   }
-  string.join(parts = [caught, clean, survived, fallback], separator = " | ")
+  string.join(parts = [caught, clean, by_value, survived, fallback], separator = " | ")
 }

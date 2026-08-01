@@ -74,12 +74,12 @@ agent main() -> string {
     request gate(label: string, on_decide: agent (value: string) -> string) -> null {
       // The fiber's task closes over `on_decide` — a closure captured inside a closure, which is what
       // makes the fork transfer carry the ASKER's environment onto the nursery and not just this one.
-      agent decide(input: string) -> null with ready | decided {
+      agent decide(subject: string) -> null with ready | decided {
         ready()
-        let text = on_decide(value = input)
+        let text = on_decide(value = subject)
         decided(text = text)
       }
-      region.fork(nursery = nursery, task = decide, argument = label)
+      region.fork(nursery = nursery, task = decide, argument = { subject = label })
       next null
     }
   }

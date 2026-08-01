@@ -20,8 +20,10 @@ agent main(url: string) -> string {
       break f"mcp failed: ${json.stringify(value = error)}"
     }
   }
-  let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = record.empty()))
-  let names = for (let tool in record.values(target = tools)) {
+  let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = {}))
+  // A toolbox is a `record[tool]`, so its values are its `entries` with the key dropped — the one way
+  // to walk a record, rather than a second agent that walks it for you.
+  let names = for (let [_name, tool] in record.entries(target = tools)) {
     next reflection.get_metadata(value = tool).name
   }
   let added = match (record.get(target = tools, key = "add")) {

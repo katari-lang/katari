@@ -1,40 +1,52 @@
 // The durable key-value store: state that outlives a run. `store.set` writes, `store.get` reads
-// (`found` / `absent`, so a stored `null` never blurs with a missing key), `store.list` enumerates a
-// directory. Keys are AMBIENT — an operation names a path and a WORKSPACE decides where it lands, so
-// `store.workspace(path = "playground/store")` prefixes every key inside it. And because two runs (or
-// two parallel branches of one) can read-modify-write the same key and lose an edit, `store.workspace`
-// also serves `store.exclusive`: a critical section its serial FIFO runs one at a time — `store.modify`
-// is the one-key read-modify-write built on it.
+// (`found` / `absent`, so a stored `null` never blurs with a missing key), `store.get_or` reads at a
+// TYPE with a fallback, `store.list` enumerates a directory. Keys are AMBIENT — an operation names a
+// path and a WORKSPACE decides where it lands, so `store.workspace(path = "playground/store")`
+// prefixes every key inside it. And because two runs (or two parallel branches of one) can
+// read-modify-write the same key and lose an edit, the SAME install also serves `store.exclusive`: a
+// critical section its serial FIFO runs one at a time. One word, both halves — a prefix without its
+// lane was how a read-modify-write quietly ended up in the project-wide root FIFO.
 //
 // These operations escalate to the RUNTIME, which machine-answers them against the project's durable
 // rows (never a human), so this module runs with no handler of its own — and a second run sees what the
 // first one wrote.
 
-@"The pure read-modify-write step `bump` hands `store.modify`: a missing count reads as `null`, so
-start it at 0; any other value has already been an integer, so add 1."
-agent increment(value: unknown) -> unknown {
-  match (value) {
-    case integer(current) -> current + 1
-    case _ -> 1
-  }
+@"Read a counter, add one, write it back — and answer the new value. The whole body is ONE critical
+section: `store.exclusive` runs it inside the nearest workspace's sequential FIFO, so two concurrent
+bumps can never read the same count and both write the same successor.
+
+The read is `store.get_or`, the TYPED store read: a durable cell is an `unknown` no schema guards (an
+older run's shape, a hand edit in the console), so every read is a boundary read — T comes off the
+fallback, and a missing OR unreadable cell answers the 0 this counter starts from."
+agent bump_section(value: null) -> unknown with store.get | store.set {
+  let current = store.get_or(key = "visits", fallback = 0)
+  store.set(key = "visits", value = current + 1)
+  current + 1
 }
 
-@"Bump a durable counter ATOMICALLY. `store.modify` reads the key, applies the pure transform, and
-writes the result back inside a `store.exclusive` critical section, so two concurrent bumps never lose
-a count. The stored value crosses back as `unknown`; a type-filter arm narrows it to `integer`."
+@"Bump a durable counter ATOMICALLY. The section above is handed to `store.exclusive`, whose answer
+crosses the request boundary as `unknown` — a type filter narrows it back, and the `case _` arm is what
+a caller writes instead of trusting a boundary it did not check."
 agent bump(value: null) -> integer with store.exclusive {
-  match (store.modify(key = "visits", transform = increment)) {
+  match (store.exclusive(task = bump_section)) {
     case integer(count) -> count
     case _ -> 0
   }
 }
 
-@"Entry (the ROOT-SERVED domain): bump the counter with NO workspace or serialize installed — the
-`store.exclusive` under `store.modify` rides to the run root, where the RUNTIME itself serves it as
-the outermost serial domain. The task runs at the PROJECT ROOT (the key is un-prefixed) in the
-project-wide durable FIFO, so concurrent runs' sections still never interleave."
+@"The root-served section: the same read-modify-write with NO workspace installed, so the
+`store.exclusive` rides to the run root and the RUNTIME itself serves it as the outermost serial
+domain. The task runs at the PROJECT ROOT (the key is un-prefixed) in the project-wide durable FIFO, so
+concurrent runs' sections still never interleave — which is why the key spells its own directory."
+agent root_bump_section(value: null) -> unknown with store.get | store.set {
+  let current = store.get_or(key = "playground/root_visits", fallback = 0)
+  store.set(key = "playground/root_visits", value = current + 1)
+  current + 1
+}
+
+@"Entry (the ROOT-SERVED domain): bump the counter with no workspace installed at all."
 agent main_root() -> string with store.exclusive {
-  let visits = match (store.modify(key = "playground/root_visits", transform = increment)) {
+  let visits = match (store.exclusive(task = root_bump_section)) {
     case integer(count) -> count
     case _ -> 0
   }
@@ -46,11 +58,11 @@ path segment, so `a/b` is two directories and `..` climbs out of the workspace a
 confine — and the geometry every other agent here relies on is only as sound as the strings put into it.
 
 `store.safe_segment` is the TOTAL half: it canonicalises a proposal (trimmed, lower-cased) or answers
-`null`, which is an ordinary outcome the app renders back to whoever proposed the name. `store.scope`
-is the other half: a path that is not made of such segments PANICS, because a program that opened a
-workspace on unvalidated input has a DEFECT — there is no other directory it could have meant, and
-answering a value would let the run keep writing under the bad prefix. The panic is caught here only to
-show it; a real program validates first and never reaches it."
+`null`, which is an ordinary outcome the app renders back to whoever proposed the name.
+`store.workspace` is the other half: a path that is not made of such segments PANICS, because a program
+that opened a workspace on unvalidated input has a DEFECT — there is no other directory it could have
+meant, and answering a value would let the run keep writing under the bad prefix. The panic is caught
+here only to show it; a real program validates first and never reaches it."
 agent guarded_names() -> string with store.get | store.set | store.delete | store.list {
   let accepted = match (store.safe_segment(name = "  Scribe  ")) {
     case null -> "(rejected)"
@@ -64,7 +76,7 @@ agent guarded_names() -> string with store.get | store.set | store.delete | stor
     use handler {
       request panic(msg: string) { break f"panic caught: ${msg}" }
     }
-    use store.scope(path = "..")
+    use store.workspace(path = "..")
     "unreachable"
   }
   f"accepted=${accepted} | refused=${refused} | ${defect}"
@@ -74,8 +86,8 @@ agent guarded_names() -> string with store.get | store.set | store.delete | stor
 workspace. The declared row lists all four store operations because `store.workspace` re-performs
 every one outward (prefixed) to the runtime — even the ones this body does not use."
 agent main() -> string with store.get | store.set | store.delete | store.list {
-  // Open the workspace: every key below is prefixed with `playground/store/`, and `store.exclusive`
-  // (hence `store.modify`) is served by the workspace's serial FIFO for the rest of this block.
+  // ONE install, both halves: every key below is prefixed with `playground/store/`, and
+  // `store.exclusive` is served by this workspace's serial FIFO for the rest of the block.
   use store.workspace(path = "playground/store")
 
   // 1. Atomic counter: two bumps, each a critical section of the workspace's serial domain. The first
@@ -84,14 +96,19 @@ agent main() -> string with store.get | store.set | store.delete | store.list {
   let _ = bump(value = null)
   let visits = bump(value = null)
 
-  // 2. Plain write / read: `store.set` stores any value; `store.get` distinguishes found from absent.
+  // 2. Plain write / read: `store.set` stores any value; `store.get` distinguishes found from absent,
+  // which is the read to reach for when a MISSING key must be told apart from a wrong-typed one.
   store.set(key = "greeting", value = "hello")
   let greeting = match (store.get(key = "greeting")) {
     case store.found(value => value) -> json.stringify(value = value)
     case store.absent(key => missing) -> f"(absent: ${missing})"
   }
 
-  // 3. List the workspace: a `leaf` per value-holding key, a `branch` per subdirectory below it.
+  // 3. The typed read of a key nobody has written: `get_or` answers the fallback for an absent cell
+  // and for one holding the wrong shape alike, so a reader never branches on either.
+  let nickname = store.get_or(key = "nickname", fallback = "(unnamed)")
+
+  // 4. List the workspace: a `leaf` per value-holding key, a `branch` per subdirectory below it.
   let names = for (let element in store.list()) {
     next match (element) {
       case store.leaf(key => key) -> key
@@ -99,5 +116,5 @@ agent main() -> string with store.get | store.set | store.delete | store.list {
     }
   }
 
-  f"visits=${string.to_string(value = visits)} | greeting=${greeting} | keys=${json.stringify(value = names)}"
+  f"visits=${string.to_string(value = visits)} | greeting=${greeting} | nickname=${nickname} | keys=${json.stringify(value = names)}"
 }

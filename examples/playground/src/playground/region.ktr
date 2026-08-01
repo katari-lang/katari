@@ -21,12 +21,14 @@ can leave through. The input rides along so the collector never has to assume an
 request deliver_square(@"The input the fiber was forked with." input: integer, @"Its square." value: integer) -> null
 
 @"A worker fiber: compute the square and DELIVER it as the task's last act. The parameter is named
-`input` because `region.fork` applies the task to `{ input: <argument> }`; the result type is `null`
-because a fiber carries no result — a `-> T` task does not fit `fork`, so a value that must outlive
-the fiber HAS to be delivered through an escalation before the task ends. The type makes the
-discipline total: a squarer that forgets to deliver is a task whose work is provably discarded."
-agent square(input: integer) -> null with deliver_square {
-  deliver_square(input = input, value = input * input)
+whatever this agent wants — a fork is a DEFERRED CALL, so `region.fork` applies the task to the whole
+argument RECORD of the call it stands for (`argument = { n = 2 }` runs `square(n = 2)`), and no name is
+imposed from outside. The result type is `null` because a fiber carries no result — a `-> T` task does
+not fit `fork`, so a value that must outlive the fiber HAS to be delivered through an escalation before
+the task ends. The type makes the discipline total: a squarer that forgets to deliver is a task whose
+work is provably discarded."
+agent square(n: integer) -> null with deliver_square {
+  deliver_square(input = n, value = n * n)
 }
 
 @"The private signal that ends the collection once every square has landed — `watch` returns
@@ -59,9 +61,10 @@ agent fan_out() -> array[integer] {
       }
     }
   }
-  region.fork(nursery = nursery, task = square, argument = 2)
-  region.fork(nursery = nursery, task = square, argument = 3)
-  region.fork(nursery = nursery, task = square, argument = 4)
+  // The argument is the call's own record — `{ n = 2 }` is `square(n = 2)`, deferred.
+  region.fork(nursery = nursery, task = square, argument = { n = 2 })
+  region.fork(nursery = nursery, task = square, argument = { n = 3 })
+  region.fork(nursery = nursery, task = square, argument = { n = 4 })
   region.watch(nursery = nursery)
 }
 
@@ -77,14 +80,14 @@ agent fan_out() -> array[integer] {
 element and joins them all at the brace."
 agent parallel_squares() -> array[integer] {
   parallel for (let n in [2, 3, 4]) {
-    next square_value(input = n)
+    next square_value(n = n)
   }
 }
 
 @"The squarer as a plain VALUE-returning agent — what `parallel for` joins. The fiber variant
 (`square`) cannot return this: a fiber's type forces delivery through the escalation instead."
-agent square_value(input: integer) -> integer {
-  input * input
+agent square_value(n: integer) -> integer {
+  n * n
 }
 
 // ─── subscription: the white hole (fiber escalations re-emitted at a handler) ──────────────────────
@@ -99,10 +102,13 @@ composed AROUND it with an escalation, exactly as `time.watch` is stopped."
 data enough()
 
 @"An emitter fiber: perform `on_message` twice under a caller-supplied label, then settle. Its effect
-(`on_message`) fits under the nursery's ceiling, so `watch` re-emits it."
-agent emitter(input: string) -> null with on_message {
-  on_message(text = f"${input}-1")
-  on_message(text = f"${input}-2")
+(`on_message`) fits under the nursery's ceiling, so `watch` re-emits it. A NAMED agent taking PLAIN
+DATA is also the form a fork into ANOTHER nursery's handle must take — an inline closure would hand its
+captured environment to a scope the sender does not own — so writing every fiber this way keeps the one
+rule uniform."
+agent emitter(label: string) -> null with on_message {
+  on_message(text = f"${label}-1")
+  on_message(text = f"${label}-2")
   null
 }
 
@@ -124,7 +130,7 @@ agent subscribe() -> string {
     request on_message(text: string) -> null {
       if (seen == 0) {
         // Composition: fork a second emitter from inside the handler, into the same nursery.
-        region.fork(nursery = nursery, task = emitter, argument = "B")
+        region.fork(nursery = nursery, task = emitter, argument = { label = "B" })
         next null with { seen = seen + 1 }
       } else {
         if (seen + 1 >= 4) {
@@ -135,7 +141,7 @@ agent subscribe() -> string {
       }
     }
   }
-  region.fork(nursery = nursery, task = emitter, argument = "A")
+  region.fork(nursery = nursery, task = emitter, argument = { label = "A" })
   region.watch(nursery = nursery)
 }
 

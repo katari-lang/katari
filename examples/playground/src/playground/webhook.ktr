@@ -23,10 +23,11 @@ agent self_subscriber(url: string) -> string {
 
 @"POST one `{\"value\": …}` body to the endpoint and return the response body text."
 agent deliver(url: string, value: integer) -> string {
+  // `method` and `body` are what differ from `fetch`'s default (a GET with no body); the headers are
+  // left at their empty default, so they are not written at all.
   let response = http.fetch(
     url = url,
     method = "POST",
-    headers = record.empty(),
     body = http.text(content = json.stringify(value = { value = value })),
   )
   response.body
