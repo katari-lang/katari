@@ -93,6 +93,19 @@ export const runService = {
     return { state: view.state, events: rows.map(projectRunEvent), total };
   },
 
+  /** Sweep a run's execution trace, returning how many journal rows went. Allowed while the run is still
+   *  RUNNING, which is the whole point: a resident run (`-> never`) has no terminal moment at which its
+   *  trace becomes reclaimable, so the only way to reclaim it is in place. Safe because the journal is
+   *  observation-only — the engine never reads it back, and `seq` is a bigserial, so the appends that
+   *  follow stay monotonic and an open tail's `after=` cursor simply sees a gap. */
+  async clearEvents(projectId: string, runId: string): Promise<number> {
+    const view = await runRepository.get(db, projectId, runId);
+    if (view === undefined) {
+      throw new NotFoundError(`run ${runId} not found`);
+    }
+    return runEventsRepository.clear(db, projectId, runId);
+  },
+
   /** A run's answered-escalation transcript. Open escalations are the escalation resource's concern;
    *  this is the durable history the audit table keeps after each answer. */
   async listEscalationAudit(projectId: string, runId: string) {

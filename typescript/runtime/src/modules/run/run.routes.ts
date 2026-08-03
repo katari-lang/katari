@@ -60,6 +60,19 @@ export const runRoutes = new Hono<AppEnv>()
       return c.json(success(await runService.listEvents(projectId, runId, c.req.valid("query"))));
     },
   )
+  // Sweep the run's trace. The journal only ever feeds the GET above, so dropping it costs no execution
+  // state — and a resident run never reaches a terminal state at which its trace would be reclaimed for
+  // it, so the sweep is offered while the run is live. `deleted` rides beside the identity so the caller
+  // can report what it reclaimed.
+  .delete(
+    "/projects/:projectId/runs/:runId/events",
+    zValidator("param", runParamSchema),
+    async (c) => {
+      const { projectId, runId } = c.req.valid("param");
+      const deleted = await runService.clearEvents(projectId, runId);
+      return c.json(success({ id: runId, deleted }));
+    },
+  )
   .post(
     "/projects/:projectId/runs/:runId/cancel",
     requireJsonBody,

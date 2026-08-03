@@ -219,4 +219,16 @@ export const runEventsRepository = {
     const total = await countRows(executor, runEvents, and(...conditions));
     return { rows: rows.map(unsealRunEventRow), total };
   },
+
+  /** Sweep a run's whole trace, reporting how many rows went. The journal is observation-only — nothing
+   *  in the engine ever reads it back — so this reclaims the space of a run that keeps producing events
+   *  without touching its execution. Deliberately unfiltered: the trace of a resident run is reclaimed
+   *  wholesale or not at all, and the count (not the rows) is what comes back, since the sweep this
+   *  exists for spans gigabytes that must never be materialised to be counted. */
+  async clear(executor: Executor, projectId: string, runId: string): Promise<number> {
+    const result = await executor
+      .delete(runEvents)
+      .where(and(eq(runEvents.projectId, projectId), eq(runEvents.runId, runId)));
+    return result.count;
+  },
 };
