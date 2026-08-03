@@ -84,9 +84,15 @@ describe("persistence codec", () => {
           forwardRoutes: {},
           kind: "delegate",
           delegationId: "delegation-child" as DelegationId,
-          // A delegate proxy relaying an inbound escalate holds the escalation here — it must survive the
-          // round-trip (routes now ride per-thread, not in the instance's engine_state).
-          relays: { [toAskId(4)]: "escalation-e" as EscalationId },
+          // A delegate proxy relaying an inbound escalate holds the escalation here, with the provenance the
+          // trace's elision reads — both must survive the round-trip (routes now ride per-thread, not in the
+          // instance's engine_state).
+          relays: {
+            [toAskId(4)]: {
+              escalation: "escalation-e" as EscalationId,
+              inbound: { relayOf: "escalation-outer" as EscalationId },
+            },
+          },
         },
       },
       cancelExits: {},

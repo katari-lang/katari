@@ -135,8 +135,23 @@ export type ExternalEventBody =
       /** The ask that escaped the child instance: a `request` (capability), or a control-flow unwind
        *  (`break` / `next` / `return`) crossing the boundary toward a lexical ancestor (via a closure). */
       ask: AskKind;
+      /** The inbound escalation this event RE-RAISES verbatim, when this instance is only a relay hop: it
+       *  received that escalation as an event, nobody in it served the ask, and it is leaving again with a
+       *  byte-identical payload. Absent on an ORIGIN — an ask born in this instance (user code performed it,
+       *  or the engine synthesized a panic), the only place its payload exists. The journal keeps one copy
+       *  per logical escalation by eliding a relay hop's, and this field is what re-links the chain. */
+      relayOf?: EscalationId;
     }
-  | { kind: "escalateAck"; delegation: DelegationId; escalation: EscalationId; value: Value };
+  | {
+      kind: "escalateAck";
+      delegation: DelegationId;
+      escalation: EscalationId;
+      value: Value;
+      /** Set when this ack answers a RELAY-hop escalate (one carrying `relayOf`): its value is a copy of the
+       *  ack one hop up the chain, which the journal already holds. The ack of an origin escalate — the answer
+       *  the raiser actually consumes — never carries it. */
+      relayed?: true;
+    };
 
 /** A routed external event: a payload plus its `from` (issuing reactor) and `to` (destination reactor). The
  *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives.

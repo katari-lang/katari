@@ -29,7 +29,13 @@ import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateAskId } from "./store.js";
 import { THROW_REQUEST, throwArgument } from "./throw-signal.js";
-import type { CoreInstance, DelegateThread, ExternalThread, Thread } from "./types.js";
+import type {
+  CoreInstance,
+  DelegateThread,
+  EscalationRelay,
+  ExternalThread,
+  Thread,
+} from "./types.js";
 
 /** The proxy thread for an outbound `delegation` in `instance`, found by its own `delegationId`
  *  back-reference (the source of truth — there is no separate outbound-delegation map). Both a
@@ -173,8 +179,45 @@ export function escapeAsk(ctx: StepContext, from: ThreadId, fromAskId: AskId, as
   root.forwardRoutes[askId] = { thread: from, askId: fromAskId };
   const escalation = newEscalationId();
   root.escalations[escalation] = askId;
+  // A hop that merely re-raises an escalation it received names it, so the trace can journal this copy of the
+  // payload redacted and still walk the chain back to the one full copy at its origin (see `journalView`).
+  const inboundRelay = inboundRelayOf(ctx, from, fromAskId);
+  const relayOf =
+    inboundRelay !== null && inboundRelay.inbound !== null ? inboundRelay.escalation : null;
   // An escalate rises to this instance's summoner — the reactor that issued the delegation it answers.
-  ctx.emit({ kind: "escalate", delegation, escalation, ask }, ctx.instance.callerReactor);
+  ctx.emit(
+    { kind: "escalate", delegation, escalation, ask, ...(relayOf !== null ? { relayOf } : {}) },
+    ctx.instance.callerReactor,
+  );
+}
+
+/**
+ * Where the escaping ask ENTERED this instance: walk the answer routes recorded on the bubble path back down
+ * from `(from, fromAskId)` to the thread that first raised it. Terminating at a delegate / external proxy's
+ * `relays` entry means the ask came in as an escalation this instance is only relaying; terminating anywhere
+ * else (a `request` leaf, a panicking leaf) means user code here raised it — an origin. Read-only and O(the
+ * ask's bubble depth): every route strictly descends the thread tree, so the walk cannot cycle, and every
+ * entry is still present at escape time (a route is dropped only when its answer fires or its thread dies).
+ */
+function inboundRelayOf(
+  ctx: StepContext,
+  from: ThreadId,
+  fromAskId: AskId,
+): EscalationRelay | null {
+  let threadId = from;
+  let askId = fromAskId;
+  for (;;) {
+    const thread = ctx.instance.threads[threadId];
+    if (thread === undefined) return null;
+    if (thread.kind === "delegate" || thread.kind === "external") {
+      const relay = thread.relays[askId];
+      if (relay !== undefined) return relay;
+    }
+    const route = thread.forwardRoutes[askId];
+    if (route === undefined) return null;
+    threadId = route.thread;
+    askId = route.askId;
+  }
 }
 
 /**
@@ -197,12 +240,17 @@ export function resumeEscalation(ctx: StepContext, escalation: EscalationId, val
  * toward a handle / the parent agent), recording the `escalation` on the proxy's `relays` so its answer
  * leaves again as that escalate's `escalateAck` (`(proxy.delegationId, escalation)`). The proxy is a
  * `DelegateThread` (a sub-call's escalation) or an `ExternalThread` (an ffi error's panic).
+ *
+ * `inbound` is the ask's provenance (see `EscalationRelay`): the real inbound event's own `relayOf` when this
+ * is a genuine relay, `null` when the caller synthesized the escalation in-process. The trace reads it to
+ * decide which copies of a payload it may drop, so a caller must never claim a provenance it does not have.
  */
 export function relayEscalate(
   ctx: StepContext,
   proxyId: ThreadId,
   escalation: EscalationId,
   ask: AskKind,
+  inbound: { relayOf: EscalationId | null } | null,
 ): void {
   const proxy = ctx.instance.threads[proxyId];
   if (
@@ -213,7 +261,7 @@ export function relayEscalate(
     return; // the caller was torn down; the escalating child will be terminated independently
   }
   const askId = allocateAskId(ctx.instance);
-  proxy.relays[askId] = escalation;
+  proxy.relays[askId] = { escalation, inbound };
   ctx.enqueue({ kind: "ask", target: proxy.parent, from: proxy.id, askId, ask });
 }
 

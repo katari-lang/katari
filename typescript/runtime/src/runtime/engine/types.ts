@@ -289,6 +289,20 @@ export type ParallelThread = ThreadBase & {
 };
 
 /**
+ * One escalation a proxy is relaying inward: the id its answer leaves under, plus WHERE the relayed ask came
+ * from. `inbound` is non-null only when the entry was recorded from a REAL inbound `escalate` event (the
+ * actor's `onEscalate`), and then carries that event's own `relayOf` — so the engine can tell a hop that
+ * merely re-raises someone else's escalation from one whose ask is this instance's own. A SYNTHESIZED relay
+ * (a conform-failure panic, an ffi error turned into a panic at the proxy) has no inbound event behind it and
+ * records `null`: its ask is an origin, and the trace's elision — which drops a payload it can prove is
+ * journaled elsewhere — must never fire on it.
+ */
+export type EscalationRelay = {
+  escalation: EscalationId;
+  inbound: { relayOf: EscalationId | null } | null;
+};
+
+/**
  * Sender-side waiter for an `OperationDelegate`: it emitted an outbound `delegate` and awaits the
  * `delegateAck`. Always a cross-instance call now (named or closure alike); it has no in-instance
  * child. An inbound `escalate` from the callee is turned into an upward `ask` by the engine.
@@ -303,7 +317,7 @@ export type DelegateThread = ThreadBase & {
    *  under. When that ask is answered, the proxy sends the value back out as the `escalateAck` of
    *  `(delegationId, escalation)`. A delegate proxy has no in-instance children, so its pending answers
    *  live here — the outbound counterpart of every other thread's downward `forwardRoutes`. */
-  relays: Record<number, EscalationId>;
+  relays: Record<number, EscalationRelay>;
 };
 
 /**
@@ -318,7 +332,7 @@ export type DelegateThread = ThreadBase & {
 export type ExternalThread = ThreadBase & {
   kind: "external";
   delegationId: DelegationId;
-  relays: Record<number, EscalationId>;
+  relays: Record<number, EscalationRelay>;
   /** The reactor this proxy's callee runs in — e.g. `ffi` (a sidecar handler) or `http` (the built-in
    *  fetch). Copied from the external block's `reactor` marker at spawn, or from the dynamic dispatch's
    *  resolved routing (the compiler / the tool value guarantee the name), so the proxy's downward legs

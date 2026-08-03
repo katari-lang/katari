@@ -208,13 +208,24 @@ export function dispatchAsk(
 export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, value: Value): void {
   if (thread.status === "cancelling") return; // a late answer for a thread being torn down
   if (thread.kind === "delegate" || thread.kind === "external") {
-    const escalation = thread.relays[askId];
-    if (escalation !== undefined) {
+    const relay = thread.relays[askId];
+    if (relay !== undefined) {
       delete thread.relays[askId];
+      // Mark the ack of a RELAY-hop escalate, so the trace can journal it redacted: its value is a copy of
+      // the ack this instance just received, one hop up. Positively known only when the entry came from a
+      // real inbound event that was itself a relay — the ack of an ORIGIN escalate is the answer its raiser
+      // consumes and keeps its value, and a synthesized entry (no inbound event) never marks at all.
+      const relayed = relay.inbound !== null && relay.inbound.relayOf !== null;
       // The escalateAck descends to this proxy's child — a core sub-call (`delegate`) or an ffi call
       // (`external`); the proxy's own kind names the callee reactor.
       ctx.emit(
-        { kind: "escalateAck", delegation: thread.delegationId, escalation, value },
+        {
+          kind: "escalateAck",
+          delegation: thread.delegationId,
+          escalation: relay.escalation,
+          value,
+          ...(relayed ? { relayed: true } : {}),
+        },
         proxyCalleeReactor(thread),
       );
       return;

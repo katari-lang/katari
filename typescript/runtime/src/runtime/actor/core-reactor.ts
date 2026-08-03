@@ -289,11 +289,19 @@ export class CoreReactor extends Reactor {
       const failure = await this.conformExternalResult(caller, event.value);
       if (failure !== null) {
         await this.runTurnWith(caller, (ctx) =>
-          relayEscalate(ctx, proxy.id, newEscalationId(), {
-            kind: "request",
-            request: PANIC_REQUEST,
-            argument: panicArgument(failure),
-          }),
+          relayEscalate(
+            ctx,
+            proxy.id,
+            newEscalationId(),
+            {
+              kind: "request",
+              request: PANIC_REQUEST,
+              argument: panicArgument(failure),
+            },
+            // Synthesized here, not relayed: no inbound escalate carries this panic, so its escape is an
+            // origin and the trace must journal it in full.
+            null,
+          ),
         );
         return;
       }
@@ -344,7 +352,10 @@ export class CoreReactor extends Reactor {
     const carried = escalateValue(event.ask);
     if (carried !== null) this.reownIncoming(carried, caller.id);
     await this.runTurnWith(caller, (ctx) => {
-      relayEscalate(ctx, proxy.id, event.escalation, event.ask);
+      // The real relay: this ask arrived as an event, so its provenance rides along — including whether the
+      // sender was itself relaying (`relayOf`), which is what tells the trace this hop's copy of the payload
+      // is redundant.
+      relayEscalate(ctx, proxy.id, event.escalation, event.ask, { relayOf: event.relayOf ?? null });
     });
   }
 
