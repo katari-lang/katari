@@ -179,6 +179,19 @@ export function useCancelRun(projectId: string) {
   });
 }
 
+/** Sweep a run's trace. Only the trace queries are invalidated — the sweep touches nothing else about
+ *  the run, and a live run's own poll keeps the rest current. */
+export function useClearRunEvents(projectId: string, runId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.clearRunEvents(projectId, runId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "runs", runId, "events"],
+      }),
+  });
+}
+
 export function useStartOauthFlow(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({

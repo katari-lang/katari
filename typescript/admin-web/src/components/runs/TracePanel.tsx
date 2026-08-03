@@ -5,12 +5,15 @@
 // owns its query state and hides itself entirely for a run that has produced no events and has no active
 // filter, so it stays invisible until there is something to show.
 
-import { ArrowDownWideNarrow, ArrowUpWideNarrow, Search, X } from "lucide-react";
+import { ArrowDownWideNarrow, ArrowUpWideNarrow, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useRunEvents } from "../../api/queries";
+import { useClearRunEvents, useRunEvents } from "../../api/queries";
 import { RUN_EVENT_KINDS, type RunEvent } from "../../api/types";
+import { useToast } from "../../lib/toast";
+import { Button } from "../ui/Button";
 import { Card, CardBody, CardHeader } from "../ui/Card";
 import { CopyButton } from "../ui/Copy";
+import { ConfirmDialog } from "../ui/Dialog";
 import { Input, Select } from "../ui/Field";
 import { Pagination } from "../ui/Pagination";
 import { RunTrace } from "./RunTrace";
@@ -42,6 +45,9 @@ export function TracePanel({
   // a live run's new events then land at the top of page one.
   const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [offset, setOffset] = useState(0);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const clearMutation = useClearRunEvents(projectId, runId);
+  const toast = useToast();
 
   const search = useDebounced(searchInput.trim(), 300);
   const filtersActive = search !== "" || kind !== "";
@@ -76,7 +82,18 @@ export function TracePanel({
       <CardHeader
         title="Trace"
         actions={
-          <CopyButton value={JSON.stringify(events, null, 2)} label="Copy this page as JSON" />
+          <span className="flex items-center gap-1">
+            <CopyButton value={JSON.stringify(events, null, 2)} label="Copy this page as JSON" />
+            <Button
+              size="sm"
+              variant="ghost"
+              title="Clear this run's trace"
+              aria-label="Clear this run's trace"
+              onClick={() => setConfirmingClear(true)}
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          </span>
         }
       />
       <CardBody className="flex flex-col gap-3">
@@ -144,6 +161,26 @@ export function TracePanel({
           </div>
         )}
       </CardBody>
+
+      <ConfirmDialog
+        open={confirmingClear}
+        onClose={() => setConfirmingClear(false)}
+        onConfirm={() =>
+          clearMutation.mutate(undefined, {
+            onSuccess: ({ deleted }) => {
+              setConfirmingClear(false);
+              // The remaining page count is now zero, so the old offset would point past the end.
+              setOffset(0);
+              toast(`Cleared ${deleted} events.`);
+            },
+            onError: (error) => toast(error.message, "error"),
+          })
+        }
+        title="Clear this run's trace?"
+        description="The trace is a record of what the run did, not part of it — clearing frees the space and leaves the run running. Events produced from now on are still journaled."
+        confirmLabel="Clear trace"
+        busy={clearMutation.isPending}
+      />
     </Card>
   );
 }

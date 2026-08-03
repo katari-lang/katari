@@ -79,6 +79,11 @@ type _storeList = Expect<Resp<P["store"]["$get"], StoreEntrySummary[]>>;
 type _credentials = Expect<Resp<P["credentials"]["$get"], { credentials: Credential[] }>>;
 type _oauthClients = Expect<Resp<P["oauth-clients"]["$get"], { clients: OauthClient[] }>>;
 type _oauthClientPut = Expect<Req<OauthClientInput, P["oauth-clients"][":name"]["$put"]>>;
+// The trace SWEEP is asserted even though the trace READ is not: its payload is the swept count beside
+// the run's identity, with no `Json` in it, so the transform that defeats the read resolves here.
+type _runEventsClear = Expect<
+  Resp<P["runs"][":runId"]["events"]["$delete"], { id: string; deleted: number }>
+>;
 
 // Every assertion is referenced here so an unused-type prune can never quietly drop a check.
 export type WireDriftChecks = [
@@ -96,4 +101,5 @@ export type WireDriftChecks = [
   _credentials,
   _oauthClients,
   _oauthClientPut,
+  _runEventsClear,
 ];
