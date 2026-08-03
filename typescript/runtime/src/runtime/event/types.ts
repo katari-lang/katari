@@ -170,6 +170,52 @@ export type ExternalEvent = ExternalEventBody & {
   run: InstanceId;
 };
 
+/** The at-rest form of an event in the `run_events` trace: an `ExternalEvent` whose payload MAY have been
+ *  dropped, marked by `elided`. It is a strict widening of the wire type (the extra field is optional, so a
+ *  journaled row still reads as an `ExternalEvent`) — the wire itself never carries it, because the journal
+ *  is the only place a payload is ever dropped. */
+export type JournalEvent = ExternalEvent & { elided?: true };
+
+/** The copy of an event the JOURNAL stores. An ask that bubbles through N instances unserved is journaled
+ *  at every hop, each copy carrying the same payload; the hops are marked (`relayOf` / `relayed`), so the
+ *  trace can keep exactly one copy — the origin's — and redact the rest. Pure: the wire event it is derived
+ *  from (the same object the outbox holds) is never touched, since the outbox is the actual transport. The
+ *  request name and `relayOf` survive redaction, so the events API's `kind` / `search` filters still match
+ *  an elided row and the chain stays reconstructible back to the payload's one journaled copy. */
+export function journalView(event: ExternalEvent): JournalEvent {
+  switch (event.kind) {
+    case "escalate":
+      return event.relayOf === undefined
+        ? event
+        : { ...event, ask: elidedAsk(event.ask), elided: true };
+    case "escalateAck":
+      return event.relayed === undefined ? event : { ...event, value: NULL_VALUE, elided: true };
+    case "delegate":
+    case "delegateAck":
+    case "terminate":
+    case "terminateAck":
+      return event;
+  }
+}
+
+/** An ask stripped of the payload a relay hop only carries a copy of — its request name / target / kind stay,
+ *  so an elided row is still classifiable and searchable by what was asked. */
+function elidedAsk(ask: AskKind): AskKind {
+  switch (ask.kind) {
+    case "request":
+      return { kind: "request", request: ask.request, argument: NULL_VALUE };
+    case "next":
+    case "next-for":
+      return { ...ask, value: NULL_VALUE };
+    case "return":
+    case "break":
+    case "break-for":
+      return { ...ask, value: NULL_VALUE };
+  }
+}
+
+const NULL_VALUE: Value = { kind: "null" };
+
 /** The snapshot a delegate target is pinned to: the version whose IR a `named` / `closure` runs, or whose
  *  compiled sidecar bundle hosts an `external` handler. Every target carries one. */
 export function agentSnapshot(target: DelegateTarget): SnapshotId {

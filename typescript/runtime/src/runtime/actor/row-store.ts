@@ -19,7 +19,7 @@ import {
 } from "../../db/tables/execution.js";
 import type { InstanceKind } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
-import type { ExternalEvent, ReactorName } from "../event/types.js";
+import { type JournalEvent, journalView, type ReactorName } from "../event/types.js";
 import type { BlobId, DelegationId, EscalationId, InstanceId, OutboxSeq, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type {
@@ -142,7 +142,9 @@ export interface RowStore {
   exclusiveTasks(): Promise<PersistedExclusiveTask[]>;
   deleteOutbox(seq: OutboxSeq): Promise<void>;
   insertOutbox(rows: OutboxMessage[]): Promise<void>;
-  appendJournal(events: ExternalEvent[]): Promise<void>;
+  /** Append the trace rows for the events this turn sent. They are `JournalEvent`s, not the wire events: the
+   *  shared journal path above has already redacted the relay hops' duplicate payloads. */
+  appendJournal(events: JournalEvent[]): Promise<void>;
 
   /** The live delegations issued by `from` (every stored row is live — a terminal one is deleted). */
   delegationsFrom(from: ReactorName): Promise<PersistedDelegation[]>;
@@ -246,8 +248,11 @@ export function storeTx(store: RowStore): PersistenceTx {
         ),
     },
     journal: {
-      // Sealed like the outbox — the journal holds the same events, at rest.
-      appendEvents: (events) => store.appendJournal(events.map((event) => sealForStorage(event))),
+      // Sealed like the outbox — the journal holds the same events, at rest — but redacted first: a relay
+      // hop re-journals a payload the origin's row already holds, so `journalView` drops those copies. Only
+      // this path redacts; `produceOutbox` above keeps every byte, because the outbox IS the transport.
+      appendEvents: (events) =>
+        store.appendJournal(events.map((event) => sealForStorage(journalView(event)))),
     },
   };
 }

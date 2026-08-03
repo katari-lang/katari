@@ -34,7 +34,12 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
-import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/event/types.js";
+import type {
+  DelegateTarget,
+  ExternalEvent,
+  JournalEvent,
+  ReactorName,
+} from "../../runtime/event/types.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
@@ -366,7 +371,10 @@ export const runEvents = pgTable(
     runId: uuid("run_id")
       .notNull()
       .references(() => runs.id, { onDelete: "cascade" }),
-    event: jsonb("event").$type<ExternalEvent>().notNull(),
+    /** The event as the TRACE stores it: the wire event, except that a relay hop's duplicate payload is
+     *  redacted and the row marked `elided` (the payload lives in the origin's row, which `relayOf` names).
+     *  Hence `JournalEvent`, not `ExternalEvent` — the outbox above holds the untouched wire copy. */
+    event: jsonb("event").$type<JournalEvent>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

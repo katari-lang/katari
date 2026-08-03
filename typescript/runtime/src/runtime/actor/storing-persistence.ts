@@ -7,7 +7,7 @@
 // transaction applies each write as it is called; the FK / cascade order is the caller's, as in the DB.
 
 import type { RunState } from "../../db/tables/execution.js";
-import type { ExternalEvent, ReactorName } from "../event/types.js";
+import type { JournalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
   DelegationId,
@@ -91,7 +91,7 @@ class MapRowStore implements RowStore {
    *  diverge from `db-persistence`'s `order by ordinal`. */
   readonly outbox = new Map<OutboxSeq, { ordinal: number; message: OutboxMessage }>();
   private nextOutboxOrdinal = 0;
-  readonly journal: ExternalEvent[] = [];
+  readonly journal: JournalEvent[] = [];
 
   async putInstance(row: PersistedInstanceEnvelope): Promise<void> {
     // Merge only the contract's mutable field into an existing row (see `RowStore.putInstance`), so an
@@ -299,7 +299,7 @@ class MapRowStore implements RowStore {
     this.nextOutboxOrdinal += 1;
   }
 
-  async appendJournal(events: ExternalEvent[]): Promise<void> {
+  async appendJournal(events: JournalEvent[]): Promise<void> {
     this.journal.push(...events);
   }
 
@@ -440,7 +440,7 @@ export class StoringPersistence implements Persistence {
   }
 
   /** Test helper: the journaled trace of one run, in production order (unsealed back to its warm form). */
-  journalFor(run: InstanceId): ExternalEvent[] {
+  journalFor(run: InstanceId): JournalEvent[] {
     return this.store.journal
       .filter((event) => event.run === run)
       .map((event) => unsealFromStorage(event));
