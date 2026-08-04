@@ -2,7 +2,7 @@
   "name": "katari-vscode",
   "displayName": "Katari",
   "description": "Syntax highlighting and language support for the Katari language.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "license": "MIT",
   "publisher": "katari-lang",
