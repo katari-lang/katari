@@ -19,7 +19,7 @@ import {
 } from "../../db/tables/execution.js";
 import type { InstanceKind } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
-import { type JournalEvent, journalView, type ReactorName } from "../event/types.js";
+import { type ExternalEvent, journalView, type ReactorName } from "../event/types.js";
 import type { BlobId, DelegationId, EscalationId, InstanceId, OutboxSeq, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type {
@@ -142,9 +142,9 @@ export interface RowStore {
   exclusiveTasks(): Promise<PersistedExclusiveTask[]>;
   deleteOutbox(seq: OutboxSeq): Promise<void>;
   insertOutbox(rows: OutboxMessage[]): Promise<void>;
-  /** Append the trace rows for the events this turn sent. They are `JournalEvent`s, not the wire events: the
-   *  shared journal path above has already redacted the relay hops' duplicate payloads. */
-  appendJournal(events: JournalEvent[]): Promise<void>;
+  /** Append the trace rows for the events this turn sent. These are the JOURNAL's copies, not the wire
+   *  events: the shared journal path above has already redacted the relay hops' duplicate payloads. */
+  appendJournal(events: ExternalEvent[]): Promise<void>;
 
   /** The live delegations issued by `from` (every stored row is live — a terminal one is deleted). */
   delegationsFrom(from: ReactorName): Promise<PersistedDelegation[]>;

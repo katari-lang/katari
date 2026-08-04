@@ -49,6 +49,13 @@ function TraceRow({
           {timeOf(event.createdAt)}
         </span>
         <Badge tone={KIND_TONES[event.kind]}>{event.kind}</Badge>
+        {/* A relay hop carries a copy of a payload journaled once, at the origin this points at — so the row
+            says its payload was dropped rather than reading as a genuine null. */}
+        {event.elided && (
+          <Badge tone="neutral">
+            {event.relayOf === undefined ? "relay" : `relay of ${shortId(event.relayOf)}`}
+          </Badge>
+        )}
         <span className="font-mono text-xs text-fg">{describe(event, names)}</span>
         <span className="font-mono text-xs text-fg-faint">
           {event.from}→{event.to}

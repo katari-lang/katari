@@ -17,7 +17,7 @@ import { projects } from "../src/db/tables/projects.js";
 import { NotFoundError } from "../src/lib/errors.js";
 import { runEventsRepository } from "../src/modules/run/run-events.repository.js";
 import { runService } from "../src/modules/run/run.service.js";
-import type { JournalEvent } from "../src/runtime/event/types.js";
+import type { ExternalEvent } from "../src/runtime/event/types.js";
 import { type InstanceId, newDelegationId, newInstanceId } from "../src/runtime/ids.js";
 
 const databaseAvailable = await (async () => {
@@ -48,7 +48,7 @@ describe.skipIf(!databaseAvailable)("run trace sweep", () => {
   /** Journal `count` events under a run, the way a turn's commit appends them. */
   async function appendEvents(runId: InstanceId, count: number): Promise<void> {
     const row = () => {
-      const event: JournalEvent = {
+      const event: ExternalEvent = {
         kind: "terminateAck",
         delegation: newDelegationId(),
         from: "core",

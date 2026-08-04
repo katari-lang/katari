@@ -170,31 +170,42 @@ export type ExternalEvent = ExternalEventBody & {
   run: InstanceId;
 };
 
-/** The at-rest form of an event in the `run_events` trace: an `ExternalEvent` whose payload MAY have been
- *  dropped, marked by `elided`. It is a strict widening of the wire type (the extra field is optional, so a
- *  journaled row still reads as an `ExternalEvent`) — the wire itself never carries it, because the journal
- *  is the only place a payload is ever dropped. */
-export type JournalEvent = ExternalEvent & { elided?: true };
-
-/** The copy of an event the JOURNAL stores. An ask that bubbles through N instances unserved is journaled
- *  at every hop, each copy carrying the same payload; the hops are marked (`relayOf` / `relayed`), so the
- *  trace can keep exactly one copy — the origin's — and redact the rest. Pure: the wire event it is derived
- *  from (the same object the outbox holds) is never touched, since the outbox is the actual transport. The
- *  request name and `relayOf` survive redaction, so the events API's `kind` / `search` filters still match
- *  an elided row and the chain stays reconstructible back to the payload's one journaled copy. */
-export function journalView(event: ExternalEvent): JournalEvent {
+/** The copy of an event the JOURNAL stores — an `ExternalEvent` whose payload may have been dropped, which
+ *  is why the journal is the only place this is applied. An ask that bubbles through N instances unserved is
+ *  journaled at every hop, each copy carrying the same payload; the hops are marked (`relayOf` / `relayed`),
+ *  so the trace can keep exactly one copy — the origin's — and redact the rest. Pure: the wire event it is
+ *  derived from (the same object the outbox holds) is never touched, since the outbox is the actual
+ *  transport. The request name and the marks survive redaction, so the events API's `kind` / `search`
+ *  filters still match an elided row, its reader can still say the payload was dropped (`isElided`), and the
+ *  chain stays reconstructible back to the payload's one journaled copy. */
+export function journalView(event: ExternalEvent): ExternalEvent {
   switch (event.kind) {
     case "escalate":
-      return event.relayOf === undefined
-        ? event
-        : { ...event, ask: elidedAsk(event.ask), elided: true };
+      return event.relayOf === undefined ? event : { ...event, ask: elidedAsk(event.ask) };
     case "escalateAck":
-      return event.relayed === undefined ? event : { ...event, value: NULL_VALUE, elided: true };
+      return event.relayed === undefined ? event : { ...event, value: NULL_VALUE };
     case "delegate":
     case "delegateAck":
     case "terminate":
     case "terminateAck":
       return event;
+  }
+}
+
+/** Whether a journaled row's payload was dropped as a duplicate. Derived, never stored: `journalView` elides
+ *  exactly the relay-stamped escalates and the relayed acks, so the marks the row already carries answer it.
+ *  The events API projects this, so a reader can tell an elided payload from a genuine null. */
+export function isElided(event: ExternalEvent): boolean {
+  switch (event.kind) {
+    case "escalate":
+      return event.relayOf !== undefined;
+    case "escalateAck":
+      return event.relayed !== undefined;
+    case "delegate":
+    case "delegateAck":
+    case "terminate":
+    case "terminateAck":
+      return false;
   }
 }
 

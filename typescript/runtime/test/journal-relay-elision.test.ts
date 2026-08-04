@@ -23,7 +23,7 @@ import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import type { Thread } from "../src/runtime/engine/types.js";
-import type { JournalEvent } from "../src/runtime/event/types.js";
+import { type ExternalEvent, isElided } from "../src/runtime/event/types.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import {
   type FfiHandler,
@@ -71,11 +71,11 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
 }
 
 /** The journaled events of one kind, in production order. */
-function eventsOfKind<K extends JournalEvent["kind"]>(
-  events: JournalEvent[],
+function eventsOfKind<K extends ExternalEvent["kind"]>(
+  events: ExternalEvent[],
   kind: K,
-): Array<Extract<JournalEvent, { kind: K }>> {
-  return events.filter((event): event is Extract<JournalEvent, { kind: K }> => event.kind === kind);
+): Array<Extract<ExternalEvent, { kind: K }>> {
+  return events.filter((event): event is Extract<ExternalEvent, { kind: K }> => event.kind === kind);
 }
 
 /**
@@ -190,7 +190,7 @@ describe("journal relay elision — a chain journals one copy of the payload", (
     if (origin === undefined || relay === undefined) throw new Error("journal shape mismatch");
     // The origin: the ask was born in the raiser instance, so this is the one row holding its payload.
     expect(origin.relayOf).toBeUndefined();
-    expect(origin.elided).toBeUndefined();
+    expect(isElided(origin)).toBe(false);
     expect(origin.ask).toEqual({
       kind: "request",
       request: ASK,
@@ -199,7 +199,7 @@ describe("journal relay elision — a chain journals one copy of the payload", (
     // The relay hop: linked to the origin, its duplicate payload dropped, still classifiable as the same
     // request (which is what the events API's `kind` / `search` filters and the console group by).
     expect(relay.relayOf).toBe(origin.escalation);
-    expect(relay.elided).toBe(true);
+    expect(isElided(relay)).toBe(true);
     expect(relay.ask).toEqual({ kind: "request", request: ASK, argument: NULL_VALUE });
 
     const [relayAck, originAck] = acks;
@@ -207,10 +207,10 @@ describe("journal relay elision — a chain journals one copy of the payload", (
     // The answer descends the same path: the deeper hop's ack is a copy and elides, and the one the raiser
     // actually consumes — the origin escalate's — keeps its value.
     expect(relayAck.escalation).toBe(relay.escalation);
-    expect(relayAck.elided).toBe(true);
+    expect(isElided(relayAck)).toBe(true);
     expect(relayAck.value).toEqual(NULL_VALUE);
     expect(originAck.escalation).toBe(origin.escalation);
-    expect(originAck.elided).toBeUndefined();
+    expect(isElided(originAck)).toBe(false);
     expect(originAck.value).toEqual({ kind: "string", value: question });
   });
 });
@@ -358,14 +358,14 @@ describe("journal relay elision — serving a request and re-performing it start
     // Both performs are origins: each carries its own payload, and the re-performed one is NOT linked to the
     // one it answered — it is a different question, so nothing else journals its bytes.
     expect(first.relayOf).toBeUndefined();
-    expect(first.elided).toBeUndefined();
+    expect(isElided(first)).toBe(false);
     expect(first.ask).toEqual({
       kind: "request",
       request: ASK,
       argument: { kind: "record", fields: { question: { kind: "string", value: "original" } } },
     });
     expect(second.relayOf).toBeUndefined();
-    expect(second.elided).toBeUndefined();
+    expect(isElided(second)).toBe(false);
     expect(second.ask).toEqual({
       kind: "request",
       request: ASK,
@@ -373,7 +373,7 @@ describe("journal relay elision — serving a request and re-performing it start
     });
     // Only the hop that carries the twin's payload out of `middle` unchanged is a relay.
     expect(third.relayOf).toBe(second.escalation);
-    expect(third.elided).toBe(true);
+    expect(isElided(third)).toBe(true);
   });
 });
 
@@ -438,7 +438,7 @@ describe("journal relay elision — a synthesized panic is an origin", () => {
     if (origin === undefined) throw new Error("the panic never reached the journal");
     // The synthesized relay is an origin: no link, no elision, and the message is really there.
     expect(origin.relayOf).toBeUndefined();
-    expect(origin.elided).toBeUndefined();
+    expect(isElided(origin)).toBe(false);
     expect(JSON.stringify(origin.ask)).toContain("output schema");
     // Every link the journal does carry resolves to a row in it — the chain is reconstructible end to end,
     // so no elided row points at a payload that was never journaled.
@@ -571,17 +571,30 @@ describe("journal relay elision — an elided row still answers the trace's filt
     const escalates = eventsOfKind(persistence.journalFor(run), "escalate");
     const [origin, relay] = escalates;
     if (origin === undefined || relay === undefined) throw new Error("journal shape mismatch");
-    expect(relay.elided).toBe(true);
+    expect(isElided(relay)).toBe(true);
 
     // The two predicates the events API narrows a trace page with, over the row as stored: `kind` reads
     // `event ->> 'kind'`, and `search` is an ILIKE over the whole event JSON rendered to text. Both still
     // match the elided row, so a reader filtering for this request's escalates keeps seeing every hop.
     expect(relay.kind).toBe("escalate");
     expect(JSON.stringify(relay)).toContain(ASK);
-    // The read-side projection the console groups by is intact too.
+    // The read-side projection the console groups by is intact too, and it SAYS the payload was dropped —
+    // an elided row is distinguishable from one that genuinely carried a null, and names the row that holds
+    // the payload instead.
     const view = projectRunEvent({ seq: 2, event: relay, createdAt: new Date() });
     expect(view.kind).toBe("escalate");
     expect(view.request).toBe(ASK);
+    expect(view.elided).toBe(true);
+    expect(view.relayOf).toBe(origin.escalation);
+    const originView = projectRunEvent({ seq: 1, event: origin, createdAt: new Date() });
+    expect(originView.elided).toBe(false);
+    expect(originView.relayOf).toBeUndefined();
+    // The ack side reads the same: the deeper hop's answer says it is the relayed copy.
+    const relayAck = eventsOfKind(persistence.journalFor(run), "escalateAck")[0];
+    if (relayAck === undefined) throw new Error("journal shape mismatch");
+    const ackView = projectRunEvent({ seq: 3, event: relayAck, createdAt: new Date() });
+    expect(ackView.relayed).toBe(true);
+    expect(ackView.elided).toBe(true);
     // And the point of the whole change: the duplicated payload is gone from the relay row, while the origin
     // row — the one place it is journaled — still holds it.
     expect(JSON.stringify(relay)).not.toContain(question);

@@ -181,6 +181,12 @@ export interface RunEvent {
   ask: string | null;
   request: string | null;
   payload: Json;
+  /** The escalation this one re-raises verbatim — the hop whose row journals the shared payload. */
+  relayOf?: string;
+  /** Set when this ack answers such a hop. */
+  relayed?: true;
+  /** Whether `payload` was dropped as a duplicate of the row `relayOf` names, rather than genuinely null. */
+  elided: boolean;
   summary: string;
   createdAt: string;
 }

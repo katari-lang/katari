@@ -15,6 +15,7 @@ import {
   type DelegateTarget,
   type ExternalEvent,
   escalateValue,
+  isElided,
   type ReactorName,
 } from "../../runtime/event/types.js";
 import { valueToJson } from "../../runtime/value/codec.js";
@@ -42,6 +43,15 @@ export interface RunEventView {
   ask: string | null;
   request: string | null;
   payload: Json | null;
+  /** The inbound escalation this `escalate` re-raises verbatim — a relay hop, whose payload is journaled at
+   *  the origin this names. Absent on an origin (and on every other kind). */
+  relayOf?: string;
+  /** Set when this `escalateAck` answers a relay hop; the value the raiser consumes is journaled by the
+   *  origin escalate's ack, one hop down. */
+  relayed?: true;
+  /** Whether this row's `payload` was dropped as a duplicate — so a reader tells an elided payload from a
+   *  genuine null, and knows to follow `relayOf` to the copy. */
+  elided: boolean;
   summary: string;
   createdAt: Date;
 }
@@ -63,6 +73,12 @@ export function projectRunEvent(row: RunEventRow): RunEventView {
     ask: event.kind === "escalate" ? event.ask.kind : null,
     request: event.kind === "escalate" && event.ask.kind === "request" ? event.ask.request : null,
     payload: carried === null ? null : valueToJson(carried, "redact"),
+    // The relay marks the journal keeps, so a reader can walk an elided row to the hop that owns its payload.
+    ...(event.kind === "escalate" && event.relayOf !== undefined ? { relayOf: event.relayOf } : {}),
+    ...(event.kind === "escalateAck" && event.relayed !== undefined
+      ? { relayed: event.relayed }
+      : {}),
+    elided: isElided(event),
     summary: summarize(event),
     createdAt: row.createdAt,
   };
