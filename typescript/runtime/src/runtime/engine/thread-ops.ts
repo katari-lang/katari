@@ -211,10 +211,12 @@ export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, v
     const relay = thread.relays[askId];
     if (relay !== undefined) {
       delete thread.relays[askId];
-      // Mark the ack of a RELAY-hop escalate, so the trace can journal it redacted: its value is a copy of
-      // the ack this instance just received, one hop up. Positively known only when the entry came from a
-      // real inbound event that was itself a relay — the ack of an ORIGIN escalate is the answer its raiser
-      // consumes and keeps its value, and a synthesized entry (no inbound event) never marks at all.
+      // Mark the ack of a RELAY-hop escalate, so the trace can journal it redacted: the same value keeps
+      // descending from here — the child re-emits it as the ack of the escalate IT re-raised — down to the
+      // ORIGIN escalate's ack, which keeps the value. That surviving copy is written in this batch commit or
+      // a later one, never earlier. Positively known only when the entry came from a real inbound event that
+      // was itself a relay — the ack of an ORIGIN escalate is the answer its raiser consumes and keeps its
+      // value, and a synthesized entry (no inbound event) never marks at all.
       const relayed = relay.inbound !== null && relay.inbound.relayOf !== null;
       // The escalateAck descends to this proxy's child — a core sub-call (`delegate`) or an ffi call
       // (`external`); the proxy's own kind names the callee reactor.

@@ -147,9 +147,11 @@ export type ExternalEventBody =
       delegation: DelegationId;
       escalation: EscalationId;
       value: Value;
-      /** Set when this ack answers a RELAY-hop escalate (one carrying `relayOf`): its value is a copy of the
-       *  ack one hop up the chain, which the journal already holds. The ack of an origin escalate — the answer
-       *  the raiser actually consumes — never carries it. */
+      /** Set when this ack answers a RELAY-hop escalate (one carrying `relayOf`): the same value is emitted
+       *  again one hop DOWN — as the ack of the escalate that hop re-raised — and descends that way to the
+       *  ORIGIN escalate's ack, the copy the journal keeps in full. That copy is written in the same batch
+       *  commit as this row or a later one (an outbox replay carries it across a crash), never before it. The
+       *  ack of an origin escalate — the answer the raiser actually consumes — never carries this. */
       relayed?: true;
     };
 
