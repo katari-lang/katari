@@ -22,6 +22,7 @@ import { projectRunEvent } from "../src/modules/run/run-events.repository.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import type { Thread } from "../src/runtime/engine/types.js";
 import type { JournalEvent } from "../src/runtime/event/types.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import {
@@ -58,6 +59,15 @@ function makeActor(
     http: new StubHttpTransport(),
     persistence,
   });
+}
+
+async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const value = predicate();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("waitUntil: predicate never held");
 }
 
 /** The journaled events of one kind, in production order. */
@@ -435,6 +445,117 @@ describe("journal relay elision — a synthesized panic is an origin", () => {
     const ids = new Set(escalates.map((event) => event.escalation));
     for (const event of escalates) {
       if (event.relayOf !== undefined) expect(ids.has(event.relayOf)).toBe(true);
+    }
+  });
+});
+
+describe("journal relay elision — state persisted before the elision still resumes", () => {
+  test("a v0.1.6 relays entry (a bare escalation id) loads, answers, and journals its ack in full", async () => {
+    // The elision gave a proxy's `relays` entry the ask's provenance, so the entry stopped being the bare
+    // escalation id it was in v0.1.6. A runtime upgraded while asks were in flight reads those old entries
+    // back, and before the codec normalized them the first ack of such an escalation read `inbound` off a
+    // string — a TypeError the substrate classifies as a deterministic bug, failing the resumed run.
+    // main → middle → raiser, with NOBODY handling `ask_value`: the ask reaches the run root and the run
+    // suspends there with two proxy relays entries persisted, which is the state this test downgrades.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 11,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 10 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("middle") },
+                argument: 10,
+                output: 11,
+              },
+            ],
+          },
+          parameters: { parameter: 19 },
+        },
+        2: { block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 31,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 30 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("raiser") },
+                argument: 30,
+                output: 31,
+              },
+            ],
+          },
+          parameters: { parameter: 39 },
+        },
+        4: { block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        5: { block: { kind: "request", name: ASK, input: 50 }, parameters: { parameter: 50 } },
+      },
+      entries: {
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("middle")]: { block: 2, private: false },
+        [createAgentName("raiser")]: { block: 4, private: false },
+      },
+      names: {},
+    };
+
+    const persistence = new StoringPersistence();
+    const suspended = makeActor(ir, persistence);
+    const { run } = suspended.startRun(createAgentName("main"), SNAPSHOT, null);
+    await waitUntil(() => (suspended.listOpenEscalations().length > 0 ? true : undefined));
+
+    // Rewrite every persisted proxy's relays entries into the v0.1.6 shape — the bare escalation id, with no
+    // provenance beside it — which today's types no longer describe (hence the one cast).
+    const downgraded: string[] = [];
+    persistence.rewriteThreadPayloads((payload) => {
+      if (payload.kind !== "delegate" && payload.kind !== "external") return payload;
+      const relays: Record<number, string> = {};
+      for (const key of Object.keys(payload.relays)) {
+        const relay = payload.relays[Number(key)];
+        if (relay === undefined) continue;
+        downgraded.push(relay.escalation);
+        relays[Number(key)] = relay.escalation;
+      }
+      return { ...payload, relays } as unknown as Thread;
+    });
+    expect(downgraded.length).toBeGreaterThan(0);
+
+    // A fresh actor over those rows: the load widens each bare entry, and answering drives an ack through
+    // every one of them.
+    const recovered = makeActor(ir, persistence);
+    await recovered.activate();
+    const open = await waitUntil(() => {
+      const list = recovered.listOpenEscalations();
+      return list.length > 0 ? list : undefined;
+    });
+    const escalation = open[0]?.escalation;
+    if (escalation === undefined) throw new Error("no recovered open escalation");
+    await recovered.answerEscalation(escalation, { kind: "integer", value: 42 });
+
+    // The run finishes on the answer rather than failing on the ack (`errorMessage` names the crash if it
+    // ever comes back).
+    const record = await waitUntil(() => {
+      const row = persistence.peekRun(run);
+      return row === undefined || row.state === "running" ? undefined : row;
+    });
+    expect(record.errorMessage).toBeNull();
+    expect(record.state).toBe("done");
+    expect(record.result).toEqual({ kind: "integer", value: 42 });
+
+    // Each downgraded entry answered under the bare id the old row held, and journaled its value in full: a
+    // normalized entry reads as a synthesized origin, so elision — which must be positively known — stays off.
+    const acks = eventsOfKind(persistence.journalFor(run), "escalateAck");
+    for (const id of downgraded) {
+      const ack = acks.find((event) => event.escalation === id);
+      if (ack === undefined) throw new Error(`no escalateAck for the relayed escalation ${id}`);
+      expect(ack.relayed).toBeUndefined();
+      expect(ack.value).toEqual({ kind: "integer", value: 42 });
     }
   });
 });

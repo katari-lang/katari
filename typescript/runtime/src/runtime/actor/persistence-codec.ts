@@ -11,6 +11,7 @@ import type {
   BlobEntry,
   CoreInstance,
   EngineState,
+  EscalationRelay,
   InstanceKind,
   InstanceStatus,
   ProjectStore,
@@ -21,6 +22,7 @@ import { agentSnapshot, type DelegateTarget, type ReactorName } from "../event/t
 import {
   type BlobId,
   type DelegationId,
+  type EscalationId,
   type InstanceId,
   type ProjectId,
   type SnapshotId,
@@ -202,6 +204,29 @@ export function engineStateOf(instance: CoreInstance): EngineState {
   };
 }
 
+/** The one v0.1.6 → v0.1.7 durable-state seam. A proxy's `relays` entry was the bare `EscalationId` its
+ *  answer leaves under until the trace's elision gave it the ask's provenance too (`EscalationRelay`), and
+ *  state persisted by v0.1.6 still holds the old shape — which the engine would read an `inbound` off at the
+ *  first ack of an escalation in flight across the upgrade, killing the resumed run. So a bare entry is
+ *  widened HERE, where a row becomes a warm thread, and nowhere downstream. `inbound: null` is the fail-safe
+ *  reading (a synthesized origin): a normalized entry at worst journals one extra full copy of a payload,
+ *  never elides the only one. Delete this once no pre-elision state can exist. */
+function normalizeThreadPayload(payload: Thread): Thread {
+  if (payload.kind !== "delegate" && payload.kind !== "external") return payload;
+  const relays: Record<number, EscalationRelay> = {};
+  for (const key of Object.keys(payload.relays)) {
+    const askId = Number(key);
+    const entry = payload.relays[askId];
+    if (entry === undefined) continue;
+    // The column's type claims today's shape; a row written by v0.1.6 does not honour it, so what a bare
+    // entry holds is read untyped and re-branded after the check (the at-rest decode idiom).
+    const stored: unknown = entry;
+    relays[askId] =
+      typeof stored === "string" ? { escalation: stored as EscalationId, inbound: null } : entry;
+  }
+  return { ...payload, relays };
+}
+
 /** Reconstruct a project's warm engine state from its persisted rows. The instance `argument` is not
  *  restored — by the turn boundary the root agent has already consumed it (it lives in the body scope). */
 export function deserializeProject(
@@ -213,7 +238,7 @@ export function deserializeProject(
   const threadsByInstance = new Map<InstanceId, Record<number, Thread>>();
   for (const row of threads) {
     const tree = threadsByInstance.get(row.instanceId) ?? {};
-    tree[row.threadId] = row.payload;
+    tree[row.threadId] = normalizeThreadPayload(row.payload);
     threadsByInstance.set(row.instanceId, tree);
   }
 

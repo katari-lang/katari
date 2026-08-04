@@ -7,6 +7,7 @@
 // transaction applies each write as it is called; the FK / cascade order is the caller's, as in the DB.
 
 import type { RunState } from "../../db/tables/execution.js";
+import type { Thread } from "../engine/types.js";
 import type { JournalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
@@ -437,6 +438,15 @@ export class StoringPersistence implements Persistence {
    *  (each completed iteration's scope must be reclaimed, not parked). */
   scopeCount(): number {
     return this.store.scopeRows.size;
+  }
+
+  /** Test helper: rewrite every persisted thread payload in place. The one way a test can stage durable
+   *  state in a SHAPE THIS RUNTIME NO LONGER WRITES — a row left by an older version — which is what the
+   *  codec's load-time normalization has to survive. */
+  rewriteThreadPayloads(rewrite: (payload: Thread) => Thread): void {
+    for (const rows of this.store.threadRows.values()) {
+      for (const row of rows) row.payload = rewrite(row.payload);
+    }
   }
 
   /** Test helper: the journaled trace of one run, in production order (unsealed back to its warm form). */
