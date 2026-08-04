@@ -9,7 +9,7 @@
 // vouch for) and skip when no database is reachable — the suite must stay green on a bare CI runner.
 
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { closeDb, db } from "../src/db/client.js";
 import { instances, runEvents, runs } from "../src/db/tables/execution.js";
@@ -34,6 +34,8 @@ afterAll(() => closeDb());
 
 describe.skipIf(!databaseAvailable)("run trace sweep", () => {
   const projectId = randomUUID();
+  /** A second project, so "the wrong project" is a real neighbour rather than an id that exists nowhere. */
+  const otherProjectId = randomUUID();
 
   /** A run is its permanent api-side instance, so a run row needs that instance row first. */
   async function createRun(): Promise<InstanceId> {
@@ -73,12 +75,15 @@ describe.skipIf(!databaseAvailable)("run trace sweep", () => {
   }
 
   beforeAll(async () => {
-    // A throwaway project row for the FK chain; the afterAll delete cascades everything below it away.
-    await db.insert(projects).values({ id: projectId, name: `run-events-clear-test-${projectId}` });
+    // Throwaway project rows for the FK chain; the afterAll delete cascades everything below them away.
+    await db.insert(projects).values([
+      { id: projectId, name: `run-events-clear-test-${projectId}` },
+      { id: otherProjectId, name: `run-events-clear-test-${otherProjectId}` },
+    ]);
   });
 
   afterAll(async () => {
-    await db.delete(projects).where(eq(projects.id, projectId));
+    await db.delete(projects).where(inArray(projects.id, [projectId, otherProjectId]));
   });
 
   test("the sweep takes the target run's whole journal and no other run's", async () => {
@@ -123,6 +128,18 @@ describe.skipIf(!databaseAvailable)("run trace sweep", () => {
     await expect(runService.clearEvents(projectId, randomUUID())).rejects.toBeInstanceOf(
       NotFoundError,
     );
+  });
+
+  test("a run addressed under the wrong project is not found, and keeps its trace", async () => {
+    const runId = await createRun();
+    await appendEvents(runId, 3);
+
+    // The run id is real, so nothing but the project scoping stands between a caller and another
+    // project's trace: the service resolves the run within the project it was asked for and refuses…
+    await expect(runService.clearEvents(otherProjectId, runId)).rejects.toBeInstanceOf(NotFoundError);
+    // …and the delete underneath is scoped the same way, so even reached directly it takes nothing.
+    await expect(runEventsRepository.clear(db, otherProjectId, runId)).resolves.toBe(0);
+    expect(await journalSize(runId)).toBe(3);
   });
 
   test("the service sweeps the run it resolved, leaving the run itself alive", async () => {

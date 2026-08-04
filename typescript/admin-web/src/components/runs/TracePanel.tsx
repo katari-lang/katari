@@ -177,7 +177,7 @@ export function TracePanel({
           })
         }
         title="Clear this run's trace?"
-        description="The trace is a record of what the run did, not part of it — clearing frees the space and leaves the run running. Events produced from now on are still journaled."
+        description="The trace is a record of what the run did, not part of it — clearing it stops the journal growing and leaves the run running. Events produced from now on are still journaled, reusing the cleared rows' space."
         confirmLabel="Clear trace"
         busy={clearMutation.isPending}
       />

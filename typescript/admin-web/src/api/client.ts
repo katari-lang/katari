@@ -160,7 +160,8 @@ export const api = {
     } = {},
   ) => get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${querySuffix(options)}`),
   /** Sweep a run's whole trace, answering with how many events went. Allowed on a live run — a resident
-   *  run never ends, so reclaiming its journal in place is the only way to reclaim it at all. */
+   *  run never ends, so sweeping its journal in place is the only way to stop the table growing on its
+   *  account (the events it goes on producing reuse the swept rows' space). */
   clearRunEvents: (projectId: string, runId: string) =>
     requestJson<{ id: string; deleted: number }>(
       "DELETE",

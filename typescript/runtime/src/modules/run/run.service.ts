@@ -95,9 +95,10 @@ export const runService = {
 
   /** Sweep a run's execution trace, returning how many journal rows went. Allowed while the run is still
    *  RUNNING, which is the whole point: a resident run (`-> never`) has no terminal moment at which its
-   *  trace becomes reclaimable, so the only way to reclaim it is in place. Safe because the journal is
-   *  observation-only — the engine never reads it back, and `seq` is a bigserial, so the appends that
-   *  follow stay monotonic and an open tail's `after=` cursor simply sees a gap. */
+   *  trace would be dropped for it, so the only way to stop the table growing on its account is to sweep
+   *  in place (the rows the appends that follow write reuse the swept ones' space). Safe because the
+   *  journal is observation-only — the engine never reads it back, and `seq` is a bigserial, so the
+   *  appends that follow stay monotonic and an open tail's `after=` cursor simply sees a gap. */
   async clearEvents(projectId: string, runId: string): Promise<number> {
     const view = await runRepository.get(db, projectId, runId);
     if (view === undefined) {

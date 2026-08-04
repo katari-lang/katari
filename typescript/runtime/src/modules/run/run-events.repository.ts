@@ -237,10 +237,12 @@ export const runEventsRepository = {
   },
 
   /** Sweep a run's whole trace, reporting how many rows went. The journal is observation-only — nothing
-   *  in the engine ever reads it back — so this reclaims the space of a run that keeps producing events
-   *  without touching its execution. Deliberately unfiltered: the trace of a resident run is reclaimed
-   *  wholesale or not at all, and the count (not the rows) is what comes back, since the sweep this
-   *  exists for spans gigabytes that must never be materialised to be counted. */
+   *  in the engine ever reads it back — so a run that keeps producing events can drop it without touching
+   *  its execution. What that buys is that the table stops GROWING: a Postgres delete marks the tuples
+   *  dead, and once autovacuum returns their pages to the free space map the subsequent appends reuse
+   *  them, rather than any space going back to the OS. Deliberately unfiltered: the trace of a resident run
+   *  is swept wholesale or not at all, and the count (not the rows) is what comes back, since the sweep
+   *  this exists for spans gigabytes that must never be materialised to be counted. */
   async clear(executor: Executor, projectId: string, runId: string): Promise<number> {
     const result = await executor
       .delete(runEvents)
