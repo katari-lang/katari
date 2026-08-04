@@ -50,8 +50,11 @@ unaffected.
 
 - `escalate` gains `relayOf?: EscalationId` — the inbound escalation this event re-raises, absent on
   an origin.
-- `escalateAck` gains `relayed?: true` — set when this ack answers a relay-hop escalate (its value
-  is a copy of the ack one hop up the chain).
+- `escalateAck` gains `relayed?: true` — set when this ack answers a relay-hop escalate. The same
+  value is emitted again one hop DOWN, as the ack of the escalate that hop re-raised, and descends
+  that way to the ORIGIN escalate's ack — the copy the journal keeps in full. That copy is written in
+  the same batch commit as the elided row or a later one (an outbox replay carries it across a
+  crash), never before it.
 
 ### 2. Engine
 
@@ -70,26 +73,45 @@ unaffected.
   every deeper hop's ack is the copy and elides. A synthesized entry (`inbound: null`) never marks —
   elision must be positively known, or the only journaled copy of a payload is lost.
 
+The `relays` entry's shape changed INSIDE the persisted thread JSON (`threads.payload`), which is not
+a schema change but is durable state: v0.1.6 persisted the bare `EscalationId`. The codec normalizes
+that shape on read (`deserializeProject`, persistence-codec.ts), widening a bare entry to
+`{ escalation, inbound: null }` — a synthesized origin, so a normalized entry journals a full copy
+rather than eliding one. It is the one v0.1.6 → v0.1.7 seam, deletable once no pre-elision state can
+exist.
+
 ### 3. Journal view (`actor/row-store.ts:250`)
 
 A pure `journalView(event): ExternalEvent` applied before `sealForStorage` in `journal.appendEvents`
 only — `produceOutbox` is untouched:
 
 - escalate with `relayOf` → replace the ask's payload (`argument` for a request, `value` for a
-  control escape) with the null value, keep `ask.kind` and the request name, add `elided: true`.
-- escalateAck with `relayed` → replace `value` with the null value, add `elided: true`.
+  control escape) with the null value, keep `ask.kind` and the request name.
+- escalateAck with `relayed` → replace `value` with the null value.
 
 The request name survives so the events API `kind` / `search` filters and the console's per-request
-grouping keep working on elided rows; `relayOf` survives so the chain is reconstructible end to end.
-Nothing is lost that existed only once: every payload is journaled exactly once, at its origin.
+grouping keep working on elided rows; `relayOf` / `relayed` survive so the chain is reconstructible
+end to end. Nothing is lost that existed only once: every payload is journaled exactly once, at its
+origin. No `elided` marker is stored: the row's own marks decide it (`isElided`), and the reader
+derives it.
 
 ### 4. Events API / console
 
-No schema change — the event JSON gains fields. The console may later render an elided row as a
-link to its origin; not required for this change to land.
+No schema change — the event JSON gains fields. The API projects `relayOf` / `relayed` and the
+derived `elided`, so a reader tells a dropped payload from a genuine null and can walk a relay row to
+the hop that holds the payload; the console labels such a row with the escalation it points at.
 
 ## Not in scope (follow-ups, separate tasks)
 
+- Relay hops through an EXTERNAL-call reactor (the region nursery, mcp, ffi, webhook):
+  `relayAskUnder` (external-call-reactor.ts) re-raises a child's ask verbatim under a fresh
+  escalation id without stamping `relayOf`, so those hops still journal the full payload. That is the
+  fail-safe direction, and the chain stays sound — the full copy is exactly what the next core hop's
+  `relayOf` points at. Extending elision to them is a follow-up.
+- The per-hop duplication in the durable `escalations.argument` rows (reactor.ts: every escalate opens
+  a raiser-owned row carrying the ask's argument). Transient and bounded by the hops in flight — each
+  row is deleted when its escalation is answered — so it is not a leak, and it is a separate table
+  from the trace.
 - Trimming ORIGIN payloads (lossy; only worth revisiting if origins alone still dominate).
 - Retention for never-ending runs (`run_events` rows currently live as long as the run; a resident
   run never ends).
@@ -100,6 +122,10 @@ link to its origin; not required for this change to land.
 
 Per logical model step: ~3 full escalates (~1 MB) + ~170 elided rows (~100 KB) instead of ~29 MB.
 Trace growth ~2.2 GB/day → ~100 MB/day logical before Postgres compression.
+
+Elision fires on core-instance hops; a hop through an external-call reactor (above) still journals in
+full, so the figures are an upper bound on the saving. The share depends on how many of a program's
+86 hops cross a region / mcp / ffi / webhook boundary rather than a plain delegation.
 
 ## Tests
 
@@ -113,4 +139,7 @@ Trace growth ~2.2 GB/day → ~100 MB/day logical before Postgres compression.
 3. **Synthesized panic stays origin**: a conform-failure (or ffi error) panic relays through a proxy
    with no inbound event; its escalate journals full with no dangling `relayOf`.
 4. **Filters over elided rows**: the events API `kind=escalate` + `search=<request name>` still
-   match an elided row.
+   match an elided row, and its projection says the payload was dropped (`elided`, `relayOf`).
+5. **The v0.1.6 durable shape**: a suspended run whose persisted relays entries are rewritten to the
+   bare escalation id resumes in a fresh actor — the answer descends every one of them, each ack
+   journaled in full (a normalized entry reads as an origin).
