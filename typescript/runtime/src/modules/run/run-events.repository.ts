@@ -159,12 +159,14 @@ function shortId(id: string): string {
  *  only the pager needs. */
 export type TraceCursor = { mode: "tail"; after: number } | { mode: "browse"; offset: number };
 
-/** The cursor-independent half of a trace query: `kind` / `search` narrow the set, `order` is the seq
- *  direction (default oldest-first), `limit` bounds the page. */
+/** The cursor-independent half of a trace query: `kind` / `search` / `elided` narrow the set, `order` is
+ *  the seq direction (default oldest-first), `limit` bounds the page. */
 export interface TraceFilter {
   limit: number;
   kind?: ExternalEvent["kind"];
   search?: string;
+  /** Keep only the relay copies (`true`) or only the origins (`false`); both when absent. */
+  elided?: boolean;
   order?: "asc" | "desc";
 }
 
@@ -173,9 +175,9 @@ export interface RunEventsPage {
   total: number;
 }
 
-/** The `kind` / `search` predicates shared by the page query and the count — everything but the paging
- *  cursor. `search` is a case-insensitive substring over the event JSON rendered to text: it matches the
- *  ids, reactor names, delegate targets, request names, and any public payload text, but never a sealed
+/** The `kind` / `search` / `elided` predicates shared by the page query and the count — everything but the
+ *  paging cursor. `search` is a case-insensitive substring over the event JSON rendered to text: it matches
+ *  the ids, reactor names, delegate targets, request names, and any public payload text, but never a sealed
  *  private value (which is opaque ciphertext at rest). */
 function filterConditions(projectId: string, runId: string, filter: TraceFilter): SQL[] {
   const conditions: SQL[] = [eq(runEvents.projectId, projectId), eq(runEvents.runId, runId)];
@@ -184,6 +186,12 @@ function filterConditions(projectId: string, runId: string, filter: TraceFilter)
   }
   if (filter.search !== undefined) {
     conditions.push(sql`${runEvents.event}::text ILIKE ${`%${escapeLike(filter.search)}%`}`);
+  }
+  if (filter.elided !== undefined) {
+    // The SQL half of `isElided`. Each relay mark rides on exactly one event kind — `relayOf` on an
+    // escalate, `relayed` on its ack — so the presence of either decides the row without re-testing kind.
+    const marked = sql`(${runEvents.event} ->> 'relayOf' IS NOT NULL OR ${runEvents.event} ->> 'relayed' IS NOT NULL)`;
+    conditions.push(filter.elided ? marked : sql`NOT ${marked}`);
   }
   return conditions;
 }

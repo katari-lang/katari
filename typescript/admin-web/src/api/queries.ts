@@ -79,6 +79,7 @@ export function useRunEvents(
     limit?: number;
     kind?: RunEvent["kind"];
     search?: string;
+    elided?: boolean;
     order?: "asc" | "desc";
   },
   live: boolean,

@@ -16,7 +16,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations, oauthTargetDescription, runStateLabel)
+import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), getRunDetail, listAllRunEvents, listEscalations, oauthTargetDescription, runStateLabel)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -34,10 +34,11 @@ data Options = Options
   deriving stock (Show)
 
 -- | Which slice of the run's trace to render — decided once at the option parser, so the renderer
--- dispatches on a real sum instead of re-deriving an "am I filtering" flag from raw options.
+-- dispatches on a real sum instead of re-deriving an "am I filtering" flag from raw options. Both
+-- variants carry the server-side query, since @--relays@ widens either of them.
 data TraceSelection
-  = -- | No filter: the newest tail of the whole trace (enough to see how a run ended).
-    WholeTailView
+  = -- | No search / kind filter: the newest tail of the trace (enough to see how a run ended).
+    WholeTailView RunEventsQuery
   | -- | A @--search@ / @--kind@ filter: every matching event, oldest first — a focused debugger view
     -- where truncating to a tail would hide the events searched for.
     MatchesView RunEventsQuery
@@ -75,10 +76,16 @@ traceSelectionParser =
               <> help "Show only trace events of KIND (delegate | delegateAck | escalate | escalateAck | terminate | terminateAck)"
           )
       )
+    <*> switch
+      ( long "relays"
+          <> help "Include the relay copies an ask leaves at every instance it crosses (the trace shows one row per escalation by default — the hop that owns its payload)"
+      )
   where
-    buildSelection search kind = case (search, kind) of
-      (Nothing, Nothing) -> WholeTailView
-      _ -> MatchesView RunEventsQuery {search = search, kind = kind}
+    buildSelection search kind relays =
+      let query = RunEventsQuery {search = search, kind = kind, elided = if relays then Nothing else Just False}
+       in case (search, kind) of
+            (Nothing, Nothing) -> WholeTailView query
+            _ -> MatchesView query
 
 run :: Options -> IO ()
 run options = do
@@ -112,8 +119,8 @@ renderWaiting escalation = case escalation.presentation of
 -- the status screen — rendered per 'TraceSelection' (the full trace is one `GET .../events` away).
 renderTrace :: RuntimeContext -> Text -> TraceSelection -> IO ()
 renderTrace context target selection = case selection of
-  WholeTailView -> do
-    (_, events) <- listAllRunEvents context.client context.projectId target emptyRunEventsQuery
+  WholeTailView query -> do
+    (_, events) <- listAllRunEvents context.client context.projectId target query
     unless (null events) $ do
       let shown = drop (length events - traceTailLength) events
           earlierCount = length events - length shown

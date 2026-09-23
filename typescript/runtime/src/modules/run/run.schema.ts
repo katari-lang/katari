@@ -46,6 +46,9 @@ export const runEventKinds = [
  *     `total` for the page math. `after` wins if both are given.
  *  `kind` filters to one event kind; `search` is a case-insensitive substring over the whole event
  *  (its ids, targets, request names, and any public payload text — sealed private values never match).
+ *  `elided` narrows to the relay copies (`true`) or to the origins (`false`) — a bubbling ask journals one
+ *  row per instance it crosses and only the origin's carries the payload, so `elided=false` is how a reader
+ *  sees one row per logical escalation instead of the whole hop chain. Omitted, the page holds both.
  *  `order` is the seq direction (default `asc`, oldest first; the console defaults to `desc`). */
 export const listRunEventsQuerySchema = z.object({
   after: z.coerce.number().int().nonnegative().optional(),
@@ -53,6 +56,7 @@ export const listRunEventsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(1000).optional(),
   kind: z.enum(runEventKinds).optional(),
   search: z.string().trim().min(1).max(200).optional(),
+  elided: z.stringbool().optional(),
   order: z.enum(["asc", "desc"]).optional(),
 });
 export type ListRunEventsQuery = z.infer<typeof listRunEventsQuerySchema>;

@@ -101,8 +101,8 @@ async function getPage<T>(path: string): Promise<Page<T>> {
   return { items, total };
 }
 
-/** Build a `?a=1&b=2` suffix from defined params (numbers stringified), or "" when none are set. */
-function querySuffix(params: Record<string, string | number | undefined>): string {
+/** Build a `?a=1&b=2` suffix from defined params (numbers / booleans stringified), or "" when none are set. */
+function querySuffix(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) query.set(key, String(value));
@@ -147,6 +147,8 @@ export const api = {
     get<RunEscalationAudit[]>(`/projects/${projectId}/runs/${runId}/escalations`),
   getRunTree: (projectId: string, runId: string) =>
     get<RunTree>(`/projects/${projectId}/runs/${runId}/tree`),
+  /** `elided` narrows the page to the relay copies (`true`) or to the origins (`false`) — one row per
+   *  logical escalation instead of one per instance the ask crossed. Omitted, the page holds both. */
   listRunEvents: (
     projectId: string,
     runId: string,
@@ -156,6 +158,7 @@ export const api = {
       limit?: number;
       kind?: RunEvent["kind"];
       search?: string;
+      elided?: boolean;
       order?: "asc" | "desc";
     } = {},
   ) => get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${querySuffix(options)}`),

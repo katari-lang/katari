@@ -101,6 +101,23 @@ No schema change — the event JSON gains fields. The API projects `relayOf` / `
 derived `elided`, so a reader tells a dropped payload from a genuine null and can walk a relay row to
 the hop that holds the payload; the console labels such a row with the escalation it points at.
 
+### 5. Reading the trace (the row count, not the bytes)
+
+Elision drops the payloads, not the rows: a logical model step still journals its ~170 hops, now at
+~100 KB instead of ~29 MB. That is the right cut for the table and the wrong one for a reader, who
+wants one row per escalation and gets the same one restated per instance it crossed.
+
+`GET .../events` takes `elided` (`stringbool`): `false` keeps the origins, `true` keeps the copies,
+omitted keeps both — the endpoint's previous meaning. It is a SQL predicate over the two marks the
+row already carries (`run-events.repository.ts`, the second encoding of `isElided`), so it composes
+with `kind` / `search` and narrows the `total` the pager reads. The relay rows are a deliberate read
+— following one escalation down its chain — so both display surfaces open on the origins:
+
+- console: the Trace card opens origins-only, with an "Origins only / Every hop" toggle beside the
+  order toggle. The relay rows keep the `relay of <id>` badge that names the hop holding the payload.
+- CLI: the `run` watcher's live lines and `status`'s tail are origins-only; `status --relays` widens
+  either view (it applies to a `--search` / `--kind` page as well as the plain tail).
+
 ## Not in scope (follow-ups, separate tasks)
 
 - Relay hops through an EXTERNAL-call reactor (the region nursery, mcp, ffi, webhook):

@@ -4,8 +4,21 @@
 // targets, request names, and any public payload text; sealed private values never match). The panel
 // owns its query state and hides itself entirely for a run that has produced no events and has no active
 // filter, so it stays invisible until there is something to show.
+//
+// It opens on the ORIGINS: an unserved ask is re-raised at every instance it crosses (86 of them on a real
+// deployment) and journals a row per hop, of which only the origin's carries the payload. Reading those
+// copies is a deliberate act — following one escalation down its chain — so the relay rows sit behind a
+// toggle rather than burying the events that say something new.
 
-import { ArrowDownWideNarrow, ArrowUpWideNarrow, Search, Trash2, X } from "lucide-react";
+import {
+  ArrowDownWideNarrow,
+  ArrowUpWideNarrow,
+  Copy,
+  CopyMinus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { useClearRunEvents, useRunEvents } from "../../api/queries";
 import { RUN_EVENT_KINDS, type RunEvent } from "../../api/types";
@@ -44,18 +57,22 @@ export function TracePanel({
   // Newest-first by default: when a trace is long, the recent events are what a debugger reaches for, and
   // a live run's new events then land at the top of page one.
   const [order, setOrder] = useState<"asc" | "desc">("desc");
+  // Origins only until asked otherwise — see the note at the top of the file.
+  const [showRelays, setShowRelays] = useState(false);
   const [offset, setOffset] = useState(0);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const clearMutation = useClearRunEvents(projectId, runId);
   const toast = useToast();
 
   const search = useDebounced(searchInput.trim(), 300);
+  // The relay toggle is not one of these: it is the panel's default reading, and hiding the copies cannot
+  // empty a non-empty trace (a relay row is only ever journaled behind an origin row of the same run).
   const filtersActive = search !== "" || kind !== "";
 
   // Any filter / order change re-pages from the start — the previous offset would point into a different
   // (or shorter) result set.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the page when the query shape changes
-  useEffect(() => setOffset(0), [search, kind, order]);
+  useEffect(() => setOffset(0), [search, kind, order, showRelays]);
 
   const trace = useRunEvents(
     projectId,
@@ -66,6 +83,7 @@ export function TracePanel({
       order,
       ...(kind === "" ? {} : { kind }),
       ...(search === "" ? {} : { search }),
+      ...(showRelays ? {} : { elided: false }),
     },
     live,
   );
@@ -142,6 +160,15 @@ export function TracePanel({
               <ArrowUpWideNarrow className="size-3.5" />
             )}
             {order === "desc" ? "Newest first" : "Oldest first"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowRelays((current) => !current)}
+            className="inline-flex items-center gap-1.5 border border-edge-strong px-2.5 py-1.5 text-xs text-fg-muted transition-colors hover:text-fg"
+            title="An unserved ask is re-raised at every instance it crosses, and each hop journals a row whose payload lives on the origin's. Show those relay rows to walk one escalation's chain."
+          >
+            {showRelays ? <Copy className="size-3.5" /> : <CopyMinus className="size-3.5" />}
+            {showRelays ? "Every hop" : "Origins only"}
           </button>
         </div>
 

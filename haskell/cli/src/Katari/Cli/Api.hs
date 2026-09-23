@@ -54,7 +54,7 @@ module Katari.Cli.Api
     RunEventView (..),
     RunEventsResponse (..),
     RunEventsQuery (..),
-    emptyRunEventsQuery,
+    originsRunEventsQuery,
     startRun,
     getRun,
     getRunDetail,
@@ -591,16 +591,21 @@ instance FromJSON RunEventsResponse where
 -- | Server-side trace filters, passed straight through to the events endpoint (the runtime does the
 -- matching — see @run-events.repository@). @search@ is a case-insensitive substring over the whole
 -- event (ids, delegate targets, request names, and any public payload text — reaching what a
--- summary-line @grep@ cannot; sealed private values never match); @kind@ narrows to one event kind.
+-- summary-line @grep@ cannot; sealed private values never match); @kind@ narrows to one event kind;
+-- @elided@ picks the relay copies (@Just True@) or the origins (@Just False@) — 'Nothing' is both.
 data RunEventsQuery = RunEventsQuery
   { search :: Maybe Text,
-    kind :: Maybe Text
+    kind :: Maybe Text,
+    elided :: Maybe Bool
   }
   deriving stock (Show)
 
--- | No filter — the plain tail (the live @run@ watcher, and @status@ without @--search@/@--kind@).
-emptyRunEventsQuery :: RunEventsQuery
-emptyRunEventsQuery = RunEventsQuery {search = Nothing, kind = Nothing}
+-- | The default trace view: one row per logical escalation. An ask nobody serves is re-raised at every
+-- instance it crosses and journals a row per hop, all carrying the copy of one payload, so a trace read
+-- verbatim is mostly the same escalation restated — which would fill both the @run@ watcher's live lines
+-- and @status@'s tail with nothing new. The hops are still there for anyone who asks (@--relays@).
+originsRunEventsQuery :: RunEventsQuery
+originsRunEventsQuery = RunEventsQuery {search = Nothing, kind = Nothing, elided = Just False}
 
 -- | Tail a run's execution trace: the journaled events after @after@ (exclusive; 0 for the start),
 -- oldest first, one server-capped page per call. @query@ narrows the set server-side.
@@ -616,9 +621,13 @@ listRunEvents client projectId runId query after =
         <> queryString
           [ ("after", Just (Text.pack (show after))),
             ("search", query.search),
-            ("kind", query.kind)
+            ("kind", query.kind),
+            ("elided", fmap boolValue query.elided)
           ]
     )
+  where
+    boolValue :: Bool -> Text
+    boolValue value = if value then "true" else "false"
 
 -- | A run's whole (optionally filtered) trace, following pages until the tail is drained (the endpoint
 -- returns at most one page per call). Returns the run's state as of the last page.
