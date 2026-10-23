@@ -89,9 +89,9 @@ insertSequenceDrops moduleWideMentions sequenceBlock = sequenceBlock {operations
     lastMentionIndex =
       Map.fromList
         [ (variable, index)
-          | (index, operation) <- zip [0 :: Int ..] operations,
-            variable <- operationVariables operation,
-            Set.member variable candidates
+        | (index, operation) <- zip [0 :: Int ..] operations,
+          variable <- operationVariables operation,
+          Set.member variable candidates
         ]
     diesAfter :: Map Int (List VariableId)
     diesAfter =

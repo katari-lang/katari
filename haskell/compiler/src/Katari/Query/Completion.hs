@@ -81,15 +81,15 @@ completionsAt snapshot moduleName position =
     scope = scopeAtPosition snapshot moduleName position
     variableItems =
       [ valueItem snapshot moduleName name resolution
-        | (name, resolution) <- Map.toAscList scope.variableBindings
+      | (name, resolution) <- Map.toAscList scope.variableBindings
       ]
     typeItems =
       [ typeItem snapshot name resolution
-        | (name, resolution) <- Map.toAscList scope.typeBindings
+      | (name, resolution) <- Map.toAscList scope.typeBindings
       ]
     moduleItems =
       [ moduleItem name
-        | (name, _) <- Map.toAscList scope.moduleBindings
+      | (name, _) <- Map.toAscList scope.moduleBindings
       ]
 
 -- | The resolution scope at a position: recorded symbols win over the ambient default-import base.
@@ -181,8 +181,8 @@ completionsOfModule snapshot referencedModule = exportItems <> submoduleItems
       Nothing -> []
       Just interface ->
         [ item
-          | (name, exported) <- Map.toAscList interface.exports,
-            item <- exportedItems name exported
+        | (name, exported) <- Map.toAscList interface.exports,
+          item <- exportedItems name exported
         ]
     exportedItems name exported = case (exported.variable, exported.typeLevel) of
       (Just resolution, _) -> [valueItem snapshot referencedModule name resolution]
@@ -190,8 +190,8 @@ completionsOfModule snapshot referencedModule = exportItems <> submoduleItems
       (Nothing, Nothing) -> []
     submoduleItems =
       [ moduleItem (lastSegment interfaceModule)
-        | interfaceModule <- Map.keys snapshot.moduleInterfaces,
-          isDirectSubmodule referencedModule interfaceModule
+      | interfaceModule <- Map.keys snapshot.moduleInterfaces,
+        isDirectSubmodule referencedModule interfaceModule
       ]
 
 -- | Whether @candidate@ is exactly one segment below @parent@ (@prelude@ → @prelude.oauth@ yes,
@@ -218,7 +218,7 @@ completionsOfFields semanticType =
         documentation = Nothing,
         insertText = Nothing
       }
-    | (name, field) <- Map.toAscList (objectFieldsOf semanticType)
+  | (name, field) <- Map.toAscList (objectFieldsOf semanticType)
   ]
 
 ---------------------------------------------------------------------------------------------------
@@ -236,8 +236,8 @@ completionsOfCallLabels callableType usedLabels =
         documentation = Nothing,
         insertText = Just (name <> " = ")
       }
-    | (name, parameterType) <- Map.toAscList (parameterObjectFields (stripAttributes callableType)),
-      not (Set.member name usedLabels)
+  | (name, parameterType) <- Map.toAscList (parameterObjectFields (stripAttributes callableType)),
+    not (Set.member name usedLabels)
   ]
 
 ---------------------------------------------------------------------------------------------------

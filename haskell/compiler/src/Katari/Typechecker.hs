@@ -31,11 +31,10 @@ import Katari.Panic (panic)
 import Katari.Typechecker.Check (checkAgentBody, checkExternalReactor, dataValueScheme, prepareAgent, requestValueScheme, seedAgentType, signatureValueScheme, synthAgent)
 import Katari.Typechecker.Context
   ( Checker,
-    CheckerEnvironment,
+    CheckerEnvironment (valueEnvironment),
     extendValueEnvironment,
     initialCheckerEnvironment,
     initialCheckerState,
-    valueEnvironment,
   )
 import Katari.Typechecker.Environment (TypeEnvironment)
 import Katari.Typechecker.ValueGraph (ValueDeclaration (..), ValueNode (..))

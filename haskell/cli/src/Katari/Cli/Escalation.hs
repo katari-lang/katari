@@ -51,9 +51,9 @@ data EntryPointReport = EntryPointReport
 entryPointReports :: List ModuleName -> Map ModuleName (Module Typed) -> List EntryPointReport
 entryPointReports moduleNames typedModules =
   [ reportFor moduleName agentDeclaration
-    | moduleName <- moduleNames,
-      Just module' <- [Map.lookup moduleName typedModules],
-      DeclarationAgent agentDeclaration <- module'.declarations
+  | moduleName <- moduleNames,
+    Just module' <- [Map.lookup moduleName typedModules],
+    DeclarationAgent agentDeclaration <- module'.declarations
   ]
 
 -- | Build one agent's report: its qualified name and its residual row split into escalating requests

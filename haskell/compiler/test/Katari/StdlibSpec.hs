@@ -95,9 +95,9 @@ parsedStdlib = Map.mapWithKey parseModule stdlibSources
 stdlibDiagnosticCodes :: [Text]
 stdlibDiagnosticCodes =
   [ compilerErrorCode diagnostic.value
-    | (moduleName, (parsed, parseDiagnostics)) <- Map.toList parsedStdlib,
-      let (_, identifyDiagnostics) = identifyModule stdlibContext moduleName parsed,
-      diagnostic <- toList (parseDiagnostics <> identifyDiagnostics)
+  | (moduleName, (parsed, parseDiagnostics)) <- Map.toList parsedStdlib,
+    let (_, identifyDiagnostics) = identifyModule stdlibContext moduleName parsed,
+    diagnostic <- toList (parseDiagnostics <> identifyDiagnostics)
   ]
 
 stdlibContext :: ImportContext
@@ -120,7 +120,7 @@ primitiveParametersOf moduleName = case Map.lookup moduleName parsedStdlib of
   Just (parsed, _) ->
     Map.fromList
       [ (declaration.name, (.name) <$> declaration.parameters)
-        | DeclarationPrimitiveAgent declaration <- parsed.declarations
+      | DeclarationPrimitiveAgent declaration <- parsed.declarations
       ]
 
 -- | The @prelude@ root's primitive parameters — the source of truth the operator desugar's argument

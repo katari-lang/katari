@@ -234,7 +234,7 @@ collectEffectConstraints flexible actual parameter
         let flexibleTails = [(metavar, lacks) | (metavar, lacks) <- Map.toList parameterRow.tails, metavar `Set.member` flexible]
          in mconcat
               [ lowerEffectBound metavar EffectLowerBound {effect = actual, subtractConcrete = parameterRow.request, lacks = lacks}
-                | (metavar, lacks) <- flexibleTails
+              | (metavar, lacks) <- flexibleTails
               ]
 
 -- | Discharge one deferred effect lower bound with the (already solved) type substitution applied: the

@@ -151,9 +151,9 @@ declarationInformationOf surfaceOf modules = (Map.fromList values, Map.fromList 
   where
     surfaces =
       [ (QualifiedName {moduleName = moduleName, name = name}, valueEntry, typeEntry)
-        | (moduleName, module') <- Map.toList modules,
-          declaration <- module'.declarations,
-          (name, valueEntry, typeEntry) <- surfaceOf declaration
+      | (moduleName, module') <- Map.toList modules,
+        declaration <- module'.declarations,
+        (name, valueEntry, typeEntry) <- surfaceOf declaration
       ]
     values = [(qualifiedName, entry) | (qualifiedName, Just entry, _) <- surfaces]
     types = [(qualifiedName, entry) | (qualifiedName, _, Just entry) <- surfaces]
@@ -325,8 +325,8 @@ buildOccurrenceIndex snapshot =
         Map.fromListWith
           (<>)
           [ (occurrence.target, [occurrence.sourceSpan])
-            | facts <- Map.elems snapshot.moduleFacts,
-              occurrence <- facts.occurrences
+          | facts <- Map.elems snapshot.moduleFacts,
+            occurrence <- facts.occurrences
           ]
     }
 

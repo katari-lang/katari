@@ -108,7 +108,7 @@ documentedDefinition annotation fieldDocumentation =
     { fields =
         Map.fromList
           [ (fieldName, FieldInformation {semanticType = SemanticTypeString, optional = False})
-            | (fieldName, _) <- fieldDocumentation
+          | (fieldName, _) <- fieldDocumentation
           ],
       parameterGenericIds = Map.empty,
       annotation = Just annotation,

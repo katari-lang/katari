@@ -3,10 +3,24 @@
 # For more information, please see the documentation at:
 #   https://docs.haskellstack.org/en/stable/topics/lock_files
 
-packages: []
+packages:
+- completed:
+    hackage: ormolu-0.8.0.2@sha256:405af576a1c9ef39ed249d1879b2e4182ca1a35b735abe9f331b919f33711d6b,5354
+    pantry-tree:
+      sha256: 65a06d0193b2fe1a6425de43b22699902ee709197d35d647a8d5b5ba9096fff4
+      size: 104683
+  original:
+    hackage: ormolu-0.8.0.2
+- completed:
+    hackage: Cabal-syntax-3.14.2.0@sha256:6653175960c346f01152223972a3292c56723c1bfab61f4603ca66cb264297b0,7646
+    pantry-tree:
+      sha256: 2175cd95492e3ad7e2362e23c0d096b0a33315cc9eb5e09a9b89d6ba876874ec
+      size: 10977
+  original:
+    hackage: Cabal-syntax-3.14.2.0
 snapshots:
 - completed:
-    sha256: 238fa745b64f91184f9aa518fe04bdde6552533d169b0da5256670df83a0f1a9
-    size: 721141
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/22/44.yaml
-  original: lts-22.44
+    sha256: b33801f6fa56f3722ce790b9a4cab5a0201f5f4c9e7063729e4461ff944aec22
+    size: 732734
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/64.yaml
+  original: lts-24.64

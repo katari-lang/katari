@@ -323,8 +323,8 @@ resolveHandler node = do
   -- references are skipped here; the checker reports them as not-a-request instead.
   reportDuplicateLabels
     [ (renderQualifiedName name, handler.sourceSpan)
-      | handler <- handlers,
-        Just (TypeResolutionQualifiedName name) <- [handler.typeReference.resolution]
+    | handler <- handlers,
+      Just (TypeResolutionQualifiedName name) <- [handler.typeReference.resolution]
     ]
   thenClause <- traverse (resolveThenClause stateScope) node.thenClause
   pure

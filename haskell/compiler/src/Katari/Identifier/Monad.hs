@@ -14,7 +14,7 @@ import Control.Monad (when)
 import Control.Monad.RWS.CPS (RWS, evalRWS)
 import Control.Monad.RWS.Class (MonadWriter, asks, gets, local, modify, state)
 import Data.Foldable (toList)
-import Data.List (find, foldl', sortOn)
+import Data.List (find, sortOn)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (isJust, isNothing)

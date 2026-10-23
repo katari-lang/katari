@@ -2219,8 +2219,8 @@ synthIn bindings expression =
 ------------------------------------------------------------------------------------------------
 
 hasErrorCode :: Text -> Diagnostics -> Bool
-hasErrorCode code diagnostics =
-  any (\located -> typeErrorCode' located.value == Just code) (toList diagnostics)
+hasErrorCode code =
+  any (\located -> typeErrorCode' located.value == Just code)
   where
     typeErrorCode' = \case
       CompilerErrorType typeError -> Just (typeErrorCode typeError)
@@ -2407,7 +2407,7 @@ callExpression callee arguments =
                 value = ArgumentExpression value,
                 sourceSpan = testSpan
               }
-            | (name, value) <- arguments
+          | (name, value) <- arguments
           ],
         instantiation = (),
         sourceSpan = testSpan,
@@ -2624,7 +2624,7 @@ matchExpression subject caseEntries =
       { subject = subject,
         cases =
           [ CaseArm {pattern = patternForCase, body = caseBody, sourceSpan = testSpan}
-            | (patternForCase, caseBody) <- caseEntries
+          | (patternForCase, caseBody) <- caseEntries
           ],
         sourceSpan = testSpan,
         typeOf = ()

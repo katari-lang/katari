@@ -49,7 +49,7 @@ sourcesFor :: List Text -> Map ModuleName SourceEntry
 sourcesFor moduleNames =
   Map.fromList
     [ (ModuleName name, SourceEntry {path = Text.unpack name <> ".ktr", text = "source of " <> name})
-      | name <- moduleNames
+    | name <- moduleNames
     ]
 
 -- | A dependency package keyed by @name@, laying out @moduleNames@ as its sources with the given

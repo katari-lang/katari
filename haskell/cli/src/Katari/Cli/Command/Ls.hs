@@ -150,7 +150,7 @@ run options = do
             table
               ["ID", "STATE", "AGENT", "NAME", "CREATED", "COMPLETED"]
               [ [shortId row.id, runStateLabel row.state, row.qualifiedName, row.name, compactTimestamp row.createdAt, maybe "" compactTimestamp row.completedAt]
-                | row <- runs
+              | row <- runs
               ]
         TargetAgents -> do
           (raw, response) <- listAgents context.client context.projectId options.snapshotId
@@ -175,7 +175,7 @@ run options = do
               ["ID", "RUN", "REQUEST", "QUESTION", "CREATED"]
               [ let (requestCell, questionCell) = escalationCells row
                  in [shortId row.id, shortId row.runId, requestCell, questionCell, compactTimestamp row.createdAt]
-                | row <- escalations
+              | row <- escalations
               ]
         TargetFiles -> do
           (raw, files) <- listFiles context.client context.projectId
@@ -271,8 +271,8 @@ packageRows config snapshot locked =
         declared = name `elem` config.dependencies.packages,
         inClosure = Set.member name locked
       }
-    | name <- Set.toAscList (Map.keysSet snapshot.packages <> Map.keysSet config.overrides),
-      let overridden = Map.member name config.overrides
+  | name <- Set.toAscList (Map.keysSet snapshot.packages <> Map.keysSet config.overrides),
+    let overridden = Map.member name config.overrides
   ]
 
 -- | The VERSION cell. An override pins a location rather than a release, so it says so instead of

@@ -62,8 +62,8 @@ reKeyByGenericId :: GenericParameters -> Map Text a -> Map GenericId a
 reKeyByGenericId parameters arguments =
   Map.fromList
     [ (info.genericId, argument)
-      | (name, info) <- Map.toList parameters.parameterInformation,
-        Just argument <- [Map.lookup name arguments]
+    | (name, info) <- Map.toList parameters.parameterInformation,
+      Just argument <- [Map.lookup name arguments]
     ]
 
 -- | The inverse of 'reKeyByGenericId': re-key a by-id substitution back to a by-name map (each declared
@@ -74,8 +74,8 @@ instantiationByName :: GenericParameters -> Map GenericId a -> Map Text a
 instantiationByName parameters substitution =
   Map.fromList
     [ (name, argument)
-      | (name, info) <- Map.toList parameters.parameterInformation,
-        Just argument <- [Map.lookup info.genericId substitution]
+    | (name, info) <- Map.toList parameters.parameterInformation,
+      Just argument <- [Map.lookup info.genericId substitution]
     ]
 
 -- | A value's type as carried in every environment (top-level values and locals alike): its

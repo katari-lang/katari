@@ -361,7 +361,7 @@ walkApplicationArguments :: VarianceContext -> Variance -> QualifiedName -> Map 
 walkApplicationArguments context sign qualifiedName arguments =
   mergeVariances
     [ walkArgument context (composeVariance sign (nestedVariance context qualifiedName parameterName)) argument
-      | (parameterName, argument) <- Map.toList arguments
+    | (parameterName, argument) <- Map.toList arguments
     ]
 
 walkAttribute :: VarianceContext -> Variance -> SemanticAttribute -> Map GenericId Variance
@@ -410,10 +410,10 @@ varianceIteration :: Map QualifiedName (Map Text GenericId) -> List VarianceShap
 varianceIteration parameterIdsByName shapes currentEstimate =
   Map.fromList
     [ (genericId, Map.findWithDefault Bivariant genericId usage)
-      | shape <- shapes,
-        let context = VarianceContext {parameterIdsByName = parameterIdsByName, estimate = currentEstimate}
-            usage = mergeVariances [walkType context sign root | (sign, root) <- shape.roots],
-        genericId <- shape.ownParameterIds
+    | shape <- shapes,
+      let context = VarianceContext {parameterIdsByName = parameterIdsByName, estimate = currentEstimate}
+          usage = mergeVariances [walkType context sign root | (sign, root) <- shape.roots],
+      genericId <- shape.ownParameterIds
     ]
 
 -- | Iterate 'varianceIteration' to its (least) fixed point. The variance lattice is finite and the

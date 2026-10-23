@@ -1423,9 +1423,9 @@ literalCallArguments :: List (CallArgument Identified) -> Map Text Text
 literalCallArguments arguments =
   Map.fromList
     [ (argument.name, text)
-      | argument <- arguments,
-        ArgumentExpression (ExpressionLiteral literal) <- [argument.value],
-        LiteralValueString text <- [literal.value]
+    | argument <- arguments,
+      ArgumentExpression (ExpressionLiteral literal) <- [argument.value],
+      LiteralValueString text <- [literal.value]
     ]
 
 -- | Refine the literal-written fields of an argument object wherever the matching parameter field
@@ -1932,8 +1932,8 @@ checkPattern pattern scrutinee = case pattern of
               argumentsByName =
                 Map.fromList
                   [ (paramName, argument)
-                    | (paramName, info) <- Map.toList dataInfo.genericParameters.parameterInformation,
-                      Just argument <- [Map.lookup info.genericId substitution]
+                  | (paramName, info) <- Map.toList dataInfo.genericParameters.parameterInformation,
+                    Just argument <- [Map.lookup info.genericId substitution]
                   ]
               cover =
                 layeredOf
@@ -2813,7 +2813,7 @@ namedObjectTypeWithRest restType fieldList =
               { fields =
                   Map.fromList
                     [ (fieldName, NormalizedFieldInformation {normalizedType = fieldType, optional = False})
-                      | (fieldName, fieldType) <- fieldList
+                    | (fieldName, fieldType) <- fieldList
                     ],
                 rest = restType
               }
@@ -2954,8 +2954,8 @@ handlerInstallSites block = foldr collectStatement Map.empty block.statements
               ExpressionHandler handlerExpression ->
                 Map.fromList
                   [ (requestName, useStatement.sourceSpan)
-                    | clause <- handlerExpression.handlers,
-                      Just (TypeResolutionQualifiedName requestName) <- [clause.typeReference.resolution]
+                  | clause <- handlerExpression.handlers,
+                    Just (TypeResolutionQualifiedName requestName) <- [clause.typeReference.resolution]
                   ]
               _ -> Map.empty
          in Map.unions [served, handlerInstallSites useStatement.body, below]

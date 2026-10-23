@@ -1,4 +1,4 @@
-snapshot: lts-22.44 # GHC 9.6.7
+snapshot: lts-24.64 # GHC 9.10.3
 
 packages:
   - haskell/compiler
@@ -6,6 +6,12 @@ packages:
   - haskell/cli
   - haskell/lsp
 
-# toml-reader (katari.toml / katari.lock / snapshot parsing) ships in lts-22.44, so it needs no
+# toml-reader (katari.toml / katari.lock / snapshot parsing) ships in lts-24.64, so it needs no
 # extra-deps pin.
-extra-deps: []
+#
+# ormolu is not in lts-24, but `pnpm run format:haskell` (and so the pre-commit hook) runs it through
+# `stack exec --package ormolu`, so it is pinned here. 0.8.0.2 is the last release built on the
+# snapshot's ghc-lib-parser 9.12, and it needs a newer Cabal-syntax than the one GHC 9.10 ships.
+extra-deps:
+  - ormolu-0.8.0.2
+  - Cabal-syntax-3.14.2.0

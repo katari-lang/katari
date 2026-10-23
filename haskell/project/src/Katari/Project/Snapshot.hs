@@ -49,7 +49,6 @@ where
 import Control.Monad (unless)
 import Data.ByteString.Lazy qualified as ByteStringLazy
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
-import Data.List (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)

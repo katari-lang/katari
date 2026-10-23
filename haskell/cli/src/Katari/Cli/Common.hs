@@ -373,8 +373,8 @@ reportLockChanges output previous lockfile = do
     removed = Map.keys (Map.difference previous current)
     changed =
       [ name
-        | (name, source) <- Map.toAscList (Map.intersection current previous),
-          Map.lookup name previous /= Just source
+      | (name, source) <- Map.toAscList (Map.intersection current previous),
+        Map.lookup name previous /= Just source
       ]
     total = Text.pack (show (Map.size current))
     headline

@@ -159,7 +159,7 @@ buildManifest :: Map ModuleName IRModule -> UploadPlan -> Map Text ModuleUpload
 buildManifest loweredModules plan =
   Map.fromList
     [ (renderModuleName moduleName, moduleUpload moduleName irModule)
-      | (moduleName, irModule) <- Map.toList loweredModules
+    | (moduleName, irModule) <- Map.toList loweredModules
     ]
   where
     moduleUpload moduleName irModule =
@@ -207,7 +207,7 @@ packagesFromResolved resolved =
       { packageName = package.config.package.name,
         sourceRoot = package.root </> sidecarSourceRoot package.config
       }
-    | package <- resolved.rootPackage : Map.elems resolved.depPackages
+  | package <- resolved.rootPackage : Map.elems resolved.depPackages
   ]
   where
     sidecarSourceRoot config = case config.sidecar of

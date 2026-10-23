@@ -6,7 +6,7 @@
 -- not almost-right costs the reader more than no suggestion at all.
 module Katari.Suggestion where
 
-import Data.List (foldl', sortOn)
+import Data.List (sortOn)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
@@ -23,10 +23,10 @@ nearestNames written candidates
   where
     scored =
       [ (distance, candidate)
-        | candidate <- distinct candidates,
-          candidate /= written,
-          let distance = editDistance written candidate,
-          distance <= allowedDistance written candidate
+      | candidate <- distinct candidates,
+        candidate /= written,
+        let distance = editDistance written candidate,
+        distance <= allowedDistance written candidate
       ]
 
 -- | How many candidates a message offers. Three is the point where the list stops reading as a hint

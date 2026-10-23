@@ -75,9 +75,9 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: "9.6.7"
+          ghc-version: "9.10.3"
           enable-stack: true
-          stack-version: "3.7.1"
+          stack-version: "3.11.1"
 
       - name: Resolve cache key inputs
         id: cache-key
@@ -155,9 +155,9 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: "9.6.7"
+          ghc-version: "9.10.3"
           enable-stack: true
-          stack-version: "3.7.1"
+          stack-version: "3.11.1"
 
       - name: Resolve cache key inputs
         id: cache-key

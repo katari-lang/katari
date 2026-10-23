@@ -1467,8 +1467,7 @@ retagGenericParameter parameter =
 -- | Retag a 'ParameterSignature' (used in declarations that don't carry a body — data / request /
 -- external / primitive). Structural — no checker types are populated here.
 retagParameterSignature ::
-  ( ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference,
-    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
     ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
   ParameterSignature phase1 ->
@@ -1487,8 +1486,7 @@ retagParameterSignature signature =
 retagDataDeclaration ::
   ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
     ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
-    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
   DataDeclaration phase1 ->
   DataDeclaration phase2
@@ -1506,8 +1504,7 @@ retagDataDeclaration declaration =
 retagRequestDeclaration ::
   ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
     ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
-    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
   RequestDeclaration phase1 ->
   RequestDeclaration phase2
@@ -1541,8 +1538,7 @@ retagMarkerEffectDeclaration declaration =
 retagExternalAgentDeclaration ::
   ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
     ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
-    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
   ExternalAgentDeclaration phase1 ->
   ExternalAgentDeclaration phase2
@@ -1562,8 +1558,7 @@ retagExternalAgentDeclaration declaration =
 retagPrimitiveAgentDeclaration ::
   ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
     ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
-    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
   PrimitiveAgentDeclaration phase1 ->
   PrimitiveAgentDeclaration phase2

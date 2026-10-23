@@ -82,9 +82,9 @@ manifestMismatches config lockfile
               locked = renderLockedSource lockedSource,
               declared = renderExpectedSource expected
             }
-        | (name, lockedSource) <- Map.toAscList lockfile.packages,
-          let expected = expectedSourceFor config name,
-          not (agrees expected lockedSource)
+      | (name, lockedSource) <- Map.toAscList lockfile.packages,
+        let expected = expectedSourceFor config name,
+        not (agrees expected lockedSource)
       ]
 
 -- | Everything that needs the dependency graph: which names the closure actually reaches, given the

@@ -51,7 +51,7 @@ inputSchemaOf parameters =
     ( SemanticTypeObject $
         Map.fromList
           [ (name, FieldInformation {semanticType = SemanticTypeString, optional = optionality == Optional})
-            | (name, optionality) <- parameters
+          | (name, optionality) <- parameters
           ]
     )
 

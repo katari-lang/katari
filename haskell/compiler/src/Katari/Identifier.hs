@@ -14,7 +14,6 @@ module Katari.Identifier where
 
 import Control.Applicative ((<|>))
 import Control.Monad (when)
-import Data.List (foldl')
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)

@@ -79,7 +79,7 @@ referencesInValue = \case
 valueGraph :: Map ModuleName (Module Identified) -> List (ValueNode, QualifiedName, List QualifiedName)
 valueGraph modules =
   [ (node, node.qualifiedName, Set.toList (Set.intersection (referencesInValue node.declaration) valueNames))
-    | node <- nodes
+  | node <- nodes
   ]
   where
     nodes = topLevelValues modules

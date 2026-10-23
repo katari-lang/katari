@@ -39,7 +39,7 @@ data ScaffoldFile = ScaffoldFile
 scaffoldFiles :: List ScaffoldFile
 scaffoldFiles =
   [ ScaffoldFile {destination = destinationOf path, contents = decodeTemplate raw}
-    | (path, raw) <- embeddedTemplateFiles
+  | (path, raw) <- embeddedTemplateFiles
   ]
 
 -- | Template path -> scaffolded path. The identity for most; dotfiles gain their dot back.

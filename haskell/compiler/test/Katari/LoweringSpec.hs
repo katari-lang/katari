@@ -295,8 +295,8 @@ spec = describe "lowerModule (via compile)" $ do
           written = [recordOperation.output | OperationMakeRecord recordOperation <- operations, map fst recordOperation.entries == ["done"]]
           mergeEntries =
             [ recordOperation.entries
-              | OperationMakeRecord recordOperation <- operations,
-                map fst recordOperation.entries == [recordMergeLeftLabel, recordMergeRightLabel]
+            | OperationMakeRecord recordOperation <- operations,
+              map fst recordOperation.entries == [recordMergeLeftLabel, recordMergeRightLabel]
             ]
       case (base, written, mergeEntries) of
         ([baseVariable], [writtenVariable], [entries]) -> do
@@ -375,7 +375,7 @@ spec = describe "lowerModule (via compile)" $ do
     it "the delegate output dies at the bindPattern: a drop listing it directly follows the bind" $ do
       let operations = entryBodyOperations (loweredTestModule letSource) "caller"
       case [ (bindOperation.source, followup)
-             | (OperationBindPattern bindOperation, followup) <- adjacentPairs operations
+           | (OperationBindPattern bindOperation, followup) <- adjacentPairs operations
            ] of
         ((source, OperationDrop dropOperation) : _) -> dropOperation.variables `shouldContain` [source]
         other -> expectationFailure ("expected a drop right after the bindPattern, got " <> show other)
@@ -384,8 +384,8 @@ spec = describe "lowerModule (via compile)" $ do
       let operations = entryBodyOperations (loweredTestModule letSource) "caller"
           letBound =
             [ variable
-              | OperationBindPattern bindOperation <- operations,
-                PatternVariable variable <- [bindOperation.pattern]
+            | OperationBindPattern bindOperation <- operations,
+              PatternVariable variable <- [bindOperation.pattern]
             ]
       -- The bound variable is dead after the second call's argument record, so it IS dropped —
       -- the mention-after-drop oracle below guarantees never before a remaining use.
@@ -417,7 +417,7 @@ spec = describe "lowerModule (via compile)" $ do
               (loweredTestModule "agent helper(x: integer) -> integer { x }\nagent caller() -> integer { helper(x = 1)\n2 }")
               "caller"
       case [ (delegateOperation.output, followup)
-             | (OperationDelegate delegateOperation, followup) <- adjacentPairs operations
+           | (OperationDelegate delegateOperation, followup) <- adjacentPairs operations
            ] of
         ((Just output, OperationDrop dropOperation) : _) -> dropOperation.variables `shouldContain` [output]
         other -> expectationFailure ("expected a drop right after the unread delegate, got " <> show other)
@@ -698,21 +698,21 @@ blockKindOf = \case
 calleeNames :: IRModule -> List QualifiedName
 calleeNames irModule =
   [ name
-    | information <- Map.elems irModule.blocks,
-      BlockSequence sequence' <- [information.block],
-      OperationDelegate operation <- sequence'.operations,
-      CalleeName name <- [operation.target]
+  | information <- Map.elems irModule.blocks,
+    BlockSequence sequence' <- [information.block],
+    OperationDelegate operation <- sequence'.operations,
+    CalleeName name <- [operation.target]
   ]
 
 -- | The generics stamped on the first @delegate@ targeting @name@ (Nothing when no such delegate).
 delegateGenericsTo :: IRModule -> QualifiedName -> Maybe (List (Text, GenericArgumentSchema))
 delegateGenericsTo irModule name =
   case [ operation.generics
-         | information <- Map.elems irModule.blocks,
-           BlockSequence sequence' <- [information.block],
-           OperationDelegate operation <- sequence'.operations,
-           CalleeName target <- [operation.target],
-           target == name
+       | information <- Map.elems irModule.blocks,
+         BlockSequence sequence' <- [information.block],
+         OperationDelegate operation <- sequence'.operations,
+         CalleeName target <- [operation.target],
+         target == name
        ] of
     (generics : _) -> Just generics
     [] -> Nothing
@@ -722,18 +722,18 @@ delegateGenericsTo irModule name =
 delegateArgumentEntriesTo :: IRModule -> QualifiedName -> Maybe (List Text)
 delegateArgumentEntriesTo irModule name =
   case [ (sequence', operation)
-         | information <- Map.elems irModule.blocks,
-           BlockSequence sequence' <- [information.block],
-           OperationDelegate operation <- sequence'.operations,
-           CalleeName target <- [operation.target],
-           target == name
+       | information <- Map.elems irModule.blocks,
+         BlockSequence sequence' <- [information.block],
+         OperationDelegate operation <- sequence'.operations,
+         CalleeName target <- [operation.target],
+         target == name
        ] of
     ((sequence', operation) : _) ->
       Just
         [ label
-          | OperationMakeRecord recordOperation <- sequence'.operations,
-            recordOperation.output == operation.argument,
-            (label, _) <- recordOperation.entries
+        | OperationMakeRecord recordOperation <- sequence'.operations,
+          recordOperation.output == operation.argument,
+          (label, _) <- recordOperation.entries
         ]
     [] -> Nothing
 
@@ -741,10 +741,10 @@ delegateArgumentEntriesTo irModule name =
 namedAgentBlocks :: IRModule -> Text -> List Agent
 namedAgentBlocks irModule label =
   [ agent
-    | (blockId, name) <- Map.toList irModule.names,
-      name == label,
-      Just information <- [Map.lookup blockId irModule.blocks],
-      BlockAgent agent <- [information.block]
+  | (blockId, name) <- Map.toList irModule.names,
+    name == label,
+    Just information <- [Map.lookup blockId irModule.blocks],
+    BlockAgent agent <- [information.block]
   ]
 
 -- | The operations of every 'BlockSequence' carrying the given debug name, concatenated.
@@ -752,10 +752,10 @@ namedBlockOperations :: IRModule -> Text -> List Operation
 namedBlockOperations irModule label =
   concat
     [ sequenceBlock.operations
-      | (blockId, name) <- Map.toList irModule.names,
-        name == label,
-        Just information <- [Map.lookup blockId irModule.blocks],
-        BlockSequence sequenceBlock <- [information.block]
+    | (blockId, name) <- Map.toList irModule.names,
+      name == label,
+      Just information <- [Map.lookup blockId irModule.blocks],
+      BlockSequence sequenceBlock <- [information.block]
     ]
 
 -- | The variable a named block binds under the given parameter key (e.g. a @partial.body@ block's
@@ -763,9 +763,9 @@ namedBlockOperations irModule label =
 namedBlockParameter :: IRModule -> Text -> Text -> Maybe VariableId
 namedBlockParameter irModule label parameterKey =
   case [ information.parameters
-         | (blockId, name) <- Map.toList irModule.names,
-           name == label,
-           Just information <- [Map.lookup blockId irModule.blocks]
+       | (blockId, name) <- Map.toList irModule.names,
+         name == label,
+         Just information <- [Map.lookup blockId irModule.blocks]
        ] of
     (parameters : _) -> Map.lookup parameterKey parameters
     [] -> Nothing
@@ -782,20 +782,20 @@ firstRecordOutput operations =
 continuationFirstFields :: IRModule -> List Text
 continuationFirstFields irModule =
   [ operation.field
-    | (blockId, label) <- Map.toList irModule.names,
-      label == "use.continuation.body",
-      Just information <- [Map.lookup blockId irModule.blocks],
-      BlockSequence sequence' <- [information.block],
-      (OperationGetField operation : _) <- [sequence'.operations]
+  | (blockId, label) <- Map.toList irModule.names,
+    label == "use.continuation.body",
+    Just information <- [Map.lookup blockId irModule.blocks],
+    BlockSequence sequence' <- [information.block],
+    (OperationGetField operation : _) <- [sequence'.operations]
   ]
 
 -- | The request names every handle node's handlers match, across the module.
 handledRequestNames :: IRModule -> List QualifiedName
 handledRequestNames irModule =
   [ handler.request
-    | information <- Map.elems irModule.blocks,
-      BlockHandle handle <- [information.block],
-      handler <- handle.handlers
+  | information <- Map.elems irModule.blocks,
+    BlockHandle handle <- [information.block],
+    handler <- handle.handlers
   ]
 
 -- | A prelude root member's qualified name (the wired-in stdlib root module).
@@ -806,18 +806,18 @@ preludeName name = QualifiedName {moduleName = ModuleName "prelude", name = name
 loadedAgentNames :: IRModule -> List QualifiedName
 loadedAgentNames irModule =
   [ operation.name
-    | information <- Map.elems irModule.blocks,
-      BlockSequence sequence' <- [information.block],
-      OperationLoadAgent operation <- sequence'.operations
+  | information <- Map.elems irModule.blocks,
+    BlockSequence sequence' <- [information.block],
+    OperationLoadAgent operation <- sequence'.operations
   ]
 
 -- | Every @stampDescription@ operation in the module (a documented let emits exactly one).
 stampOperations :: IRModule -> List StampDescriptionOperation
 stampOperations irModule =
   [ operation
-    | information <- Map.elems irModule.blocks,
-      BlockSequence sequence' <- [information.block],
-      OperationStampDescription operation <- sequence'.operations
+  | information <- Map.elems irModule.blocks,
+    BlockSequence sequence' <- [information.block],
+    OperationStampDescription operation <- sequence'.operations
   ]
 
 -- | The operations of the body sequence of the named entry agent.
@@ -837,9 +837,9 @@ entryBodyOperations irModule name = fromMaybe [] $ do
 entryForNode :: IRModule -> Text -> Maybe For
 entryForNode irModule name =
   case [ for
-         | OperationCall callOperation <- entryBodyOperations irModule name,
-           Just information <- [Map.lookup callOperation.target irModule.blocks],
-           BlockFor for <- [information.block]
+       | OperationCall callOperation <- entryBodyOperations irModule name,
+         Just information <- [Map.lookup callOperation.target irModule.blocks],
+         BlockFor for <- [information.block]
        ] of
     (for : _) -> Just for
     [] -> Nothing
@@ -857,8 +857,8 @@ forBodyOperations :: IRModule -> List Operation
 forBodyOperations irModule =
   concat
     [ blockOperations irModule for.body
-      | information <- Map.elems irModule.blocks,
-        BlockFor for <- [information.block]
+    | information <- Map.elems irModule.blocks,
+      BlockFor for <- [information.block]
     ]
 
 -- | Every variable released by any drop in the operation list.
@@ -884,13 +884,13 @@ sequenceDropViolations sequenceBlock = walk mempty sequenceBlock.operations
     walk released remaining = case remaining of
       [] ->
         [ "the sequence result " <> show variable <> " was dropped"
-          | variable <- maybeToList sequenceBlock.result,
-            Set.member variable released
+        | variable <- maybeToList sequenceBlock.result,
+          Set.member variable released
         ]
       (operation : rest) ->
         [ "operation mentions dropped " <> show variable
-          | variable <- operationMentions operation,
-            Set.member variable released
+        | variable <- operationMentions operation,
+          Set.member variable released
         ]
           <> ["empty drop operation" | OperationDrop dropOperation <- [operation], null dropOperation.variables]
           <> walk (releaseOf operation <> released) rest
@@ -955,8 +955,8 @@ danglingReferences irModule =
 nonAgentEntries :: IRModule -> List QualifiedName
 nonAgentEntries irModule =
   [ name
-    | (name, entry) <- Map.toList irModule.entries,
-      maybe True (not . isAgentBlock . (.block)) (Map.lookup entry.block irModule.blocks)
+  | (name, entry) <- Map.toList irModule.entries,
+    maybe True (not . isAgentBlock . (.block)) (Map.lookup entry.block irModule.blocks)
   ]
   where
     isAgentBlock = \case

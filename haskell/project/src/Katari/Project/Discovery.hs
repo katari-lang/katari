@@ -114,17 +114,17 @@ scanSourcesFromDir overlay srcDir = do
   let discovered = Set.fromList diskFiles
       overlayOnlyPaths =
         [ path
-          | path <- Map.keys overlay.files,
-            takeExtension path == ktrExtension,
-            isUnder canonicalSrc path,
-            not (Set.member path discovered)
+        | path <- Map.keys overlay.files,
+          takeExtension path == ktrExtension,
+          isUnder canonicalSrc path,
+          not (Set.member path discovered)
         ]
   diskEntries <- forM diskFiles $ \path -> do
     text <- maybe (TextIO.readFile path) pure (Map.lookup path overlay.files)
     pure (moduleNameForFile canonicalSrc path, SourceEntry {path = path, text = text})
   let overlayEntries =
         [ (moduleNameForFile canonicalSrc path, SourceEntry {path = path, text = Map.findWithDefault "" path overlay.files})
-          | path <- overlayOnlyPaths
+        | path <- overlayOnlyPaths
         ]
   pure (buildModuleMap (diskEntries <> overlayEntries))
 

@@ -357,7 +357,7 @@ buildTypeNode extraction expression = case expression of
                 optional = field.optional,
                 fieldType = buildTypeNode extraction field.fieldType
               }
-            | field <- node.fields
+          | field <- node.fields
           ]
      in TypeNode
           { rendered = "{" <> Text.intercalate ", " (objectFieldText <$> fields) <> "}",
@@ -445,7 +445,7 @@ extractModules extraction modules loweredModules =
       { name = moduleName,
         declarations = mapMaybe (extractDeclaration extraction loweredModules moduleName) module'.declarations
       }
-    | (moduleName, module') <- Map.toAscList modules
+  | (moduleName, module') <- Map.toAscList modules
   ]
 
 -- | One declaration's documentation row. Imports and parse-error sentinels are not API surface, so

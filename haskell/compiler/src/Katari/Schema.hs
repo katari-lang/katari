@@ -180,7 +180,7 @@ toJSONSchema dataDefinitions = convert Set.empty
                       (Map.lookup fieldName definition.fieldAnnotations)
                       (convert visitedWithSelf (substituteGenerics substitution field.semanticType))
                   )
-                  | (fieldName, field) <- expandedFields
+                | (fieldName, field) <- expandedFields
                 ]
               -- The constructor's fields, nested under @value@ as their own object (an open object — a
               -- value may legitimately carry more; a declared field is required unless optional).
@@ -226,8 +226,8 @@ buildSubstitution :: Map Text GenericId -> Map Text SemanticGenericArgument -> M
 buildSubstitution parameterGenericIds arguments =
   Map.fromList
     [ (genericId, argument)
-      | (parameterName, genericId) <- Map.toList parameterGenericIds,
-        Just argument <- [Map.lookup parameterName arguments]
+    | (parameterName, genericId) <- Map.toList parameterGenericIds,
+      Just argument <- [Map.lookup parameterName arguments]
     ]
 
 -- | What 'dataValueSchemaParts' recovers from a @data@ value's wire schema: the constructor name the
