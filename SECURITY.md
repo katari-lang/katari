@@ -51,3 +51,12 @@ they will not be a surprise.
 - **Capability URLs put their token in the path.** `/inbound/<token>` and `/mcp/<token>` are unguessable, and
   the runtime redacts them from its own logs — but a load balancer's access logs record full paths. Treat
   such a log bucket as secret-bearing.
+- **Capability tokens have no expiry and no revocation of their own.** An `/inbound` or `/mcp` URL stays valid
+  for as long as the `webhook.inbound` or `mcp.serve` call that minted it is running; ending that call, or
+  cancelling its run, is the only way to revoke it. Tokens are stored in the database as-is, so a database
+  backup holds every live URL. There is no per-token quota and no replay protection beyond the runtime-wide
+  rate limit.
+- **A program's work is not bounded.** A loop whose iterations never suspend keeps its own project busy
+  indefinitely. The engine yields to the event loop every 1,000 steps, so the API, timers, and other projects
+  keep running, but nothing stops the loop itself short of cancelling the run. Fan-out (fibers, delegation
+  depth) has no cap either.
