@@ -8,7 +8,7 @@ CURRENT Phase:
 
 - branch main: prototyping (completed)
 - branch scrap-and-build: the refactor/redesign rebuild of the runtime and compiler (completed, merged into main)
-- ★ branch main: preparing the v0.1.0 release — working through the publish-audit follow-ups across language, stdlib, runtime, tooling, and docs (see `docs/2026-07-25-v0.1.0-milestones.md`)
+- ★ branch main: preparing the v0.1.0 release — working through the publish-audit follow-ups across language, stdlib, runtime, tooling, and docs (see `docs/v0.1/records/2026-07-25-v0.1.0-milestones.md`)
 
 ## Overview
 
@@ -50,7 +50,7 @@ CURRENT Phase:
   - `vscode`: VSCode extension for Katari
   - `admin-web`: Web interface for managing Katari runtime
   - `types`: Shared types
-- `docs`: Documentation for Katari, including design documents, user guides and API references
+- `docs`: Design documents for Katari. `docs/README.md` lists which documents are current; everything under `records/` is history
 
 ### Tools
 

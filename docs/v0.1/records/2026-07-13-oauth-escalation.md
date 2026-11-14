@@ -5,7 +5,7 @@ refresh が死んだ・サーバーが 401 を返した — どの場合も mcp 
 `prelude.mcp.authorize` を escalate して**止まり**、ユーザーが認証を完了すると **ack で再開**する。
 env secret `mcp.oauth.<name>` の予約 namespace と `katari mcp login` は**削除**する。
 
-旧設計([docs/2026-07-10-mcp-oauth.md](2026-07-10-mcp-oauth.md))の §2(credential store = env secret)と
+旧設計([docs/v0.1/records/2026-07-10-mcp-oauth.md](2026-07-10-mcp-oauth.md))の §2(credential store = env secret)と
 §3(`katari mcp login`)は本ドキュメントが置き換える。§1(`auth` 直和)と型表面は不変。
 
 ## 0. なぜ escalation か

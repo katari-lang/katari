@@ -1,4 +1,4 @@
-// HTTP contract for the snapshot resource (see docs/2026-06-19-per-module-snapshot.md §3).
+// HTTP contract for the snapshot resource (see docs/v0.1/records/2026-06-19-per-module-snapshot.md §3).
 //
 // A deploy sends the *complete* desired manifest: one entry per module name, each carrying its
 // content `hash`. `ir` is inlined only for modules the runtime does not already hold — the CLI

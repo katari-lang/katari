@@ -1,5 +1,5 @@
 // Persistence for the `credentials` table — the single source of truth for OAuth token material
-// (docs/2026-07-14-credentials-core.md §1). The repository speaks in SEALED values (the AES-GCM envelope);
+// (docs/v0.1/records/2026-07-14-credentials-core.md §1). The repository speaks in SEALED values (the AES-GCM envelope);
 // sealing and decoding stay with the callers, so this layer stays a pure row store.
 //
 // The `generation` column carries two distinct write intents:

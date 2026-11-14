@@ -36,7 +36,7 @@ covariance)、literal / dynamic の分岐、covariance が残す唯一の穴と�
   tool の呼び出しは、その `scope[URL]` を**まだ運んでいる行の中でだけ**型が付く。
 - `effect scope[URL]` は **phantom marker**: オペレーションを一切持たず、perform されず、handle も
   されず、lowering で消える(実行時には残らない)。行の中では `mcp.scope["https://..."]` と読む。
-- `provide` は**スコープ付き provider**([docs/2026-07-07-composability-reflection-webhook.md](2026-07-07-composability-reflection-webhook.md)
+- `provide` は**スコープ付き provider**([docs/v0.1/records/2026-07-07-composability-reflection-webhook.md](2026-07-07-composability-reflection-webhook.md)
   §1 の `use` provider で確立した `runST` 形)である:
   継続の行に `scope[URL]` を mint し、**自身の結果行からはそれを discharge する**(`-> R with E`、
   scope なし)。
@@ -57,7 +57,7 @@ covariance)、literal / dynamic の分岐、covariance が残す唯一の穴と�
   (`E` 側の scope を上書きで潰す)ので、単一サーバー(1 provide)でしか使えない — 2 つ目の provide で
   マージ済みの `scope["a" | "b"]` が pin された `scope["b"]` に適合せず型エラーになる。overwrite が正しいのは
   実際に request を **handle する** provider(handler 再供給、
-  [docs/2026-07-07-composability-reflection-webhook.md](2026-07-07-composability-reflection-webhook.md)
+  [docs/v0.1/records/2026-07-07-composability-reflection-webhook.md](2026-07-07-composability-reflection-webhook.md)
   §1 の `{...E, get_e2b_key}`)だけで、phantom marker の scope には union を使う。
 
   したがって tool を provide の外へ返すと、tool が引きずる `scope[URL]` を discharge する場所が
@@ -208,6 +208,6 @@ external agent serve[R, effect E](
   ランタイムの close-on-exit / requires-live-provide 規則(§3)が typed に拾う。型の穴を実行時 panic では
   なく catch 可能な `mcp.server_error` で塞ぐ、という位置づけ。
 - `auth` 直和(headers / oauth)と credential 保存契約は
-  [docs/2026-07-10-mcp-oauth.md](2026-07-10-mcp-oauth.md)、`mcp.call` + `katari mcp pull` の 3 層構成と
-  型マッピングは [docs/2026-07-10-mcp-pull.md](2026-07-10-mcp-pull.md) を参照。本ドキュメントはその
+  [docs/v0.1/records/2026-07-10-mcp-oauth.md](2026-07-10-mcp-oauth.md)、`mcp.call` + `katari mcp pull` の 3 層構成と
+  型マッピングは [docs/v0.1/records/2026-07-10-mcp-pull.md](2026-07-10-mcp-pull.md) を参照。本ドキュメントはその
   表面にスコープを被せる変更だけを扱う。

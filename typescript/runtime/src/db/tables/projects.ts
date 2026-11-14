@@ -4,7 +4,7 @@
 // `modules.hash` holding that module's IR — plus the sidecar bundle. So a deploy uploads only the
 // modules that changed, and unchanged modules are shared (one row) across versions.
 // `projects.head_snapshot_id` tracks the currently-live version (see
-// docs/2026-06-19-per-module-snapshot.md).
+// docs/v0.1/records/2026-06-19-per-module-snapshot.md).
 
 import type { IRModule, SidecarBundle } from "@katari-lang/types";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";

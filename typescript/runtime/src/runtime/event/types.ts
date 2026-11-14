@@ -1,4 +1,4 @@
-// Events: the runtime's two-layer communication model (see docs/2026-06-15-runtime-domain-model.md).
+// Events: the runtime's two-layer communication model (see docs/v0.1/records/2026-06-15-runtime-domain-model.md).
 //
 //   - Internal events stay within one instance's thread tree (thread ↔ thread):
 //       call / callAck, ask / askAck, cancel / cancelAck.

@@ -1,5 +1,5 @@
 -- | The @katari docs@ extraction: project a program's declarations into the library-API-reference
--- JSON (contract @katariDocsVersion = 1@, see @docs/2026-07-17-library-api-reference.md@).
+-- JSON (contract @katariDocsVersion = 1@, see @docs/v0.1/records/2026-07-17-library-api-reference.md@).
 --
 -- The surface type is the primary data — generics, effect rows, @of@ attributes, unions and synonym
 -- references carry information a JSON schema cannot express — so every type is emitted as a

@@ -1,4 +1,4 @@
-// The uniform-escalation contract, end to end (docs/2026-07-14-uniform-escalation-rows.md): EVERY escalate
+// The uniform-escalation contract, end to end (docs/v0.1/records/2026-07-14-uniform-escalation-rows.md): EVERY escalate
 // opens a durable raiser-owned row — a failure (panic / throw), a control escape, and a user-facing request
 // alike — and the base draws no distinction; the classification lives only at the leaf that raises and the
 // handler that resolves. The CRUX these tests pin is leak-freedom: on EVERY failure-resolution path — a

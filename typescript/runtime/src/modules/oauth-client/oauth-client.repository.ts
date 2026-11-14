@@ -1,4 +1,4 @@
-// Persistence for the `oauth_clients` registry (docs/2026-07-14-credentials-core.md Phase 2 §3): the
+// Persistence for the `oauth_clients` registry (docs/v0.1/records/2026-07-14-credentials-core.md Phase 2 §3): the
 // operator-registered OAuth clients a `configured` credential authenticates as. The repository speaks in
 // SEALED secrets (the AES-GCM envelope over `client_secret`); sealing / unsealing stays with the service,
 // so this layer is a pure row store. A `null` sealed secret is a genuine absence — a public client.

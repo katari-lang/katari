@@ -1,4 +1,4 @@
-// The runtime-hosted OAuth authorization flow (docs/2026-07-14-credentials-core.md §5 + Phase 2 §4–§6):
+// The runtime-hosted OAuth authorization flow (docs/v0.1/records/2026-07-14-credentials-core.md §5 + Phase 2 §4–§6):
 // the interactive counterpart of a `prelude.oauth.authorize` escalation, and the target of a proactive
 // login. The runtime is a continuously running server, so it hosts the whole OAuth 2.1 authorization-code +
 // PKCE flow itself (the browser only opens the URL this service mints, and returns to the runtime's public

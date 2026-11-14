@@ -2,7 +2,7 @@
 // `ExternalCallReactor` for the shared callee-call lifecycle). It makes any workflow able to call an
 // OAuth-protected API: `oauth.token(name)` reaches it as a `delegate` (an external leaf marked
 // `reactor: "oauth"`) and resolves the named credential to a usable bearer token through the credentials
-// core (`resolveToken` — docs/2026-07-14-credentials-core.md §2), the SAME resolution + refresh path the
+// core (`resolveToken` — docs/v0.1/records/2026-07-14-credentials-core.md §2), the SAME resolution + refresh path the
 // mcp transport injects its bearer through. The single operation dispatches on the resolution's outcome:
 //   - `{ token }` — settle with the token as a `string of private` value (the stdlib return type). The
 //     private marker is stamped at the wire-decode seam (`AckDecodingPayload`, like `env.get_secret`'s

@@ -49,7 +49,7 @@ export const snapshotService = {
    * A hash that is neither held nor inlined is rejected (422) — the manifest must be fully resolvable.
    *
    * The CLI's hash is trusted as an opaque content key (the runtime does not re-hash; see
-   * docs/2026-06-19-per-module-snapshot.md §5). The one integrity check available cheaply is that an
+   * docs/v0.1/records/2026-06-19-per-module-snapshot.md §5). The one integrity check available cheaply is that an
    * inlined IR for an already-held hash matches the stored bytes; a mismatch means a miscomputed hash
    * that would otherwise silently corrupt the store, so it is rejected (422) instead of dropped.
    */

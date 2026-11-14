@@ -1,4 +1,4 @@
-// The credentials core (docs/2026-07-14-credentials-core.md §1–§3): the profile-tagged credential store
+// The credentials core (docs/v0.1/records/2026-07-14-credentials-core.md §1–§3): the profile-tagged credential store
 // and the on-demand token resolution + refresh that every OAuth-protected consumer shares. A program
 // never handles token material — it names a CREDENTIAL (`mcp.oauth(name = ...)` today), whose sealed
 // value lives in the runtime's `credentials` table. This module owns the pieces around that contract that

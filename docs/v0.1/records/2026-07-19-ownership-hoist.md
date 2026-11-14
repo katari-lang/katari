@@ -21,7 +21,7 @@ blob の id は **value の外の text 平面**を通って伝播する: AI tran
   乗らなかった残りを hoist が拾う。両者は同じ caller instance に合流する(実装は release を先に走らせ、hoist は
   「まだ issuer 所有のまま = value に乗らなかった分」だけを動かす — 既存の値駆動 blob ascent は無変更)。
 - scope は対象外。closure が捕捉する scope 鎖は今も value 駆動の reachability drag のみで動く
-  (`docs/2026-06-15-runtime-domain-model.md` の Ascent 節)。hoist は blob だけ。
+  (`docs/v0.1/records/2026-06-15-runtime-domain-model.md` の Ascent 節)。hoist は blob だけ。
 
 **不変条件**: blob は観測可能な上向きイベントでのみ delegation chain を 1 段ずつ上に移動し、cancel(や failure)は
 その時点でカット位置より下にある保有分を正確に刈る。escalate の hoist は**各ホップで**適用される — 中継 instance
@@ -97,5 +97,5 @@ catcher の ref を dangling(`files.gone`)にしてしまう。
 
 ## 関連
 
-- scope の値駆動 ascent と capture 参照: `docs/2026-06-15-runtime-domain-model.md`(Ascent 節)。
-- blob ref の value 表現: `docs/2026-07-09-slim-blob-ref.md`。
+- scope の値駆動 ascent と capture 参照: `docs/v0.1/records/2026-06-15-runtime-domain-model.md`(Ascent 節)。
+- blob ref の value 表現: `docs/v0.1/records/2026-07-09-slim-blob-ref.md`。

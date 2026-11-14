@@ -243,7 +243,7 @@ pull binding には**三つの別概念**が混在しており、marker 案が�
 2. **`credentials` request**(生成・module-local): 接続 auth を tool へ配る **ambient 供給チャネル**。`connect` が
    `use handler` で serve、tool は `credentials()` で読む。discharge は handler。
 3. **`mcp.auth` 値**(`headers | oauth`)+ credentials core: 実際の**認証材料**。`oauth(name)` は
-   project-scoped credential store(SoT, `docs/2026-07-14-credentials-core.md`)が解決する名前、
+   project-scoped credential store(SoT, `docs/v0.1/records/2026-07-14-credentials-core.md`)が解決する名前、
    `headers(values)` はヘッダ材料。
 
 **marker と auth/credential は直交軸**である:
@@ -313,8 +313,8 @@ marker 案では**一切変更されない**。
 
 ### 4.5 関連
 
-- 現行スコープ設計の詳細: `docs/2026-07-11-mcp-provide.md`(phantom marker + covariance + backstop)、
-  `docs/2026-07-10-mcp-pull.md`(3 層 + 型マッピング)。
+- 現行スコープ設計の詳細: `docs/v0.1/records/2026-07-11-mcp-provide.md`(phantom marker + covariance + backstop)、
+  `docs/v0.1/records/2026-07-10-mcp-pull.md`(3 層 + 型マッピング)。
 - 汎用 scope 機構の既存 demo: `examples/playground/src/scoped.ktr`(`with_resource` = 本案 (b) の原型)。
-- boundary 原則と gap-ledger: `docs/2026-07-16-katari-boundary.md`(「組み込み = 書ける合成の効率化版」)。
-- credentials core(auth 軸の SoT): `docs/2026-07-14-credentials-core.md`。
+- boundary 原則と gap-ledger: `docs/v0.1/records/2026-07-16-katari-boundary.md`(「組み込み = 書ける合成の効率化版」)。
+- credentials core(auth 軸の SoT): `docs/v0.1/records/2026-07-14-credentials-core.md`。

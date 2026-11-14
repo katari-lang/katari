@@ -1,5 +1,5 @@
 // The wire presentation sum: the ONE place a request name becomes a rendering decision
-// (docs/2026-07-13-oauth-escalation.md §4). Every escalation is either a schema-driven `form`
+// (docs/v0.1/records/2026-07-13-oauth-escalation.md §4). Every escalation is either a schema-driven `form`
 // (the answer schema moved inside this variant) or an `oauth` authorization card carrying the
 // `{ name, url }` its flow runs against — `url` is null for a configured credential (no server URL, a
 // genuine absence). No surface downstream sniffs `prelude.oauth.authorize` itself.

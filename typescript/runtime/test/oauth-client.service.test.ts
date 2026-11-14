@@ -1,4 +1,4 @@
-// The `oauth_clients` registry as the admin API presents it (docs/2026-07-14-credentials-core.md Phase 2
+// The `oauth_clients` registry as the admin API presents it (docs/v0.1/records/2026-07-14-credentials-core.md Phase 2
 // §3): register / list / delete, with the client secret WRITE-ONLY — deposited by a PUT, sealed at rest,
 // read back only by the runtime's own token exchange / refresh, never returned over the list API. A null
 // secret is a genuine absence (a public client). Runs against the real Postgres schema (the seal + the

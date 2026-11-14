@@ -299,7 +299,7 @@ root instance が claim → root は明示削除されないので永続。
 > **更新 (2026-07-19)**: **blob** の ascent は値駆動をやめ、上向きイベント(`delegateAck` /
 > `escalate`)ごとに送信 instance の全 blob を 1 段上へ無条件 hoist する方式へ変更した(text 平面が
 > id を運ぶが所有権を運ばないため)。scope の ascent(この節の reachability drag)は無変更。詳細と
-> 境界条件は `docs/2026-07-19-ownership-hoist.md`。
+> 境界条件は `docs/v0.1/records/2026-07-19-ownership-hoist.md`。
 
 ---
 

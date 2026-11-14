@@ -451,7 +451,7 @@ function recordFieldsToJson(
  * resource, not a literal, so two uploads of the same bytes are distinct files. The one construct
  * whose equality must stay structural is a promoted large *string*; that promotion does not exist
  * yet, and its precondition is content-addressed blob ids (blobId = content hash), which makes this
- * same identity compare structural for strings too (see docs/2026-07-09-slim-blob-ref.md).
+ * same identity compare structural for strings too (see docs/v0.1/records/2026-07-09-slim-blob-ref.md).
  */
 export function valueEquals(left: Value, right: Value): boolean {
   switch (left.kind) {

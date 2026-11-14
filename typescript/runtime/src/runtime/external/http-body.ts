@@ -5,7 +5,7 @@
 // base64 strings — the REST convention). A file rides the whole way here as its slim `$katari_ref` HANDLE (the
 // value codec's wire form); only at this point does the transport read the bytes from the blob store and
 // splice them in. So nothing durable — the external-call envelope, the DB, the trace — ever carries the
-// bytes, only the handle (docs/2026-07-18-http-file-body.md).
+// bytes, only the handle (docs/v0.1/records/2026-07-18-http-file-body.md).
 //
 // The `text` variant is HTTP-shape-neutral, so a bare string body (what a hand-built request, or a caller
 // predating the sum, supplies) is treated as a `text` body too — the degenerate case of the same sum.

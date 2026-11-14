@@ -1,6 +1,6 @@
 # 入力検証は境界で — call_error は call_agent 専用、acceptance 非合致は panic(escalation 統一の続き)
 
-no-catch([docs/2026-07-14-ffi-no-catch.md](2026-07-14-ffi-no-catch.md))を拡張して確定させる。実行失敗
+no-catch([docs/v0.1/records/2026-07-14-ffi-no-catch.md](2026-07-14-ffi-no-catch.md))を拡張して確定させる。実行失敗
 (body の throw/panic)は proxy のまま。加えて **入力の形式検証(引数が agent の宣言 input schema に
 合致するか)を各境界で行い、非合致はそれぞれの境界のエラーにする**。owner の整理: 「mcp.serve /
 webhook / AI委任は同一(外部への実行依頼)。呼び出しの形式検証だけ別物」。

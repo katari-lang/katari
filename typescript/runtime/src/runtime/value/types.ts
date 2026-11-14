@@ -60,7 +60,7 @@ export type SemanticKind = "string" | "file";
  *  lives on its `blobs` row, the single source of truth, read through the actor's warm catalog
  *  where needed (the `prelude.files` prims, the download API). Nothing here is a cache an untrusted
  *  wire (an AI replaying a handle) could get wrong. Two consequences, recorded in
- *  docs/2026-07-09-slim-blob-ref.md: `==` on refs is blob IDENTITY (same blob, not same bytes), and
+ *  docs/v0.1/records/2026-07-09-slim-blob-ref.md: `==` on refs is blob IDENTITY (same blob, not same bytes), and
  *  a future large-string promotion must mint content-addressed blob ids so promoted-string equality
  *  stays structural. */
 export type BlobRefValue = {

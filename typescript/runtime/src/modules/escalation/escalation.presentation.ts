@@ -1,5 +1,5 @@
 // The wire presentation of an open escalation, folded into a sum ONCE at the service boundary
-// (docs/2026-07-14-credentials-core.md §4) — so no rendering surface (console, CLI) ever sniffs request
+// (docs/v0.1/records/2026-07-14-credentials-core.md §4) — so no rendering surface (console, CLI) ever sniffs request
 // names itself; they all dispatch on this sum.
 
 import type { JSONSchema } from "@katari-lang/types";

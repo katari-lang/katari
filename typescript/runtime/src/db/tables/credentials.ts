@@ -1,5 +1,5 @@
 // The credential store: the single source of truth for the OAuth token material a workflow authenticates
-// through (docs/2026-07-14-credentials-core.md §1). It generalizes the prototype's `mcp_credentials` table
+// through (docs/v0.1/records/2026-07-14-credentials-core.md §1). It generalizes the prototype's `mcp_credentials` table
 // into a profile-tagged store — a `profile` discriminator (`mcp` discovery+DCR, or a `configured`
 // operator-registered client) selects the ACQUISITION path, which is one variant of a common
 // store / expiry / refresh / bearer-injection machinery. A dedicated table (not an env secret) so a

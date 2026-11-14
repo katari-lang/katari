@@ -1,5 +1,5 @@
 // The `oauth_clients` registry: the operator-registered OAuth clients a `configured`-profile credential
-// authenticates as (docs/2026-07-14-credentials-core.md Phase 2 §3). A `configured` credential stores only
+// authenticates as (docs/v0.1/records/2026-07-14-credentials-core.md Phase 2 §3). A `configured` credential stores only
 // the client's NAME; its `client_id`, its (optional) sealed `client_secret`, the authorization / token
 // endpoints and the scopes live here, so a rotated client secret takes effect at the next refresh without
 // re-authorizing (the credentials core reads this registry live — `CredentialStore.resolveConfiguredClient`).

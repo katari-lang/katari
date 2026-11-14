@@ -3,7 +3,7 @@
 // encoding the compiler must emit (its `ToJSON` instances are derived against these shapes); the
 // runtime stores each `IRModule` verbatim in a content-addressed module store keyed by its content
 // hash, and a snapshot references modules by hash through a name->hash manifest (see
-// docs/2026-06-19-per-module-snapshot.md).
+// docs/v0.1/records/2026-06-19-per-module-snapshot.md).
 //
 // Encoding conventions (co-designed with the runtime):
 //   - Sum types are tagged with a `kind` discriminator.

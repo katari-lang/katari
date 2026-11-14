@@ -95,7 +95,7 @@ pin されていた挙動を新契約に合わせて書き換える(消すので
 
 - 全 runtime テスト green(書き換えた 4 本 + 新規 + 不変 invariant)。port テストも。
 - 挙動変更は §1 の通り(callee 失敗が JS で catch 不能になる)— これは意図した仕様変更。
-- `docs/2026-07-03-ffi-inner-delegation.md` の §「Reactor design」escalations 節と「The port,
+- `docs/v0.1/records/2026-07-03-ffi-inner-delegation.md` の §「Reactor design」escalations 節と「The port,
   redesigned」を新契約に更新(callee 失敗は proxy、KatariThrowError 廃止、catch は katari)。
 - typecheck / lint clean。純減を見込む(分岐 + 2 helper + port クラス + wire 消費の削除)。
 - adversarial review: 死んだ callee が cascade で必ず落ちること(leak しない)、local bad-dispatch の

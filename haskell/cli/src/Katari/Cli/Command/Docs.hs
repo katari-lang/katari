@@ -3,7 +3,7 @@
 --
 -- Resolution is offline (disk + cache only), exactly like @build@ / @check@, so the output is
 -- deterministic. The JSON contract (@katariDocsVersion = 1@) lives in "Katari.Docs" and is
--- documented in @docs/2026-07-17-library-api-reference.md@; this command is only the wiring: load,
+-- documented in @docs/v0.1/records/2026-07-17-library-api-reference.md@; this command is only the wiring: load,
 -- compile, project the root package's own modules, and print. Default output is stdout — the
 -- consumer is a generation pipeline (katari-web), not a file the project keeps.
 module Katari.Cli.Command.Docs

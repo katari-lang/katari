@@ -8,7 +8,7 @@
 // down within one batch never touches its tables — the transactional-outbox guarantee holds at the batch
 // boundary (a crash mid-batch replays the whole batch from its durable inputs). Holding all of this in one
 // place is what makes "one batch = one atomic commit" enforceable, and keeps reactors DB-free (see
-// docs/2026-06-25-reactor-persist-redesign.md).
+// docs/v0.1/records/2026-06-25-reactor-persist-redesign.md).
 //
 // Routing is self-contained: an inbound external event names its destination (`event.to`), so the substrate
 // dispatches purely by `registry[event.to]` — no api|core oracle. FFI completions and api commands are turns

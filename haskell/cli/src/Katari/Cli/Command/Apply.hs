@@ -1,6 +1,6 @@
 -- | @katari apply@ — compile the locked closure and deploy it to the runtime as a new snapshot.
 --
--- The flow follows the per-module deploy protocol (@docs\/2026-06-19-per-module-snapshot.md@ §3):
+-- The flow follows the per-module deploy protocol (@docs\/v0.1\/records\/2026-06-19-per-module-snapshot.md@ §3):
 --
 --   1. Load the closure @katari.lock@ pins, offline, refusing if it disagrees with @katari.toml@.
 --   2. Compile the assembled sources to one 'IRModule' per module.

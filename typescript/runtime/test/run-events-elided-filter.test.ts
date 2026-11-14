@@ -1,7 +1,7 @@
 // The trace's `elided` narrowing — `GET /projects/:projectId/runs/:runId/events?elided=false`, the read
 // that answers the shape of a real journal: an unserved ask is re-raised at every instance it crosses, so
 // the run's trace holds one row per HOP where the reader wants one row per logical escalation. The payload
-// already lives on the origin's row alone (docs/2026-08-03-journal-relay-elision.md); this filter is what
+// already lives on the origin's row alone (docs/v0.1/records/2026-08-03-journal-relay-elision.md); this filter is what
 // lets a reader stop seeing the copies at all.
 //
 // What must hold is that the SQL predicate and `isElided` — the projection's own answer, read off the same

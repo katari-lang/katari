@@ -1,5 +1,5 @@
 // The `credentials` repository's write semantics — the two writers with different intent
-// (docs/2026-07-14-credentials-core.md §1): the flow completion's unconditional, generation-bumping
+// (docs/v0.1/records/2026-07-14-credentials-core.md §1): the flow completion's unconditional, generation-bumping
 // `upsert` ("a new authorization always wins") and the refresh write-back's `saveWithGeneration`
 // compare-and-set (a stale rotation is refused, and never resurrects a deleted credential). The
 // generation is opaque to callers, so the tests assert its RULE — every write strictly exceeds every

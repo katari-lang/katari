@@ -1,4 +1,4 @@
-// Journal relay elision (docs/2026-08-03-journal-relay-elision.md): an ask that nobody serves is re-raised
+// Journal relay elision (docs/v0.1/records/2026-08-03-journal-relay-elision.md): an ask that nobody serves is re-raised
 // at every instance it crosses, and every hop used to journal the whole payload again — 86 copies per model
 // step on a real deployment. The engine now marks a hop that only re-raises someone else's escalation
 // (`relayOf` on the escalate, `relayed` on its ack), and the journal — and ONLY the journal — drops those

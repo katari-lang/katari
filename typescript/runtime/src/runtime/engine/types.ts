@@ -1,5 +1,5 @@
 // The in-memory engine model: Instance (a shard = one agent activation's thread tree), Thread (a
-// running block), and Scope (a lexical-binding node). See docs/2026-06-15-runtime-domain-model.md.
+// running block), and Scope (a lexical-binding node). See docs/v0.1/records/2026-06-15-runtime-domain-model.md.
 //
 // Persistence mirror: an `Instance`'s threads persist row-per-thread (`threads`, with the
 // variant-specific state in `payload`); scopes are CORE-global per project and persist row-per-scope
